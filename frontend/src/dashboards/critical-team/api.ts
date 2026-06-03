@@ -1,5 +1,6 @@
 import type {
   CriticalTeamFilterOptionsResponse,
+  CriticalTeamOverviewResponse,
   CriticalTeamSheetResponse,
   CriticalTeamSourceResponse,
   CriticalTeamSummaryResponse,
@@ -25,6 +26,13 @@ export type CriticalTeamFilters = {
   closedBy: string
   statuses: string[]
   search: string
+}
+
+export type CriticalTeamOverviewFilters = {
+  dateFrom: string
+  dateTo: string
+  submitTo: string[]
+  closedBy: string[]
 }
 
 export type CriticalTeamWorkorderColumnFilters = Partial<Record<string, string>>
@@ -54,6 +62,24 @@ export function fetchCriticalTeamSource() {
 
 export function fetchCriticalTeamSummary() {
   return apiGet<CriticalTeamSummaryResponse>('/api/critical-team/summary')
+}
+
+export function fetchCriticalTeamOverview(filters: CriticalTeamOverviewFilters) {
+  const params = new URLSearchParams()
+  if (filters.dateFrom) {
+    params.set('date_from', filters.dateFrom)
+  }
+  if (filters.dateTo) {
+    params.set('date_to', filters.dateTo)
+  }
+  for (const submitter of filters.submitTo) {
+    params.append('submit_to', submitter)
+  }
+  for (const reviewer of filters.closedBy) {
+    params.append('closed_by', reviewer)
+  }
+
+  return apiGet<CriticalTeamOverviewResponse>('/api/critical-team/overview', params)
 }
 
 export function fetchCriticalTeamFilterOptions() {

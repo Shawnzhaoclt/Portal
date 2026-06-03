@@ -39,6 +39,12 @@ CRITICAL_TEAM_WORKORDER_SORT_EXPRESSIONS = {
     "wo_closed_date": "wo_closed_date",
 }
 CRITICAL_TEAM_DEFAULT_YEARS = [str(date.today().year - 1), str(date.today().year)]
+CRITICAL_TEAM_OVERVIEW_SERIES = [
+    ("project_started", "Project Started", "project_start_date", None, "#155e75"),
+    ("inspections_completed", "Inspections Complete", "inspection_complete_date", None, "#4e79a7"),
+    ("reports_completed", "Reports Complete", "report_complete_date", None, "#f28e2b"),
+    ("review_complete", "Review Complete", "wo_closed_date", "Review Complete", "#7b5ea7"),
+]
 CRITICAL_TEAM_SHEETS = {
     "insp-proj-start-date": {
         "title": "Insp_Proj_Start_Date",
@@ -157,6 +163,67 @@ def critical_team_year_clause(
     return f"({' OR '.join(clauses)})", params
 
 
+def parse_filter_date(value: str | None) -> date | None:
+    if not value:
+        return None
+
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "Date filters must use YYYY-MM-DD format.", "value": value},
+        ) from None
+
+
+def critical_team_overview_dates(date_from: str | None, date_to: str | None) -> tuple[date | None, date | None]:
+    start = parse_filter_date(date_from)
+    end = parse_filter_date(date_to)
+
+    if start and end and start > end:
+        start, end = end, start
+
+    return start, end
+
+
+def overview_date_predicate(date_column: str) -> str:
+    date_expression = f"CAST({duck_identifier(date_column)} AS DATE)"
+    return (
+        f"{date_expression} IS NOT NULL "
+        f"AND (date_from IS NULL OR {date_expression} >= date_from) "
+        f"AND (date_to IS NULL OR {date_expression} <= date_to)"
+    )
+
+
+def overview_project_scope_predicate() -> str:
+    return (
+        "(date_from IS NULL AND date_to IS NULL) "
+        f"OR {overview_date_predicate('project_start_date')}"
+    )
+
+
+def critical_team_person_filter_sql(
+    submit_to: list[str] | None = None,
+    closed_by: list[str] | None = None,
+) -> tuple[str, list[Any]]:
+    clauses = []
+    params: list[Any] = []
+    submitters = [value for value in submit_to or [] if value]
+    reviewers = [value for value in closed_by or [] if value]
+
+    if submitters:
+        placeholders = ", ".join(["?"] * len(submitters))
+        clauses.append(f"submit_to IN ({placeholders})")
+        params.extend(submitters)
+
+    if reviewers:
+        placeholders = ", ".join(["?"] * len(reviewers))
+        clauses.append(f"wo_closed_by IN ({placeholders})")
+        params.extend(reviewers)
+
+    return (f"WHERE {' AND '.join(clauses)}" if clauses else "", params)
+
+
 def critical_team_filter_sql(
     sheet: dict[str, Any],
     year: list[str] | None = None,
@@ -243,6 +310,174 @@ def critical_team_summary() -> dict[str, Any]:
         names = [description[0] for description in con.description]
 
     return clean_record(dict(zip(names, row)))
+
+
+@router.get("/overview")
+def critical_team_overview(
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+    submit_to: list[str] | None = Query(default=None),
+    closed_by: list[str] | None = Query(default=None),
+) -> dict[str, Any]:
+    start_date, end_date = critical_team_overview_dates(date_from, date_to)
+    person_where_sql, person_params = critical_team_person_filter_sql(submit_to=submit_to, closed_by=closed_by)
+    filtered_cte = f"""
+        WITH parameters AS (
+            SELECT CAST(? AS DATE) AS date_from, CAST(? AS DATE) AS date_to
+        ),
+        filtered AS (
+            SELECT critical_team_workorders.*, parameters.date_from, parameters.date_to
+            FROM critical_team_workorders
+            CROSS JOIN parameters
+            {person_where_sql}
+        )
+    """
+    base_params: list[Any] = [
+        start_date.isoformat() if start_date else None,
+        end_date.isoformat() if end_date else None,
+        *person_params,
+    ]
+
+    with critical_team_connection() as con:
+        metric_row = con.execute(
+            f"""
+            {filtered_cte}
+            SELECT
+                COUNT(*) AS row_count,
+                COUNT(DISTINCT workorder_id) AS workorder_count,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Future Inspection Scheduled'
+                    AND ({overview_project_scope_predicate()})
+                ) AS future_inspection_scheduled,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Inspection In Progress'
+                    AND ({overview_project_scope_predicate()})
+                ) AS inspection_in_progress,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'On Hold'
+                    AND ({overview_project_scope_predicate()})
+                ) AS on_hold,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Ready For Review'
+                    AND ({overview_project_scope_predicate()})
+                ) AS ready_for_review,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Revisions Required'
+                    AND ({overview_project_scope_predicate()})
+                ) AS revisions_required,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Review Complete'
+                    AND ({overview_project_scope_predicate()})
+                ) AS review_complete
+            FROM filtered
+            """,
+            base_params,
+        ).fetchone()
+        metric_names = [description[0] for description in con.description]
+        total_row = con.execute(
+            f"""
+            {filtered_cte}
+            SELECT
+                COUNT(DISTINCT workorder_id) AS all_time_started_projects,
+                COUNT(DISTINCT workorder_id) AS all_time_scheduled_inspections,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Future Inspection Scheduled'
+                ) AS all_time_future_inspection_scheduled,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Inspection In Progress'
+                ) AS all_time_inspection_in_progress,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'On Hold'
+                ) AS all_time_on_hold,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Ready For Review'
+                ) AS all_time_ready_for_review,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Revisions Required'
+                ) AS all_time_revisions_required,
+                COUNT(DISTINCT workorder_id) FILTER (
+                    WHERE critical_team_status = 'Review Complete'
+                ) AS all_time_review_complete
+            FROM filtered
+            """,
+            base_params,
+        ).fetchone()
+        total_names = [description[0] for description in con.description]
+
+        event_selects = []
+        for series_key, series_label, date_column, status_value, color in CRITICAL_TEAM_OVERVIEW_SERIES:
+            status_sql = ""
+            if status_value:
+                status_sql = "AND critical_team_status = ?"
+            event_selects.append(
+                f"""
+                SELECT
+                    ? AS series_key,
+                    ? AS series_label,
+                    ? AS color,
+                    {duck_identifier(date_column)} AS event_date,
+                    workorder_id,
+                    date_from,
+                    date_to
+                FROM filtered
+                WHERE {duck_identifier(date_column)} IS NOT NULL
+                {status_sql}
+                """
+            )
+
+        # Parameters for each event SELECT must be in textual order.
+        ordered_event_params = []
+        for series_key, series_label, _date_column, status_value, color in CRITICAL_TEAM_OVERVIEW_SERIES:
+            ordered_event_params.extend([series_key, series_label, color])
+            if status_value:
+                ordered_event_params.append(status_value)
+
+        series_rows = con.execute(
+            f"""
+            {filtered_cte},
+            events AS (
+                {' UNION ALL '.join(event_selects)}
+            )
+            SELECT
+                series_key,
+                series_label,
+                color,
+                CAST(date_trunc('month', event_date) AS DATE) AS month_start,
+                strftime(event_date, '%Y-%m') AS month_label,
+                COUNT(DISTINCT workorder_id) AS count_value
+            FROM events
+            WHERE (date_from IS NULL OR CAST(event_date AS DATE) >= date_from)
+              AND (date_to IS NULL OR CAST(event_date AS DATE) <= date_to)
+            GROUP BY series_key, series_label, color, month_start, month_label
+            ORDER BY month_start, series_key
+            """,
+            [*base_params, *ordered_event_params],
+        ).fetchall()
+        series_names = [description[0] for description in con.description]
+
+    points_by_series: dict[str, dict[str, Any]] = {
+        series_key: {"key": series_key, "label": label, "color": color, "points": []}
+        for series_key, label, _date_column, _status_value, color in CRITICAL_TEAM_OVERVIEW_SERIES
+    }
+    for row in series_rows:
+        record = clean_record(dict(zip(series_names, row)))
+        points_by_series[record["series_key"]]["points"].append(
+            {
+                "month_start": record["month_start"],
+                "month_label": record["month_label"],
+                "count_value": record["count_value"],
+            }
+        )
+
+    return {
+        "filters": {
+            "date_from": start_date.isoformat() if start_date else "",
+            "date_to": end_date.isoformat() if end_date else "",
+        },
+        "metrics": clean_record(dict(zip(metric_names, metric_row))),
+        "totals": clean_record(dict(zip(total_names, total_row))),
+        "series": list(points_by_series.values()),
+    }
 
 
 @router.get("/filter-options")

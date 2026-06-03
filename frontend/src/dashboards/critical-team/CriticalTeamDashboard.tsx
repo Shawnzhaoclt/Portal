@@ -7,26 +7,31 @@ import type {
   CustomSeriesRenderItemParams,
   CustomSeriesRenderItemReturn,
   EChartsOption,
+  LineSeriesOption,
 } from 'echarts'
 import {
-  Activity,
   ArrowDown,
   ArrowDownUp,
   ArrowUp,
+  BadgeCheck,
   BarChart3,
-  CheckCircle2,
+  CalendarCheck,
   CalendarDays,
+  ChartLine,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
   ChevronsRight,
+  CirclePause,
+  ClipboardClock,
   ClipboardCheck,
   ClipboardList,
   Database,
   Download,
   Filter,
-  FileCheck2,
+  FilePenLine,
   Gauge,
+  LayoutDashboard,
   Search,
   Table2,
   UserRound,
@@ -48,16 +53,19 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import {
+  fetchCriticalTeamOverview,
   fetchCriticalTeamFilterOptions,
   fetchCriticalTeamSheet,
   fetchCriticalTeamSource,
   fetchCriticalTeamSummary,
   fetchCriticalTeamWorkorders,
   type CriticalTeamFilters,
+  type CriticalTeamOverviewFilters,
 } from './api'
 import type {
   AssetRow,
   CriticalTeamFilterOptionsResponse,
+  CriticalTeamOverviewResponse,
   CriticalTeamSheetResponse,
   CriticalTeamSourceResponse,
   CriticalTeamSummaryResponse,
@@ -309,8 +317,11 @@ type ChartBarSegmentLabel = {
   startValue: number
   endValue: number
   value: number
+  labelText: string
   color: string
 }
+
+type ChartViewMode = 'count' | 'percent'
 
 type PeriodLabelGroup = {
   label: string
@@ -324,6 +335,16 @@ function formatNumber(value: number | null | undefined) {
     return '—'
   }
   return new Intl.NumberFormat().format(value)
+}
+
+function formatPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return '-'
+  }
+
+  return `${new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: value > 0 && value < 1 ? 1 : 0,
+  }).format(value)}%`
 }
 
 function labelForValue(value: string) {
@@ -376,6 +397,89 @@ function formatDatePickerValue(date: Date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function dateToMonthPickerValue(value: string) {
+  return /^\d{4}-\d{2}/.test(value) ? value.slice(0, 7) : ''
+}
+
+function monthStartDate(value: string) {
+  return /^\d{4}-\d{2}$/.test(value) ? `${value}-01` : ''
+}
+
+function monthEndDate(value: string) {
+  const match = /^(\d{4})-(\d{2})$/.exec(value)
+  if (!match) return ''
+
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const lastDay = new Date(year, month, 0).getDate()
+  return `${value}-${String(lastDay).padStart(2, '0')}`
+}
+
+function formatOverviewMonth(value: string) {
+  const bucket = parseMonthBucket(dateToMonthPickerValue(value))
+  if (!bucket) return value
+  return `${MONTH_NAMES[bucket.month - 1]} ${bucket.year}`
+}
+
+function createRecentOverviewDateRange(monthCount: number) {
+  const today = new Date()
+  const endMonth = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
+  const start = new Date(today.getFullYear(), today.getMonth() - monthCount + 1, 1)
+  const startMonth = `${start.getFullYear()}-${String(start.getMonth() + 1).padStart(2, '0')}`
+
+  return {
+    dateFrom: monthStartDate(startMonth),
+    dateTo: monthEndDate(endMonth),
+  }
+}
+
+function createDefaultOverviewFilters(): CriticalTeamOverviewFilters {
+  const dateRange = createRecentOverviewDateRange(12)
+
+  return {
+    dateFrom: dateRange.dateFrom,
+    dateTo: dateRange.dateTo,
+    submitTo: [],
+    closedBy: [],
+  }
+}
+
+function monthLabelsForDateRange(dateFrom: string, dateTo: string) {
+  const startDate = parseDatePickerValue(dateFrom)
+  const endDate = parseDatePickerValue(dateTo)
+  if (!startDate || !endDate) return []
+
+  const start = new Date(startDate.getFullYear(), startDate.getMonth(), 1)
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), 1)
+  if (start > end) {
+    return monthLabelsForDateRange(dateTo, dateFrom)
+  }
+
+  const months: string[] = []
+  const cursor = new Date(start)
+  while (cursor <= end) {
+    months.push(`${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, '0')}`)
+    cursor.setMonth(cursor.getMonth() + 1)
+  }
+  return months
+}
+
+function overviewAxisLabel(value: string) {
+  const bucket = parseMonthBucket(value)
+  if (!bucket) return value
+  return MONTH_NAMES[bucket.month - 1]
+}
+
+function overviewDateRangeLabel(filters: CriticalTeamOverviewFilters, data: CriticalTeamOverviewResponse | null) {
+  const dateFrom = data?.filters.date_from ?? filters.dateFrom
+  const dateTo = data?.filters.date_to ?? filters.dateTo
+
+  if (!dateFrom && !dateTo) return 'All time'
+  if (dateFrom && dateTo) return `${formatOverviewMonth(dateFrom)} to ${formatOverviewMonth(dateTo)}`
+  if (dateFrom) return `From ${formatOverviewMonth(dateFrom)}`
+  return `Through ${formatOverviewMonth(dateTo)}`
 }
 
 function escapeXml(value: string) {
@@ -763,6 +867,7 @@ function chartBarSegmentLabels(
   groups: string[],
   lookup: Map<string, number>,
   groupColumn: 'submit_to' | 'wo_closed_by' | undefined,
+  labelText: (value: number, month: string, group: string) => string,
 ): ChartBarSegmentLabel[] {
   return months.flatMap((month, monthIndex) => {
     let stackStart = 0
@@ -774,6 +879,7 @@ function chartBarSegmentLabels(
         startValue: stackStart,
         endValue: stackStart + value,
         value,
+        labelText: labelText(value, month, group),
         color: colorForGroup(group, groupColumn, groupIndex),
       }
       stackStart += value
@@ -782,12 +888,223 @@ function chartBarSegmentLabels(
   })
 }
 
-function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption {
+function makeOverviewTrendOption(
+  data: CriticalTeamOverviewResponse | null,
+  filters: CriticalTeamOverviewFilters,
+): EChartsOption {
+  const effectiveDateFrom = data?.filters.date_from ?? filters.dateFrom
+  const effectiveDateTo = data?.filters.date_to ?? filters.dateTo
+  const monthsFromRange = monthLabelsForDateRange(effectiveDateFrom, effectiveDateTo)
+  const monthsFromData = [
+    ...new Set(data?.series.flatMap((series) => series.points.map((point) => point.month_label)) ?? []),
+  ].sort()
+  const months = monthsFromRange.length > 0 ? monthsFromRange : monthsFromData
+  const seriesList = data?.series ?? []
+  const monthBuckets = months.map(parseMonthBucket)
+  const quarterLabelGroups = periodLabelGroups(
+    monthBuckets,
+    (bucket) => `${bucket.year}-${bucket.quarter}`,
+    (bucket) => bucket.quarter,
+  )
+  const yearLabelGroups = periodLabelGroups(
+    monthBuckets,
+    (bucket) => bucket.year,
+    (bucket) => bucket.year,
+  )
+  const monthLabelInterval = months.length > 30 ? 1 : 0
+  const maxTrendValue = Math.max(0, ...seriesList.flatMap((series) => series.points.map((point) => point.count_value)))
+  const boundaryLines = chartBoundaryLines(monthBuckets, maxTrendValue)
+  const labelBandRuleSeries: CustomSeriesOption[] =
+    months.length > 0
+      ? [
+          {
+            type: 'custom',
+            name: 'Overview period label row rules',
+            coordinateSystem: 'cartesian2d',
+            xAxisIndex: 0,
+            yAxisIndex: 0,
+            silent: true,
+            clip: false,
+            z: 1,
+            data: [[0]],
+            renderItem: (params: CustomSeriesRenderItemParams, api: CustomSeriesRenderItemAPI) => {
+              const coordSys = params.coordSys as unknown as { x: number; y: number; width: number; height: number }
+              const labelBandTop = coordSys.y + coordSys.height
+              const lineColor = '#d7e0e8'
+              const x1 = coordSys.x
+              const x2 = coordSys.x + coordSys.width
+              const labelX = (group: PeriodLabelGroup) => {
+                const startX = api.coord([months[group.startIndex], 0])[0]
+                const endX = api.coord([months[group.endIndex], 0])[0]
+                return (startX + endX) / 2
+              }
+
+              return {
+                type: 'group',
+                children: [
+                  ...[24, 46, 66].map((offset) => ({
+                    type: 'line',
+                    shape: {
+                      x1,
+                      y1: labelBandTop + offset,
+                      x2,
+                      y2: labelBandTop + offset,
+                    },
+                    style: {
+                      stroke: lineColor,
+                      lineWidth: 1,
+                    },
+                  })),
+                  ...quarterLabelGroups.map((group) => ({
+                    type: 'text',
+                    style: {
+                      text: group.label,
+                      x: labelX(group),
+                      y: labelBandTop + 35,
+                      fill: '#475569',
+                      font: '700 13px Inter, system-ui, sans-serif',
+                      textAlign: 'center',
+                      textVerticalAlign: 'middle',
+                    },
+                  })),
+                  ...yearLabelGroups.map((group) => ({
+                    type: 'text',
+                    style: {
+                      text: group.label,
+                      x: labelX(group),
+                      y: labelBandTop + 57,
+                      fill: '#0f172a',
+                      font: '800 13px Inter, system-ui, sans-serif',
+                      textAlign: 'center',
+                      textVerticalAlign: 'middle',
+                    },
+                  })),
+                ],
+              } as CustomSeriesRenderItemReturn
+            },
+          },
+        ]
+      : []
+  const dividerSeries: CustomSeriesOption[] =
+    boundaryLines.length > 0
+      ? [
+          {
+            type: 'custom',
+            name: 'Overview period dividers',
+            coordinateSystem: 'cartesian2d',
+            xAxisIndex: 0,
+            yAxisIndex: 0,
+            silent: true,
+            clip: false,
+            z: 1,
+            data: boundaryLines.map((line) => [line.boundaryIndex, 0, line.yTop, line.isYearBoundary ? 1 : 0]),
+            renderItem: (params: CustomSeriesRenderItemParams, api: CustomSeriesRenderItemAPI) => {
+              const coordSys = params.coordSys as unknown as { y: number; height: number }
+              const boundaryIndex = Number(api.value(0))
+              const previousCenterX = api.coord([months[boundaryIndex - 1], 0])[0]
+              const nextCenterX = api.coord([months[boundaryIndex], 0])[0]
+              const x = (previousCenterX + nextCenterX) / 2
+              const isYearBoundary = api.value(3) === 1
+              const labelBandTop = coordSys.y + coordSys.height
+              const y0 = labelBandTop + (isYearBoundary ? 66 : 46)
+              const y1 = coordSys.y
+
+              return {
+                type: 'line',
+                shape: { x1: x, y1: y0, x2: x, y2: y1 },
+                style: {
+                  stroke: isYearBoundary ? '#64748b' : '#cfd8e3',
+                  lineWidth: isYearBoundary ? 2 : 1,
+                  lineDash: isYearBoundary ? undefined : [4, 3],
+                },
+              }
+            },
+          },
+        ]
+      : []
+  const lineSeries: LineSeriesOption[] = seriesList.map((series) => {
+    const lookup = new Map(series.points.map((point) => [point.month_label, point.count_value]))
+
+    return {
+      name: series.label,
+      type: 'line',
+      smooth: true,
+      symbol: 'circle',
+      symbolSize: 7,
+      lineStyle: { width: 3, color: series.color },
+      itemStyle: { color: series.color },
+      areaStyle: {
+        color: series.color,
+        opacity: 0.08,
+      },
+      emphasis: { focus: 'series' },
+      data: months.map((month) => lookup.get(month) ?? 0),
+    }
+  })
+
+  return {
+    color: seriesList.map((series) => series.color),
+    animationDuration: 260,
+    grid: { top: 62, right: 28, bottom: 72, left: 52, containLabel: true },
+    tooltip: { trigger: 'axis', confine: true },
+    legend: {
+      type: 'scroll',
+      top: 0,
+      right: 4,
+      itemWidth: 10,
+      itemHeight: 10,
+      data: seriesList.map((series) => series.label),
+      textStyle: { color: '#334155', fontSize: 12, fontWeight: 650 },
+      pageButtonPosition: 'end',
+      pageIconColor: '#2196f3',
+      pageIconInactiveColor: '#b7c5cf',
+    },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: months,
+      axisTick: { alignWithLabel: true },
+      axisLine: { lineStyle: { color: '#cfd8e3' } },
+      axisLabel: {
+        color: '#64748b',
+        hideOverlap: true,
+        interval: monthLabelInterval,
+        margin: 8,
+        formatter: (value: string) => overviewAxisLabel(value),
+      },
+    },
+    yAxis: {
+      type: 'value',
+      name: 'Work orders',
+      nameTextStyle: { color: '#64748b', fontWeight: 700 },
+      axisLabel: { color: '#64748b' },
+      splitLine: { lineStyle: { color: '#e4ebf1' } },
+    },
+    series: [...labelBandRuleSeries, ...dividerSeries, ...lineSeries],
+  }
+}
+
+function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: ChartViewMode = 'count'): EChartsOption {
   const rows = data?.rows ?? []
   const months = [...new Set(rows.map((row) => row.month_label))]
   const groups = [...new Set(rows.map((row) => row.group_name))]
   const lookup = new Map(rows.map((row) => [`${row.month_label}::${row.group_name}`, row.count_value]))
   const groupColumn = data?.sheet.group_column
+  const isPercentMode = viewMode === 'percent'
+  const monthTotals = new Map(
+    months.map((month) => [
+      month,
+      groups.reduce((sum, group) => sum + (lookup.get(`${month}::${group}`) ?? 0), 0),
+    ]),
+  )
+  const chartLookup = new Map<string, number>()
+  for (const month of months) {
+    const monthTotal = monthTotals.get(month) ?? 0
+    for (const group of groups) {
+      const rawValue = lookup.get(`${month}::${group}`) ?? 0
+      chartLookup.set(`${month}::${group}`, isPercentMode && monthTotal > 0 ? (rawValue / monthTotal) * 100 : rawValue)
+    }
+  }
   const monthBuckets = months.map(parseMonthBucket)
   const quarterLabelGroups = periodLabelGroups(
     monthBuckets,
@@ -803,10 +1120,17 @@ function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption 
   const legendTopSpace = groups.length > 5 ? 62 : groups.length > 2 ? 52 : 44
   const maxMonthTotal = Math.max(
     0,
-    ...months.map((month) => groups.reduce((sum, group) => sum + (lookup.get(`${month}::${group}`) ?? 0), 0)),
+    ...months.map((month) => monthTotals.get(month) ?? 0),
   )
-  const boundaryLines = chartBoundaryLines(monthBuckets, maxMonthTotal)
-  const barSegmentLabels = chartBarSegmentLabels(months, groups, lookup, groupColumn)
+  const maxChartValue = isPercentMode ? 100 : maxMonthTotal
+  const boundaryLines = chartBoundaryLines(monthBuckets, maxChartValue)
+  const barSegmentLabels = chartBarSegmentLabels(
+    months,
+    groups,
+    chartLookup,
+    groupColumn,
+    (value, month, group) => (isPercentMode ? formatPercent(value) : formatNumber(lookup.get(`${month}::${group}`) ?? 0)),
+  )
   const labelBandRuleSeries: CustomSeriesOption[] =
     months.length > 0
       ? [
@@ -932,7 +1256,7 @@ function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption 
               if (!label) return null
 
               const month = months[label.monthIndex]
-              const labelText = formatNumber(label.value)
+              const labelText = label.labelText
               const centerX = api.coord([month, 0])[0]
               const previousX =
                 label.monthIndex > 0 ? api.coord([months[label.monthIndex - 1], 0])[0] : null
@@ -978,14 +1302,47 @@ function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption 
     z: 2,
     emphasis: { focus: 'series' },
     itemStyle: { color: colorForGroup(group, groupColumn, index) },
-    data: months.map((month) => lookup.get(`${month}::${group}`) ?? 0),
+    data: months.map((month) => {
+      const rawValue = lookup.get(`${month}::${group}`) ?? 0
+      const chartValue = chartLookup.get(`${month}::${group}`) ?? 0
+
+      return isPercentMode ? { value: chartValue, rawValue, percent: chartValue } : rawValue
+    }),
   }))
+  const tooltipFormatter = (params: unknown) => {
+    const items = (Array.isArray(params) ? params : [params]) as Array<{
+      axisValue?: string
+      axisValueLabel?: string
+      data?: unknown
+      marker?: string
+      seriesName?: string
+      seriesType?: string
+      value?: unknown
+    }>
+    const barItems = items.filter((item) => item.seriesType === 'bar')
+    const firstItem = barItems[0] ?? items[0]
+    const month = String(firstItem?.axisValue ?? '')
+    const title = String(firstItem?.axisValueLabel ?? monthAxisLabel(month))
+    const lines = barItems.map((item) => {
+      const dataItem = item.data && typeof item.data === 'object' ? (item.data as Record<string, unknown>) : {}
+      const rawValue = Number(isPercentMode ? dataItem.rawValue : item.value) || 0
+      const percentValue =
+        Number(isPercentMode ? dataItem.percent : chartLookup.get(`${month}::${item.seriesName ?? ''}`)) || 0
+      const valueLabel = isPercentMode
+        ? `${formatPercent(percentValue)} (${formatNumber(rawValue)})`
+        : formatNumber(rawValue)
+
+      return `${item.marker ?? ''}${escapeXml(item.seriesName ?? '')}: <strong>${valueLabel}</strong>`
+    })
+
+    return [`<strong>${escapeXml(title)}</strong>`, ...lines].join('<br />')
+  }
 
   return {
     color: groups.map((group, index) => colorForGroup(group, groupColumn, index)),
     animationDuration: 220,
     grid: { top: legendTopSpace, right: 24, bottom: 72, left: 46, containLabel: true },
-    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true },
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' }, confine: true, formatter: tooltipFormatter },
     legend: {
       type: 'scroll',
       top: 0,
@@ -1035,9 +1392,13 @@ function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption 
     ],
     yAxis: {
       type: 'value',
-      name: 'Work orders',
+      name: isPercentMode ? 'Share of work orders' : 'Work orders',
+      max: isPercentMode ? 100 : undefined,
       nameTextStyle: { color: '#64748b', fontWeight: 700 },
-      axisLabel: { color: '#64748b' },
+      axisLabel: {
+        color: '#64748b',
+        formatter: isPercentMode ? '{value}%' : undefined,
+      },
       splitLine: { lineStyle: { color: '#e4ebf1' } },
     },
     series: [...labelBandRuleSeries, ...dividerSeries, ...barSeries, ...barLabelSeries],
@@ -1261,10 +1622,14 @@ function downloadPivotTable(title: string, data: CriticalTeamSheetResponse | nul
 }
 
 function CriticalTeamDashboard() {
-  const [selectedSheetId, setSelectedSheetId] = useState('insp-proj-start-date')
+  const [selectedSheetId, setSelectedSheetId] = useState('overview')
   const [filters, setFilters] = useState<CriticalTeamFilters>(INITIAL_FILTERS)
+  const [overviewFilters, setOverviewFilters] = useState<CriticalTeamOverviewFilters>(
+    createDefaultOverviewFilters,
+  )
   const [source, setSource] = useState<CriticalTeamSourceResponse | null>(null)
   const [summary, setSummary] = useState<CriticalTeamSummaryResponse | null>(null)
+  const [overviewData, setOverviewData] = useState<CriticalTeamOverviewResponse | null>(null)
   const [options, setOptions] = useState<CriticalTeamFilterOptionsResponse | null>(null)
   const [sheetData, setSheetData] = useState<CriticalTeamSheetResponse | null>(null)
   const [details, setDetails] = useState<CriticalTeamWorkordersResponse | null>(null)
@@ -1281,6 +1646,19 @@ function CriticalTeamDashboard() {
 
   const selectedSheet = SHEETS.find((sheet) => sheet.id === selectedSheetId) ?? SHEETS[1]
   const sheetConfig = source?.sheets[selectedSheet.id]
+
+  useEffect(() => {
+    const className = 'critical-team-overview-active'
+    const isOverview = selectedSheet.kind === 'overview'
+
+    document.documentElement.classList.toggle(className, isOverview)
+    document.body.classList.toggle(className, isOverview)
+
+    return () => {
+      document.documentElement.classList.remove(className)
+      document.body.classList.remove(className)
+    }
+  }, [selectedSheet.kind])
 
   useEffect(() => {
     let cancelled = false
@@ -1317,7 +1695,8 @@ function CriticalTeamDashboard() {
 
     const request =
       selectedSheet.kind === 'overview'
-        ? Promise.resolve(null).then(() => {
+        ? fetchCriticalTeamOverview(overviewFilters).then((response) => {
+            setOverviewData(response)
             setSheetData(null)
             setDetails(null)
           })
@@ -1334,10 +1713,12 @@ function CriticalTeamDashboard() {
             ).then((response) => {
               setDetails(response)
               setSheetData(null)
+              setOverviewData(null)
             })
           : fetchCriticalTeamSheet(selectedSheet.id, filters).then((response) => {
               setSheetData(response)
               setDetails(null)
+              setOverviewData(null)
             })
 
     request
@@ -1353,7 +1734,7 @@ function CriticalTeamDashboard() {
     return () => {
       cancelled = true
     }
-  }, [selectedSheet, filters, detailColumnFilters, detailPage, detailPageSize, detailSort])
+  }, [selectedSheet, overviewFilters, filters, detailColumnFilters, detailPage, detailPageSize, detailSort])
 
   useEffect(() => {
     if (selectedSheet.kind !== 'details' || !details) return
@@ -1375,10 +1756,21 @@ function CriticalTeamDashboard() {
     setFilters(next)
   }
 
+  function updateOverviewFilters(
+    next: CriticalTeamOverviewFilters | ((current: CriticalTeamOverviewFilters) => CriticalTeamOverviewFilters),
+  ) {
+    setOverviewFilters(next)
+  }
+
+  function resetOverviewFilters() {
+    setOverviewFilters(createDefaultOverviewFilters())
+  }
+
   function resetFiltersForSheet() {
     setDetailPage(1)
     setDetailColumnFilters(createEmptyDetailColumnFilters())
     setFilters(INITIAL_FILTERS)
+    resetOverviewFilters()
   }
 
   function updateDetailNumberFilter(column: DetailNumberColumnKey, next: Partial<DetailNumberFilter>) {
@@ -1523,6 +1915,7 @@ function CriticalTeamDashboard() {
                     setDetailColumnFilters(createEmptyDetailColumnFilters())
                     setDetailSort(DEFAULT_DETAIL_SORT)
                     setFilters(INITIAL_FILTERS)
+                    setOverviewFilters(createDefaultOverviewFilters())
                   }}
                 >
                   {sheet.kind === 'chart' ? <BarChart3 size={16} /> : null}
@@ -1553,6 +1946,7 @@ function CriticalTeamDashboard() {
           sheet={selectedSheet}
           sheetConfig={sheetConfig}
           summary={summary}
+          overviewData={overviewData}
           sheetData={sheetData}
           details={details}
           detailColumnFilters={detailColumnFilters}
@@ -1561,8 +1955,11 @@ function CriticalTeamDashboard() {
           detailSort={detailSort}
           exportingDetails={exportingDetails}
           filters={filters}
+          overviewFilters={overviewFilters}
           options={options}
           onFiltersChange={updateFilters}
+          onOverviewFiltersChange={updateOverviewFilters}
+          onClearOverviewFilters={resetOverviewFilters}
           onClearFilters={resetFiltersForSheet}
           onDetailNumberFilterChange={updateDetailNumberFilter}
           onDetailCategoryFilterChange={updateDetailCategoryFilter}
@@ -1582,6 +1979,7 @@ function SheetBody({
   sheet,
   sheetConfig,
   summary,
+  overviewData,
   sheetData,
   details,
   detailColumnFilters,
@@ -1590,8 +1988,11 @@ function SheetBody({
   detailSort,
   exportingDetails,
   filters,
+  overviewFilters,
   options,
   onFiltersChange,
+  onOverviewFiltersChange,
+  onClearOverviewFilters,
   onClearFilters,
   onDetailNumberFilterChange,
   onDetailCategoryFilterChange,
@@ -1605,6 +2006,7 @@ function SheetBody({
   sheet: SheetDefinition
   sheetConfig: CriticalTeamSourceResponse['sheets'][string] | undefined
   summary: CriticalTeamSummaryResponse | null
+  overviewData: CriticalTeamOverviewResponse | null
   sheetData: CriticalTeamSheetResponse | null
   details: CriticalTeamWorkordersResponse | null
   detailColumnFilters: DetailColumnFilters
@@ -1613,8 +2015,13 @@ function SheetBody({
   detailSort: DetailSortState
   exportingDetails: boolean
   filters: CriticalTeamFilters
+  overviewFilters: CriticalTeamOverviewFilters
   options: CriticalTeamFilterOptionsResponse | null
   onFiltersChange: (next: CriticalTeamFilters | ((current: CriticalTeamFilters) => CriticalTeamFilters)) => void
+  onOverviewFiltersChange: (
+    next: CriticalTeamOverviewFilters | ((current: CriticalTeamOverviewFilters) => CriticalTeamOverviewFilters),
+  ) => void
+  onClearOverviewFilters: () => void
   onClearFilters: () => void
   onDetailNumberFilterChange: (column: DetailNumberColumnKey, next: Partial<DetailNumberFilter>) => void
   onDetailCategoryFilterChange: (column: DetailCategoryColumnKey, values: string[]) => void
@@ -1626,6 +2033,7 @@ function SheetBody({
   onDownloadAllDetails: () => void
 }) {
   const chartRef = useRef<EChartHandle | null>(null)
+  const [chartViewMode, setChartViewMode] = useState<ChartViewMode>('count')
   const filterAction =
     sheet.kind !== 'overview' && sheet.kind !== 'details' ? (
       <FloatingFilterButton
@@ -1639,7 +2047,16 @@ function SheetBody({
     ) : null
 
   if (sheet.kind === 'overview') {
-    return <Overview summary={summary} />
+    return (
+      <Overview
+        data={overviewData}
+        fallbackSummary={summary}
+        filters={overviewFilters}
+        options={options}
+        onFiltersChange={onOverviewFiltersChange}
+        onClearFilters={onClearOverviewFilters}
+      />
+    )
   }
 
   if (sheet.kind === 'chart') {
@@ -1651,12 +2068,13 @@ function SheetBody({
           description={sheet.description}
           actions={
             <>
+              <ChartViewToggle value={chartViewMode} onChange={setChartViewMode} />
               <ChartExportButton chartRef={chartRef} title={sheet.title} />
               {filterAction}
             </>
           }
         />
-        <EChart ref={chartRef} option={makeChartOption(sheetData)} height="100%" />
+        <EChart ref={chartRef} option={makeChartOption(sheetData, chartViewMode)} height="100%" />
       </section>
     )
   }
@@ -1687,68 +2105,314 @@ function SheetBody({
 }
 
 function Overview({
-  summary,
+  data,
+  fallbackSummary,
+  filters,
+  options,
+  onFiltersChange,
+  onClearFilters,
 }: {
-  summary: CriticalTeamSummaryResponse | null
+  data: CriticalTeamOverviewResponse | null
+  fallbackSummary: CriticalTeamSummaryResponse | null
+  filters: CriticalTeamOverviewFilters
+  options: CriticalTeamFilterOptionsResponse | null
+  onFiltersChange: (
+    next: CriticalTeamOverviewFilters | ((current: CriticalTeamOverviewFilters) => CriticalTeamOverviewFilters),
+  ) => void
+  onClearFilters: () => void
 }) {
+  const overviewMetrics = data?.metrics
+  const totals = data?.totals
+  const dateRangeLabel = overviewDateRangeLabel(filters, data)
+  const totalProjects =
+    totals?.all_time_started_projects ?? fallbackSummary?.workorder_count ?? fallbackSummary?.project_started
+  const allTimeScheduledInspections = totals?.all_time_scheduled_inspections ?? totalProjects
+  const percentDenominator = Math.max(1, allTimeScheduledInspections ?? 0)
   const metrics = [
     {
-      label: 'Project Started',
-      value: summary?.project_started,
-      icon: <CalendarDays size={20} />,
+      label: 'Total Work Orders',
+      value: totalProjects,
+      totalValue: null,
+      progressValue: totalProjects,
+      icon: <ClipboardList size={20} />,
       tone: 'teal',
     },
     {
-      label: 'Inspections Complete',
-      value: summary?.inspections_completed,
-      icon: <ClipboardCheck size={20} />,
+      label: 'Inspection Scheduled',
+      value: overviewMetrics?.future_inspection_scheduled,
+      totalValue: totals?.all_time_future_inspection_scheduled,
+      progressValue: totals?.all_time_future_inspection_scheduled,
+      icon: <CalendarCheck size={20} />,
       tone: 'blue',
     },
     {
-      label: 'Reports Complete',
-      value: summary?.reports_completed,
-      icon: <FileCheck2 size={20} />,
-      tone: 'orange',
+      label: 'Inspection In Progress',
+      value: overviewMetrics?.inspection_in_progress,
+      totalValue: totals?.all_time_inspection_in_progress,
+      progressValue: totals?.all_time_inspection_in_progress,
+      icon: <ClipboardClock size={20} />,
+      tone: 'slate',
     },
     {
-      label: 'Closed',
-      value: summary?.workorders_closed,
-      icon: <CheckCircle2 size={20} />,
-      tone: 'green',
-    },
-    {
-      label: 'Ready For Review',
-      value: summary?.ready_for_review,
-      icon: <Activity size={20} />,
+      label: 'On Hold',
+      value: overviewMetrics?.on_hold,
+      totalValue: totals?.all_time_on_hold,
+      progressValue: totals?.all_time_on_hold,
+      icon: <CirclePause size={20} />,
       tone: 'violet',
     },
     {
+      label: 'Ready For Review',
+      value: overviewMetrics?.ready_for_review,
+      totalValue: totals?.all_time_ready_for_review,
+      progressValue: totals?.all_time_ready_for_review,
+      icon: <ClipboardCheck size={20} />,
+      tone: 'orange',
+    },
+    {
+      label: 'Revisions Required',
+      value: overviewMetrics?.revisions_required,
+      totalValue: totals?.all_time_revisions_required,
+      progressValue: totals?.all_time_revisions_required,
+      icon: <FilePenLine size={20} />,
+      tone: 'green',
+    },
+    {
       label: 'Review Complete',
-      value: summary?.review_complete,
-      icon: <BarChart3 size={20} />,
+      value: overviewMetrics?.review_complete,
+      totalValue: totals?.all_time_review_complete,
+      progressValue: totals?.all_time_review_complete,
+      icon: <BadgeCheck size={20} />,
       tone: 'slate',
     },
   ]
-  const maxMetric = Math.max(1, ...metrics.map((metric) => metric.value ?? 0))
 
   return (
     <div className="overview-layout">
       <section className="sheet-panel overview-panel">
-        <PanelHeader icon={<Activity size={18} />} title="Completion Profile" meta="Current" />
-        <div className="profile-grid">
+        <PanelHeader
+          icon={<LayoutDashboard size={18} />}
+          title="Overview"
+          meta={dateRangeLabel}
+          actions={
+            <OverviewFilterButton
+              filters={filters}
+              options={options}
+              onChange={onFiltersChange}
+              onClear={onClearFilters}
+            />
+          }
+        />
+        <div className="profile-grid overview-kpi-grid">
           {metrics.map((metric) => (
             <Kpi
               icon={metric.icon}
               key={metric.label}
               label={metric.label}
               tone={metric.tone}
+              totalValue={metric.totalValue}
               value={metric.value}
-              maxValue={maxMetric}
+              maxValue={percentDenominator}
+              progressValue={metric.progressValue}
             />
           ))}
         </div>
+        <div className="overview-trend-card">
+          <PanelHeader
+            icon={<ChartLine size={18} />}
+            title="Trend"
+            description="Monthly totals for project starts, inspection completions, report completions, and review completions."
+          />
+          <EChart option={makeOverviewTrendOption(data, filters)} height="100%" />
+        </div>
       </section>
     </div>
+  )
+}
+
+function OverviewFilterButton({
+  filters,
+  options,
+  onChange,
+  onClear,
+}: {
+  filters: CriticalTeamOverviewFilters
+  options: CriticalTeamFilterOptionsResponse | null
+  onChange: (
+    next: CriticalTeamOverviewFilters | ((current: CriticalTeamOverviewFilters) => CriticalTeamOverviewFilters),
+  ) => void
+  onClear: () => void
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="floating-filter-button" type="button">
+          <Filter size={14} />
+          Filters
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="filter-popover-content" align="end">
+        <OverviewFiltersPanel
+          filters={filters}
+          options={options}
+          onChange={onChange}
+          onClear={onClear}
+        />
+      </PopoverContent>
+    </Popover>
+  )
+}
+
+function OverviewFiltersPanel({
+  filters,
+  options,
+  onChange,
+  onClear,
+}: {
+  filters: CriticalTeamOverviewFilters
+  options: CriticalTeamFilterOptionsResponse | null
+  onChange: (
+    next: CriticalTeamOverviewFilters | ((current: CriticalTeamOverviewFilters) => CriticalTeamOverviewFilters),
+  ) => void
+  onClear: () => void
+}) {
+  const datePresets = [
+    { label: 'Recent 6 months', range: createRecentOverviewDateRange(6) },
+    { label: 'Recent 1 year', range: createRecentOverviewDateRange(12) },
+    { label: 'Recent 2 years', range: createRecentOverviewDateRange(24) },
+  ]
+  const isAllTime = !filters.dateFrom && !filters.dateTo
+
+  return (
+    <div className="filter-card">
+      <div className="filter-title">
+        <div>
+          <Filter size={18} />
+          <strong>Overview Filters</strong>
+        </div>
+      </div>
+
+      <div className="filter-section overview-date-range-filter">
+        <label>Date Range</label>
+        <div className="overview-date-mode">
+          {datePresets.map((preset) => {
+            const isActive = filters.dateFrom === preset.range.dateFrom && filters.dateTo === preset.range.dateTo
+
+            return (
+              <button
+                className={isActive ? 'active' : ''}
+                key={preset.label}
+                type="button"
+                onClick={() =>
+                  onChange((current) => ({
+                    ...current,
+                    dateFrom: preset.range.dateFrom,
+                    dateTo: preset.range.dateTo,
+                  }))
+                }
+              >
+                {preset.label}
+              </button>
+            )
+          })}
+          <button
+            className={isAllTime ? 'active' : ''}
+            type="button"
+            onClick={() => onChange((current) => ({ ...current, dateFrom: '', dateTo: '' }))}
+          >
+            All time
+          </button>
+        </div>
+        <div className="overview-date-range">
+          <MonthPicker
+            label="Start month"
+            value={dateToMonthPickerValue(filters.dateFrom)}
+            onChange={(month) => onChange((current) => ({ ...current, dateFrom: monthStartDate(month) }))}
+          />
+          <MonthPicker
+            label="End month"
+            value={dateToMonthPickerValue(filters.dateTo)}
+            onChange={(month) => onChange((current) => ({ ...current, dateTo: monthEndDate(month) }))}
+          />
+        </div>
+      </div>
+
+      <ChecklistFilter
+        icon={<UserRound size={15} />}
+        label="Submit To"
+        values={options?.submit_to ?? []}
+        selected={filters.submitTo}
+        allLabel="All submitters"
+        onChange={(submitTo) => onChange((current) => ({ ...current, submitTo }))}
+      />
+
+      <ChecklistFilter
+        icon={<UserRound size={15} />}
+        label="Closed By"
+        values={options?.wo_closed_by ?? []}
+        selected={filters.closedBy}
+        allLabel="All reviewers"
+        onChange={(closedBy) => onChange((current) => ({ ...current, closedBy }))}
+      />
+
+      <button className="clear-button" type="button" onClick={onClear}>
+        Reset filters
+      </button>
+    </div>
+  )
+}
+
+function ChartViewToggle({
+  value,
+  onChange,
+}: {
+  value: ChartViewMode
+  onChange: (value: ChartViewMode) => void
+}) {
+  return (
+    <div className="chart-view-toggle" aria-label="Chart view mode" role="group">
+      <button
+        className={value === 'count' ? 'active' : ''}
+        type="button"
+        aria-pressed={value === 'count'}
+        onClick={() => onChange('count')}
+      >
+        Stacked count
+      </button>
+      <button
+        className={value === 'percent' ? 'active' : ''}
+        type="button"
+        aria-pressed={value === 'percent'}
+        onClick={() => onChange('percent')}
+      >
+        100% stacked
+      </button>
+    </div>
+  )
+}
+
+function MonthPicker({
+  label,
+  value,
+  onChange,
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+}) {
+  return (
+    <label className="month-picker-control">
+      <span>{label}</span>
+      <div>
+        <CalendarDays size={14} />
+        <input
+          type="month"
+          value={value}
+          aria-label={label}
+          onChange={(event) => onChange(event.target.value)}
+        />
+      </div>
+    </label>
   )
 }
 
@@ -1816,10 +2480,10 @@ function ChartExportButton({
       </PopoverTrigger>
       <PopoverContent className="chart-export-popover" align="end">
         <Button variant="ghost" size="sm" type="button" onClick={() => exportChart('png')}>
-          PNG 300 dpi
+          PNG
         </Button>
         <Button variant="ghost" size="sm" type="button" onClick={() => exportChart('jpg')}>
-          JPG 300 dpi
+          JPG
         </Button>
       </PopoverContent>
     </Popover>
@@ -1934,27 +2598,44 @@ function Kpi({
   icon,
   label,
   maxValue,
+  progressValue,
   tone,
+  totalValue,
   value,
 }: {
   icon: ReactNode
   label: string
   maxValue: number
+  progressValue?: number | null
   tone: string
+  totalValue?: number | null
   value: number | null | undefined
 }) {
   const numericValue = value ?? 0
-  const progress = Math.max(0, Math.min(100, (numericValue / maxValue) * 100))
+  const numericProgressValue = progressValue ?? numericValue
+  const progress = Math.max(0, Math.min(100, (numericProgressValue / maxValue) * 100))
+  const progressDegrees = progress * 3.6
 
   return (
     <div className={`kpi kpi-${tone}`}>
       <div className="kpi-icon">{icon}</div>
       <div className="kpi-copy">
         <span>{label}</span>
-        <strong>{formatNumber(value)}</strong>
+        <div className="kpi-value">
+          <strong>{formatNumber(value)}</strong>
+          {totalValue !== null && totalValue !== undefined ? (
+            <small>/ {formatNumber(totalValue)}</small>
+          ) : null}
+        </div>
       </div>
-      <div className="kpi-bar" aria-hidden="true">
-        <span style={{ width: `${progress}%` }} />
+      <div
+        className="kpi-progress-ring"
+        style={{
+          background: `conic-gradient(var(--kpi-color) ${progressDegrees}deg, rgba(221, 230, 241, 0.86) 0deg)`,
+        }}
+        aria-label={`${Math.round(progress)} percent of all-time scheduled inspections`}
+      >
+        <span>{Math.round(progress)}%</span>
       </div>
     </div>
   )

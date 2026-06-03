@@ -29,40 +29,40 @@
 }
 
 :root {
-  --bg: #f5f7fa;
-  --surface: #ffffff;
-  --surface-muted: #f0f4f7;
-  --border: #d9e1e8;
-  --border-strong: #bcc9d4;
-  --text: #1f2933;
-  --muted: #647484;
-  --subtle: #8795a1;
-  --teal: #1f6f8b;
-  --teal-soft: #e2f2f5;
+  --bg: #f7edf8;
+  --surface: rgba(255, 255, 255, 0.72);
+  --surface-muted: rgba(255, 255, 255, 0.46);
+  --border: rgba(187, 201, 221, 0.68);
+  --border-strong: rgba(112, 130, 154, 0.58);
+  --text: #172033;
+  --muted: #667184;
+  --subtle: #8a96a7;
+  --teal: #1c7fa1;
+  --teal-soft: #e3f6fb;
   --indigo: #4f46e5;
   --amber: #b7791f;
   --danger: #b42318;
   --danger-soft: #fff1f0;
-  --shadow: 0 10px 30px rgba(28, 41, 56, 0.08);
-  --radius: 8px;
+  --shadow: 0 24px 60px rgba(69, 65, 112, 0.14), 0 8px 24px rgba(24, 52, 88, 0.08);
+  --radius: 14px;
   --font: Inter, ui-sans-serif, system-ui, "Segoe UI", Roboto, Arial, sans-serif;
-  --background: #ffffff;
-  --foreground: #1f2933;
-  --card: #ffffff;
-  --card-foreground: #1f2933;
-  --popover: #ffffff;
-  --popover-foreground: #1f2933;
-  --primary: #155e75;
+  --background: #fbf5fb;
+  --foreground: #172033;
+  --card: rgba(255, 255, 255, 0.74);
+  --card-foreground: #172033;
+  --popover: rgba(255, 255, 255, 0.9);
+  --popover-foreground: #172033;
+  --primary: #2196f3;
   --primary-foreground: #f8fafc;
-  --secondary: #eaf5f7;
-  --secondary-foreground: #155e75;
-  --muted-bg: #f3f6f8;
-  --muted-foreground: #647484;
-  --accent: #eaf5f7;
-  --accent-foreground: #155e75;
+  --secondary: #eef7ff;
+  --secondary-foreground: #1769aa;
+  --muted-bg: rgba(255, 255, 255, 0.54);
+  --muted-foreground: #667184;
+  --accent: #eef7ff;
+  --accent-foreground: #1769aa;
   --destructive: #b42318;
-  --input: #d9e1e8;
-  --ring: #155e75;
+  --input: rgba(187, 201, 221, 0.68);
+  --ring: #2196f3;
 
   font-family: var(--font);
   color: var(--text);
@@ -80,6 +80,21 @@
 body {
   margin: 0;
   min-width: 320px;
+  background:
+    linear-gradient(135deg, #ffd7bd 0%, #fbe4dd 30%, #eddfff 63%, #d7c9ff 100%);
+  background-attachment: fixed;
+}
+
+html.critical-team-overview-active,
+html.critical-team-overview-active body {
+  height: 100%;
+  overflow: hidden;
+}
+
+html.critical-team-overview-active #root {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 button,

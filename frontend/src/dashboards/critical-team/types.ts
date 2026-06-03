@@ -41,6 +41,49 @@ export type CriticalTeamSummaryResponse = {
   review_complete: number
 }
 
+export type CriticalTeamOverviewPoint = {
+  month_start: string
+  month_label: string
+  count_value: number
+}
+
+export type CriticalTeamOverviewSeries = {
+  key: string
+  label: string
+  color: string
+  points: CriticalTeamOverviewPoint[]
+}
+
+export type CriticalTeamOverviewMetrics = {
+  row_count: number
+  workorder_count: number
+  future_inspection_scheduled: number
+  inspection_in_progress: number
+  on_hold: number
+  ready_for_review: number
+  revisions_required: number
+  review_complete: number
+}
+
+export type CriticalTeamOverviewResponse = {
+  filters: {
+    date_from: string
+    date_to: string
+  }
+  metrics: CriticalTeamOverviewMetrics
+  totals: {
+    all_time_started_projects: number
+    all_time_scheduled_inspections: number
+    all_time_future_inspection_scheduled: number
+    all_time_inspection_in_progress: number
+    all_time_on_hold: number
+    all_time_ready_for_review: number
+    all_time_revisions_required: number
+    all_time_review_complete: number
+  }
+  series: CriticalTeamOverviewSeries[]
+}
+
 export type CriticalTeamFilterOptionsResponse = {
   submit_to: string[]
   wo_closed_by: string[]
