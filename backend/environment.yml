@@ -1,0 +1,36 @@
+name: arf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  # API backend
+  - fastapi
+  - uvicorn
+  - sqlalchemy
+  - alembic
+  - pydantic-settings
+  - python-dotenv
+  - pytest
+  - httpx
+  - python-multipart
+  - email-validator
+  # Tabular files: CSV, Excel
+  - numpy
+  - pandas
+  - openpyxl
+  - xlrd
+  # DuckDB and Parquet/GeoParquet
+  - duckdb
+  - pyarrow
+  # Vector geospatial: GeoParquet, GeoJSON, shapefiles, etc.
+  - geopandas
+  - shapely
+  - pyogrio
+  - geojson
+  # Raster geospatial: GeoTIFF and Cloud Optimized GeoTIFF
+  - rasterio
+  - rioxarray
+  - xarray
+  # SQL Server connectivity; also install Microsoft ODBC Driver 18 for SQL Server.
+  - pyodbc

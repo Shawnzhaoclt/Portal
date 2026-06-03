@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Critical Team Dashboard">
+  <rect width="64" height="64" rx="14" fill="#ffffff"/>
+  <path d="M15.8 47.5a25 25 0 1 1 32.4 0" fill="none" stroke="#505a66" stroke-width="7" stroke-linecap="butt"/>
+  <path d="M33.4 33.1 47.6 18.9" stroke="#505a66" stroke-width="7" stroke-linecap="square"/>
+  <circle cx="32" cy="34" r="8" fill="#505a66"/>
+  <rect x="22" y="47" width="20" height="6" fill="#505a66"/>
+</svg>

@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Logs
+*.log
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.vite-temp/
+frontend/node_modules/.tmp/
+
+# Local/generated dashboard data
+frontend/data/*.duckdb
+frontend/public/data/*.json
+
+# Environment/local editor files
+*.local
+.env
+.env.*
+.vscode/
+.idea/
+.DS_Store
