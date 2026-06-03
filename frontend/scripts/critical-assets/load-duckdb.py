@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -10,17 +11,22 @@ from typing import Any
 import duckdb
 
 
-DEFAULT_SOURCE_DIR = Path(
-    r"G:\Strategic Planning\Planning\Dashboards\critical_asset_tracking"
-)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_DATA_SOURCES_CONFIG = PROJECT_ROOT / "backend" / "app" / "config" / "data_sources.json"
 DEFAULT_OUTPUT_DB = Path(__file__).resolve().parents[2] / "data" / "critical_asset_tracking.duckdb"
 DEFAULT_EXPORT_JSON = Path(__file__).resolve().parents[2] / "public" / "data" / "critical-assets.json"
 
-SOURCES = {
-    "test_data_multiple_merge": "test_data_multiple_merge.csv",
-    "test_data_pipes_merge": "test_data_pipes_merge.csv",
-    "test_data_structures_merge": "test_data_structures_merge.csv",
-}
+
+def data_sources_config_path() -> Path:
+    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
+
+
+def critical_assets_source_config() -> dict[str, Any]:
+    with data_sources_config_path().open(encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    return config["critical_assets"]
+
 
 WORKSHEETS = [
     "Clog Risk Facility Aggregate (Pipes)",
@@ -103,14 +109,16 @@ def sql_string(value: str) -> str:
 
 
 def parse_args() -> argparse.Namespace:
+    source_config = critical_assets_source_config()
+    source_dir = Path(source_config["source_dir"])
     parser = argparse.ArgumentParser(
         description="Load the critical asset tracking Tableau CSV extracts into DuckDB.",
     )
     parser.add_argument(
         "--source-dir",
         type=Path,
-        default=DEFAULT_SOURCE_DIR,
-        help=f"Directory containing the Tableau CSV source files. Default: {DEFAULT_SOURCE_DIR}",
+        default=source_dir,
+        help="Directory containing the Tableau CSV source files. Default comes from backend/app/config/data_sources.json.",
     )
     parser.add_argument(
         "--output-db",
@@ -127,11 +135,11 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def require_source_files(source_dir: Path) -> dict[str, Path]:
+def require_source_files(source_dir: Path, source_files: dict[str, str]) -> dict[str, Path]:
     missing = []
     paths = {}
 
-    for table_name, filename in SOURCES.items():
+    for table_name, filename in source_files.items():
         path = source_dir / filename
         if not path.exists():
             missing.append(str(path))
@@ -348,13 +356,14 @@ def export_app_dataset(con: duckdb.DuckDBPyConnection, export_path: Path) -> Non
 
 
 def main() -> None:
+    source_config = critical_assets_source_config()
     args = parse_args()
     source_dir = args.source_dir.resolve()
     output_db = args.output_db.resolve()
     export_json = args.export_json.resolve()
     output_db.parent.mkdir(parents=True, exist_ok=True)
 
-    source_paths = require_source_files(source_dir)
+    source_paths = require_source_files(source_dir, source_config["files"])
 
     if output_db.exists():
         output_db.unlink()

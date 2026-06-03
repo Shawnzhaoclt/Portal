@@ -1,0 +1,27 @@
+{
+  "critical_team": {
+    "source_type": "sqlserver",
+    "workbook": "Critical_Team_Dashboard.twbx",
+    "server": "myrs-cwdbprd-1",
+    "database": "swpt_cityworks_db",
+    "schema": "azteca",
+    "tables": {
+      "workorder": "WORKORDER",
+      "wocustfield": "WOCUSTFIELD"
+    },
+    "description_filter": "Critical Asset Inspection",
+    "trusted_connection": true,
+    "encrypt": true,
+    "trust_server_certificate": true,
+    "timeout_seconds": 30
+  },
+  "critical_assets": {
+    "source_type": "csv",
+    "source_dir": "G:\\Strategic Planning\\Planning\\Dashboards\\critical_asset_tracking",
+    "files": {
+      "test_data_multiple_merge": "test_data_multiple_merge.csv",
+      "test_data_pipes_merge": "test_data_pipes_merge.csv",
+      "test_data_structures_merge": "test_data_structures_merge.csv"
+    }
+  }
+}

@@ -1,0 +1,124 @@
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+import pyodbc
+from fastapi import HTTPException
+
+from backend.app.core.paths import PROJECT_ROOT
+
+
+DEFAULT_DATA_SOURCES_CONFIG = PROJECT_ROOT / "backend" / "app" / "config" / "data_sources.json"
+
+
+@dataclass(frozen=True)
+class CriticalTeamDataSource:
+    source_type: str
+    workbook: str
+    server: str
+    database: str
+    schema: str
+    workorder_table: str
+    wocustfield_table: str
+    description_filter: str
+    trusted_connection: bool
+    encrypt: bool
+    trust_server_certificate: bool
+    timeout_seconds: int
+
+    @property
+    def source_tables(self) -> str:
+        return f"{self.schema}.{self.workorder_table} + {self.schema}.{self.wocustfield_table}"
+
+
+def data_sources_config_path() -> Path:
+    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
+
+
+@lru_cache(maxsize=1)
+def load_data_sources_config() -> dict[str, Any]:
+    path = data_sources_config_path()
+    if not path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "ARF data source config file was not found.",
+                "path": str(path),
+            },
+        )
+
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "ARF data source config file is not valid JSON.",
+                "path": str(path),
+                "error": str(error),
+            },
+        ) from error
+
+
+def critical_team_data_source() -> CriticalTeamDataSource:
+    config = load_data_sources_config().get("critical_team")
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=503,
+            detail={"message": "Missing `critical_team` datasource config."},
+        )
+
+    tables = config.get("tables") if isinstance(config.get("tables"), dict) else {}
+    return CriticalTeamDataSource(
+        source_type=str(config.get("source_type", "sqlserver")),
+        workbook=str(config.get("workbook", "")),
+        server=str(config.get("server", "")),
+        database=str(config.get("database", "")),
+        schema=str(config.get("schema", "")),
+        workorder_table=str(tables.get("workorder", "")),
+        wocustfield_table=str(tables.get("wocustfield", "")),
+        description_filter=str(config.get("description_filter", "")),
+        trusted_connection=bool(config.get("trusted_connection", True)),
+        encrypt=bool(config.get("encrypt", True)),
+        trust_server_certificate=bool(config.get("trust_server_certificate", True)),
+        timeout_seconds=int(config.get("timeout_seconds", 30)),
+    )
+
+
+def selected_sql_server_driver() -> str:
+    configured_driver = os.getenv("ARF_SQL_DRIVER")
+    if configured_driver:
+        return configured_driver
+
+    drivers = list(pyodbc.drivers())
+    for preferred in ("ODBC Driver 18 for SQL Server", "ODBC Driver 17 for SQL Server", "SQL Server"):
+        if preferred in drivers:
+            return preferred
+
+    return "ODBC Driver 18 for SQL Server"
+
+
+def critical_team_connection_string(source: CriticalTeamDataSource | None = None) -> str:
+    configured = os.getenv("ARF_CRITICAL_TEAM_CONNECTION_STRING")
+    if configured:
+        return configured
+
+    source = source or critical_team_data_source()
+    trusted_connection = "yes" if source.trusted_connection else "no"
+    encrypt = "yes" if source.encrypt else "no"
+    trust_server_certificate = "yes" if source.trust_server_certificate else "no"
+
+    return (
+        f"Driver={{{selected_sql_server_driver()}}};"
+        f"Server={source.server};"
+        f"Database={source.database};"
+        f"Trusted_Connection={trusted_connection};"
+        f"Encrypt={encrypt};"
+        f"TrustServerCertificate={trust_server_certificate};"
+    )

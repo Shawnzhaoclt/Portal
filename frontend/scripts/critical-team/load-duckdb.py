@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,12 +11,32 @@ import pandas as pd
 import pyodbc
 
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_DATA_SOURCES_CONFIG = PROJECT_ROOT / "backend" / "app" / "config" / "data_sources.json"
 DEFAULT_OUTPUT_DB = Path(__file__).resolve().parents[2] / "data" / "critical_team_dashboard.duckdb"
-DEFAULT_SQL_SERVER = "myrs-cwdbprd-1"
-DEFAULT_SQL_DATABASE = "swpt_cityworks_db"
+
+
+def data_sources_config_path() -> Path:
+    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
+
+
+def critical_team_source_config() -> dict:
+    with data_sources_config_path().open(encoding="utf-8") as config_file:
+        config = json.load(config_file)
+    return config["critical_team"]
+
+
+def bracket_identifier(identifier: str) -> str:
+    return f"[{identifier.replace(']', ']]')}]"
+
+
+def qualified_table_name(schema: str, table: str) -> str:
+    return f"{bracket_identifier(schema)}.{bracket_identifier(table)}"
 
 
 def parse_args() -> argparse.Namespace:
+    source_config = critical_team_source_config()
     parser = argparse.ArgumentParser(
         description="Load the Critical Team Tableau workbook source data into DuckDB.",
     )
@@ -27,13 +48,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--server",
-        default=os.getenv("ARF_CITYWORKS_SERVER", DEFAULT_SQL_SERVER),
-        help=f"Cityworks SQL Server. Default: {DEFAULT_SQL_SERVER}",
+        default=os.getenv("ARF_CITYWORKS_SERVER", source_config["server"]),
+        help="Cityworks SQL Server. Default comes from backend/app/config/data_sources.json.",
     )
     parser.add_argument(
         "--database",
-        default=os.getenv("ARF_CITYWORKS_DATABASE", DEFAULT_SQL_DATABASE),
-        help=f"Cityworks SQL database. Default: {DEFAULT_SQL_DATABASE}",
+        default=os.getenv("ARF_CITYWORKS_DATABASE", source_config["database"]),
+        help="Cityworks SQL database. Default comes from backend/app/config/data_sources.json.",
     )
     return parser.parse_args()
 
@@ -66,8 +87,11 @@ def connection_string(server: str, database: str) -> str:
     )
 
 
-def read_workorders(server: str, database: str) -> pd.DataFrame:
-    query = """
+def read_workorders(server: str, database: str, source_config: dict) -> pd.DataFrame:
+    schema = source_config["schema"]
+    workorder_table = qualified_table_name(schema, source_config["tables"]["workorder"])
+    wocustfield_table = qualified_table_name(schema, source_config["tables"]["wocustfield"])
+    query = f"""
     WITH custom_fields AS (
         SELECT
             WORKORDERID,
@@ -76,7 +100,7 @@ def read_workorders(server: str, database: str) -> pd.DataFrame:
             MAX(CASE WHEN CUSTFIELDID = 7 THEN TRY_CONVERT(date, NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '')) END) AS INSP_COMP_DATE,
             MAX(CASE WHEN CUSTFIELDID = 10 THEN TRY_CONVERT(date, NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '')) END) AS REPORT_COMP_DATE,
             MAX(CASE WHEN CUSTFIELDID = 17 THEN NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '') END) AS CRITICAL_TEAM_STATUS
-        FROM azteca.WOCUSTFIELD
+        FROM {wocustfield_table}
         WHERE CUSTFIELDID IN (6, 7, 10, 17)
         GROUP BY WORKORDERID
     )
@@ -93,17 +117,17 @@ def read_workorders(server: str, database: str) -> pd.DataFrame:
         cf.INSP_COMP_DATE,
         cf.REPORT_COMP_DATE,
         cf.CRITICAL_TEAM_STATUS
-    FROM azteca.WORKORDER AS wo
+    FROM {workorder_table} AS wo
     LEFT JOIN custom_fields AS cf
         ON cf.WORKORDERID = wo.WORKORDERID
-    WHERE wo.DESCRIPTION = 'Critical Asset Inspection'
+    WHERE wo.DESCRIPTION = ?
     """
 
     with pyodbc.connect(connection_string(server, database), timeout=20) as connection:
-        return pd.read_sql_query(query, connection)
+        return pd.read_sql_query(query, connection, params=[source_config["description_filter"]])
 
 
-def write_duckdb(df: pd.DataFrame, output_db: Path, server: str, database: str) -> None:
+def write_duckdb(df: pd.DataFrame, output_db: Path, server: str, database: str, source_config: dict) -> None:
     output_db.parent.mkdir(parents=True, exist_ok=True)
     if output_db.exists():
         output_db.unlink()
@@ -134,15 +158,22 @@ def write_duckdb(df: pd.DataFrame, output_db: Path, server: str, database: str) 
             """
             CREATE TABLE critical_team_metadata AS
             SELECT
-                'Critical_Team_Dashboard.twbx'::VARCHAR AS workbook,
+                ?::VARCHAR AS workbook,
                 ?::VARCHAR AS source_server,
                 ?::VARCHAR AS source_database,
-                'azteca.WORKORDER + azteca.WOCUSTFIELD'::VARCHAR AS source_tables,
+                ?::VARCHAR AS source_tables,
                 COUNT(*)::BIGINT AS row_count,
                 ?::VARCHAR AS imported_at_utc
             FROM critical_team_workorders
             """,
-            [server, database, imported_at],
+            [
+                source_config["workbook"],
+                server,
+                database,
+                f"{source_config['schema']}.{source_config['tables']['workorder']} + "
+                f"{source_config['schema']}.{source_config['tables']['wocustfield']}",
+                imported_at,
+            ],
         )
         for column in (
             "workorder_id",
@@ -160,10 +191,11 @@ def write_duckdb(df: pd.DataFrame, output_db: Path, server: str, database: str) 
 
 
 def main() -> None:
+    source_config = critical_team_source_config()
     args = parse_args()
     output_db = args.output_db.resolve()
-    df = read_workorders(args.server, args.database)
-    write_duckdb(df, output_db, args.server, args.database)
+    df = read_workorders(args.server, args.database, source_config)
+    write_duckdb(df, output_db, args.server, args.database, source_config)
     print(f"Created {output_db}")
     print(f"- critical_team_workorders: {len(df):,} rows")
 

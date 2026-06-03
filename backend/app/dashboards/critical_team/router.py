@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-import os
-from datetime import date
-from pathlib import Path
+from datetime import date, datetime, timezone
 from typing import Any
 
-import duckdb
+import pyodbc
 from fastapi import APIRouter, HTTPException, Query
 
-from backend.app.core.paths import PROJECT_ROOT
+from backend.app.core.data_sources import (
+    CriticalTeamDataSource,
+    critical_team_connection_string,
+    critical_team_data_source,
+)
 from backend.app.core.records import clean_record
-from backend.app.core.sql import duck_identifier
+from backend.app.core.sql import bracket_identifier, qualified_table_name
 
 
 router = APIRouter(prefix="/api/critical-team", tags=["critical-team"])
 
-CRITICAL_TEAM_DB = Path(
-    os.getenv(
-        "ARF_CRITICAL_TEAM_DB",
-        PROJECT_ROOT / "frontend" / "data" / "critical_team_dashboard.duckdb",
-    )
-)
 CRITICAL_TEAM_DATE_COLUMNS = {
     "project_start": "project_start_date",
     "inspection_complete": "inspection_complete_date",
@@ -29,7 +25,7 @@ CRITICAL_TEAM_DATE_COLUMNS = {
 }
 CRITICAL_TEAM_WORKORDER_SORT_EXPRESSIONS = {
     "workorder_id": "workorders_id",
-    "facility_id": "TRY_CAST(facility_id AS BIGINT)",
+    "facility_id": "TRY_CONVERT(BIGINT, facility_id)",
     "submit_to": "submit_to",
     "wo_closed_by": "wo_closed_by",
     "critical_team_status": "critical_team_status",
@@ -112,18 +108,109 @@ CRITICAL_TEAM_SHEETS = {
 }
 
 
-def critical_team_connection() -> duckdb.DuckDBPyConnection:
-    if not CRITICAL_TEAM_DB.exists():
+CRITICAL_TEAM_COLUMNS = [
+    ("workorder_id", "varchar"),
+    ("workorders_id", "bigint"),
+    ("description", "varchar"),
+    ("submit_to", "varchar"),
+    ("wo_closed_by", "varchar"),
+    ("status", "varchar"),
+    ("project_start_date", "datetime2"),
+    ("wo_closed_date", "datetime2"),
+    ("facility_id", "varchar"),
+    ("inspection_complete_date", "date"),
+    ("report_complete_date", "date"),
+    ("critical_team_status", "varchar"),
+]
+
+
+def sql_identifier(identifier: str) -> str:
+    return bracket_identifier(identifier)
+
+
+def critical_team_connection() -> pyodbc.Connection:
+    source = critical_team_data_source()
+    if source.source_type.lower() != "sqlserver":
         raise HTTPException(
             status_code=503,
             detail={
-                "message": "Critical Team DuckDB database was not found.",
-                "path": str(CRITICAL_TEAM_DB),
-                "hint": "Run `pnpm ingest:critical-team` from the frontend directory.",
+                "message": "Critical Team datasource must be configured as SQL Server.",
+                "source_type": source.source_type,
             },
         )
 
-    return duckdb.connect(str(CRITICAL_TEAM_DB), read_only=True)
+    try:
+        return pyodbc.connect(
+            critical_team_connection_string(source),
+            timeout=source.timeout_seconds,
+        )
+    except pyodbc.Error as error:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": "Could not connect to the Critical Team SQL Server datasource.",
+                "server": source.server,
+                "database": source.database,
+                "error": str(error),
+            },
+        ) from error
+
+
+def critical_team_source_cte(source: CriticalTeamDataSource | None = None) -> str:
+    source = source or critical_team_data_source()
+    workorder_table = qualified_table_name(source.schema, source.workorder_table)
+    wocustfield_table = qualified_table_name(source.schema, source.wocustfield_table)
+
+    return f"""
+        WITH custom_fields AS (
+            SELECT
+                WORKORDERID,
+                MAX(WORKORDERSID) AS WORKORDERSID,
+                MAX(CASE WHEN CUSTFIELDID = 6 THEN NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '') END) AS FACILITY_ID,
+                MAX(CASE WHEN CUSTFIELDID = 7 THEN TRY_CONVERT(date, NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '')) END) AS INSP_COMP_DATE,
+                MAX(CASE WHEN CUSTFIELDID = 10 THEN TRY_CONVERT(date, NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '')) END) AS REPORT_COMP_DATE,
+                MAX(CASE WHEN CUSTFIELDID = 17 THEN NULLIF(LTRIM(RTRIM(CUSTFIELDVALUE)), '') END) AS CRITICAL_TEAM_STATUS
+            FROM {wocustfield_table}
+            WHERE CUSTFIELDID IN (6, 7, 10, 17)
+            GROUP BY WORKORDERID
+        ),
+        critical_team_workorders AS (
+            SELECT
+                CAST(wo.WORKORDERID AS varchar(64)) AS workorder_id,
+                TRY_CONVERT(bigint, cf.WORKORDERSID) AS workorders_id,
+                CAST(wo.DESCRIPTION AS varchar(255)) AS description,
+                CAST(wo.SUBMITTO AS varchar(255)) AS submit_to,
+                CAST(wo.WOCLOSEDBY AS varchar(255)) AS wo_closed_by,
+                CAST(wo.STATUS AS varchar(255)) AS status,
+                TRY_CONVERT(datetime2, wo.PROJSTARTDATE) AS project_start_date,
+                TRY_CONVERT(datetime2, wo.DATEWOCLOSED) AS wo_closed_date,
+                CAST(cf.FACILITY_ID AS varchar(255)) AS facility_id,
+                TRY_CONVERT(date, cf.INSP_COMP_DATE) AS inspection_complete_date,
+                TRY_CONVERT(date, cf.REPORT_COMP_DATE) AS report_complete_date,
+                CAST(cf.CRITICAL_TEAM_STATUS AS varchar(255)) AS critical_team_status
+            FROM {workorder_table} AS wo
+            LEFT JOIN custom_fields AS cf
+                ON cf.WORKORDERID = wo.WORKORDERID
+            WHERE wo.DESCRIPTION = ?
+        )
+    """
+
+
+def critical_team_base_params(source: CriticalTeamDataSource | None = None) -> list[Any]:
+    source = source or critical_team_data_source()
+    return [source.description_filter]
+
+
+def fetch_all(cursor: pyodbc.Cursor, sql: str, params: list[Any] | None = None) -> tuple[list[str], list[Any]]:
+    cursor.execute(sql, params or [])
+    names = [description[0] for description in cursor.description]
+    return names, cursor.fetchall()
+
+
+def fetch_one(cursor: pyodbc.Cursor, sql: str, params: list[Any] | None = None) -> tuple[list[str], Any]:
+    cursor.execute(sql, params or [])
+    names = [description[0] for description in cursor.description]
+    return names, cursor.fetchone()
 
 
 def critical_team_sheet(sheet_id: str) -> dict[str, Any]:
@@ -155,10 +242,10 @@ def critical_team_year_clause(
 
     if numeric_years:
         placeholders = ", ".join(["?"] * len(numeric_years))
-        clauses.append(f"EXTRACT(year FROM {duck_identifier(date_column)}) IN ({placeholders})")
+        clauses.append(f"YEAR({sql_identifier(date_column)}) IN ({placeholders})")
         params.extend(numeric_years)
     if include_null:
-        clauses.append(f"{duck_identifier(date_column)} IS NULL")
+        clauses.append(f"{sql_identifier(date_column)} IS NULL")
 
     return f"({' OR '.join(clauses)})", params
 
@@ -187,7 +274,7 @@ def critical_team_overview_dates(date_from: str | None, date_to: str | None) -> 
 
 
 def overview_date_predicate(date_column: str) -> str:
-    date_expression = f"CAST({duck_identifier(date_column)} AS DATE)"
+    date_expression = f"CAST({sql_identifier(date_column)} AS DATE)"
     return (
         f"{date_expression} IS NOT NULL "
         f"AND (date_from IS NULL OR {date_expression} >= date_from) "
@@ -260,31 +347,40 @@ def critical_team_filter_sql(
 
     if sheet.get("exclude_blank_group"):
         group_column = sheet["group_column"]
-        clauses.append(f"NULLIF(TRIM({duck_identifier(group_column)}), '') IS NOT NULL")
+        clauses.append(f"NULLIF(TRIM({sql_identifier(group_column)}), '') IS NOT NULL")
 
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", params)
 
 
 @router.get("/source")
 def critical_team_source() -> dict[str, Any]:
+    source = critical_team_data_source()
     with critical_team_connection() as con:
-        metadata_row = con.execute("SELECT * FROM critical_team_metadata").fetchone()
-        metadata_names = [description[0] for description in con.description]
+        cursor = con.cursor()
+        row_count = cursor.execute(
+            f"""
+            {critical_team_source_cte(source)}
+            SELECT COUNT(*) AS row_count
+            FROM critical_team_workorders
+            """,
+            critical_team_base_params(source),
+        ).fetchone()[0]
         columns = [
-            {"name": name, "data_type": data_type, "ordinal_position": ordinal_position}
-            for name, data_type, ordinal_position in con.execute(
-                """
-                SELECT column_name, data_type, ordinal_position
-                FROM information_schema.columns
-                WHERE table_schema = 'main' AND table_name = 'critical_team_workorders'
-                ORDER BY ordinal_position
-                """
-            ).fetchall()
+            {"name": name, "data_type": data_type, "ordinal_position": index + 1}
+            for index, (name, data_type) in enumerate(CRITICAL_TEAM_COLUMNS)
         ]
+        metadata = {
+            "workbook": source.workbook,
+            "source_server": source.server,
+            "source_database": source.database,
+            "source_tables": source.source_tables,
+            "row_count": row_count,
+            "imported_at_utc": datetime.now(timezone.utc).isoformat(),
+        }
 
     return {
-        "database": str(CRITICAL_TEAM_DB),
-        "metadata": clean_record(dict(zip(metadata_names, metadata_row))),
+        "database": f"sqlserver://{source.server}/{source.database}",
+        "metadata": clean_record(metadata),
         "columns": columns,
         "sheets": CRITICAL_TEAM_SHEETS,
     }
@@ -292,22 +388,26 @@ def critical_team_source() -> dict[str, Any]:
 
 @router.get("/summary")
 def critical_team_summary() -> dict[str, Any]:
+    source = critical_team_data_source()
     with critical_team_connection() as con:
-        row = con.execute(
+        cursor = con.cursor()
+        names, row = fetch_one(
+            cursor,
             """
+            {source_cte}
             SELECT
                 COUNT(*) AS row_count,
                 COUNT(DISTINCT workorder_id) AS workorder_count,
-                COUNT(*) FILTER (WHERE project_start_date IS NOT NULL) AS project_started,
-                COUNT(*) FILTER (WHERE inspection_complete_date IS NOT NULL) AS inspections_completed,
-                COUNT(*) FILTER (WHERE report_complete_date IS NOT NULL) AS reports_completed,
-                COUNT(*) FILTER (WHERE wo_closed_date IS NOT NULL) AS workorders_closed,
-                COUNT(*) FILTER (WHERE critical_team_status = 'Ready For Review') AS ready_for_review,
-                COUNT(*) FILTER (WHERE critical_team_status = 'Review Complete') AS review_complete
+                SUM(CASE WHEN project_start_date IS NOT NULL THEN 1 ELSE 0 END) AS project_started,
+                SUM(CASE WHEN inspection_complete_date IS NOT NULL THEN 1 ELSE 0 END) AS inspections_completed,
+                SUM(CASE WHEN report_complete_date IS NOT NULL THEN 1 ELSE 0 END) AS reports_completed,
+                SUM(CASE WHEN wo_closed_date IS NOT NULL THEN 1 ELSE 0 END) AS workorders_closed,
+                SUM(CASE WHEN critical_team_status = 'Ready For Review' THEN 1 ELSE 0 END) AS ready_for_review,
+                SUM(CASE WHEN critical_team_status = 'Review Complete' THEN 1 ELSE 0 END) AS review_complete
             FROM critical_team_workorders
-            """
-        ).fetchone()
-        names = [description[0] for description in con.description]
+            """.format(source_cte=critical_team_source_cte(source)),
+            critical_team_base_params(source),
+        )
 
     return clean_record(dict(zip(names, row)))
 
@@ -319,10 +419,12 @@ def critical_team_overview(
     submit_to: list[str] | None = Query(default=None),
     closed_by: list[str] | None = Query(default=None),
 ) -> dict[str, Any]:
+    source = critical_team_data_source()
     start_date, end_date = critical_team_overview_dates(date_from, date_to)
     person_where_sql, person_params = critical_team_person_filter_sql(submit_to=submit_to, closed_by=closed_by)
     filtered_cte = f"""
-        WITH parameters AS (
+        {critical_team_source_cte(source)},
+        parameters AS (
             SELECT CAST(? AS DATE) AS date_from, CAST(? AS DATE) AS date_to
         ),
         filtered AS (
@@ -333,76 +435,72 @@ def critical_team_overview(
         )
     """
     base_params: list[Any] = [
+        *critical_team_base_params(source),
         start_date.isoformat() if start_date else None,
         end_date.isoformat() if end_date else None,
         *person_params,
     ]
 
     with critical_team_connection() as con:
-        metric_row = con.execute(
+        cursor = con.cursor()
+        metric_names, metric_row = fetch_one(
+            cursor,
             f"""
             {filtered_cte}
             SELECT
                 COUNT(*) AS row_count,
                 COUNT(DISTINCT workorder_id) AS workorder_count,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Future Inspection Scheduled'
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'Future Inspection Scheduled'
                     AND ({overview_project_scope_predicate()})
-                ) AS future_inspection_scheduled,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Inspection In Progress'
+                    THEN workorder_id
+                END) AS future_inspection_scheduled,
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'Inspection In Progress'
                     AND ({overview_project_scope_predicate()})
-                ) AS inspection_in_progress,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'On Hold'
+                    THEN workorder_id
+                END) AS inspection_in_progress,
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'On Hold'
                     AND ({overview_project_scope_predicate()})
-                ) AS on_hold,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Ready For Review'
+                    THEN workorder_id
+                END) AS on_hold,
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'Ready For Review'
                     AND ({overview_project_scope_predicate()})
-                ) AS ready_for_review,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Revisions Required'
+                    THEN workorder_id
+                END) AS ready_for_review,
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'Revisions Required'
                     AND ({overview_project_scope_predicate()})
-                ) AS revisions_required,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Review Complete'
+                    THEN workorder_id
+                END) AS revisions_required,
+                COUNT(DISTINCT CASE
+                    WHEN critical_team_status = 'Review Complete'
                     AND ({overview_project_scope_predicate()})
-                ) AS review_complete
+                    THEN workorder_id
+                END) AS review_complete
             FROM filtered
             """,
             base_params,
-        ).fetchone()
-        metric_names = [description[0] for description in con.description]
-        total_row = con.execute(
+        )
+        total_names, total_row = fetch_one(
+            cursor,
             f"""
             {filtered_cte}
             SELECT
                 COUNT(DISTINCT workorder_id) AS all_time_started_projects,
                 COUNT(DISTINCT workorder_id) AS all_time_scheduled_inspections,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Future Inspection Scheduled'
-                ) AS all_time_future_inspection_scheduled,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Inspection In Progress'
-                ) AS all_time_inspection_in_progress,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'On Hold'
-                ) AS all_time_on_hold,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Ready For Review'
-                ) AS all_time_ready_for_review,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Revisions Required'
-                ) AS all_time_revisions_required,
-                COUNT(DISTINCT workorder_id) FILTER (
-                    WHERE critical_team_status = 'Review Complete'
-                ) AS all_time_review_complete
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Future Inspection Scheduled' THEN workorder_id END) AS all_time_future_inspection_scheduled,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Inspection In Progress' THEN workorder_id END) AS all_time_inspection_in_progress,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'On Hold' THEN workorder_id END) AS all_time_on_hold,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Ready For Review' THEN workorder_id END) AS all_time_ready_for_review,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Revisions Required' THEN workorder_id END) AS all_time_revisions_required,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Review Complete' THEN workorder_id END) AS all_time_review_complete
             FROM filtered
             """,
             base_params,
-        ).fetchone()
-        total_names = [description[0] for description in con.description]
+        )
 
         event_selects = []
         for series_key, series_label, date_column, status_value, color in CRITICAL_TEAM_OVERVIEW_SERIES:
@@ -415,12 +513,12 @@ def critical_team_overview(
                     ? AS series_key,
                     ? AS series_label,
                     ? AS color,
-                    {duck_identifier(date_column)} AS event_date,
+                    {sql_identifier(date_column)} AS event_date,
                     workorder_id,
                     date_from,
                     date_to
                 FROM filtered
-                WHERE {duck_identifier(date_column)} IS NOT NULL
+                WHERE {sql_identifier(date_column)} IS NOT NULL
                 {status_sql}
                 """
             )
@@ -432,7 +530,8 @@ def critical_team_overview(
             if status_value:
                 ordered_event_params.append(status_value)
 
-        series_rows = con.execute(
+        series_names, series_rows = fetch_all(
+            cursor,
             f"""
             {filtered_cte},
             events AS (
@@ -442,18 +541,22 @@ def critical_team_overview(
                 series_key,
                 series_label,
                 color,
-                CAST(date_trunc('month', event_date) AS DATE) AS month_start,
-                strftime(event_date, '%Y-%m') AS month_label,
+                DATEFROMPARTS(YEAR(event_date), MONTH(event_date), 1) AS month_start,
+                CONVERT(char(7), event_date, 120) AS month_label,
                 COUNT(DISTINCT workorder_id) AS count_value
             FROM events
             WHERE (date_from IS NULL OR CAST(event_date AS DATE) >= date_from)
               AND (date_to IS NULL OR CAST(event_date AS DATE) <= date_to)
-            GROUP BY series_key, series_label, color, month_start, month_label
+            GROUP BY
+                series_key,
+                series_label,
+                color,
+                DATEFROMPARTS(YEAR(event_date), MONTH(event_date), 1),
+                CONVERT(char(7), event_date, 120)
             ORDER BY month_start, series_key
             """,
             [*base_params, *ordered_event_params],
-        ).fetchall()
-        series_names = [description[0] for description in con.description]
+        )
 
     points_by_series: dict[str, dict[str, Any]] = {
         series_key: {"key": series_key, "label": label, "color": color, "points": []}
@@ -482,32 +585,44 @@ def critical_team_overview(
 
 @router.get("/filter-options")
 def critical_team_filter_options() -> dict[str, Any]:
+    source = critical_team_data_source()
     with critical_team_connection() as con:
+        cursor = con.cursor()
 
         def values(column: str) -> list[Any]:
-            rows = con.execute(
+            _names, rows = fetch_all(
+                cursor,
                 f"""
-                SELECT DISTINCT {duck_identifier(column)} AS value
+                {critical_team_source_cte(source)}
+                SELECT DISTINCT {sql_identifier(column)} AS value
                 FROM critical_team_workorders
-                WHERE NULLIF(TRIM(CAST({duck_identifier(column)} AS VARCHAR)), '') IS NOT NULL
+                WHERE NULLIF(LTRIM(RTRIM(CAST({sql_identifier(column)} AS varchar(4000)))), '') IS NOT NULL
                 ORDER BY value
-                """
-            ).fetchall()
+                """,
+                critical_team_base_params(source),
+            )
             return [clean_record({"value": row[0]})["value"] for row in rows]
 
         years = {}
         for key, column in CRITICAL_TEAM_DATE_COLUMNS.items():
-            rows = con.execute(
+            _names, rows = fetch_all(
+                cursor,
                 f"""
-                SELECT DISTINCT EXTRACT(year FROM {duck_identifier(column)}) AS value
+                {critical_team_source_cte(source)}
+                SELECT DISTINCT YEAR({sql_identifier(column)}) AS value
                 FROM critical_team_workorders
-                WHERE {duck_identifier(column)} IS NOT NULL
+                WHERE {sql_identifier(column)} IS NOT NULL
                 ORDER BY value
-                """
-            ).fetchall()
+                """,
+                critical_team_base_params(source),
+            )
             years[key] = [str(int(row[0])) for row in rows if row[0] is not None]
-            null_count = con.execute(
-                f"SELECT COUNT(*) FROM critical_team_workorders WHERE {duck_identifier(column)} IS NULL"
+            null_count = cursor.execute(
+                f"""
+                {critical_team_source_cte(source)}
+                SELECT COUNT(*) FROM critical_team_workorders WHERE {sql_identifier(column)} IS NULL
+                """,
+                critical_team_base_params(source),
             ).fetchone()[0]
             if null_count:
                 years[key] = ["null", *years[key]]
@@ -529,6 +644,7 @@ def critical_team_sheet_data(
     status: list[str] | None = Query(default=None),
     tableau_defaults: bool = Query(default=True),
 ) -> dict[str, Any]:
+    source = critical_team_data_source()
     sheet = critical_team_sheet(sheet_id)
     date_column = CRITICAL_TEAM_DATE_COLUMNS[sheet["date_key"]]
     group_column = sheet["group_column"]
@@ -542,27 +658,40 @@ def critical_team_sheet_data(
     )
 
     with critical_team_connection() as con:
-        rows = con.execute(
+        cursor = con.cursor()
+        month_start_expression = (
+            f"CASE WHEN {sql_identifier(date_column)} IS NULL THEN NULL "
+            f"ELSE DATEFROMPARTS(YEAR({sql_identifier(date_column)}), MONTH({sql_identifier(date_column)}), 1) END"
+        )
+        month_label_expression = (
+            f"CASE WHEN {sql_identifier(date_column)} IS NULL THEN 'No Date' "
+            f"ELSE CONVERT(char(7), {sql_identifier(date_column)}, 120) END"
+        )
+        group_expression = (
+            f"COALESCE(NULLIF(LTRIM(RTRIM(CAST({sql_identifier(group_column)} AS varchar(4000)))), ''), 'Unassigned')"
+        )
+        names, rows = fetch_all(
+            cursor,
             f"""
+            {critical_team_source_cte(source)}
             SELECT
-                CASE
-                    WHEN {duck_identifier(date_column)} IS NULL THEN NULL
-                    ELSE CAST(date_trunc('month', {duck_identifier(date_column)}) AS DATE)
-                END AS month_start,
-                CASE
-                    WHEN {duck_identifier(date_column)} IS NULL THEN 'No Date'
-                    ELSE strftime({duck_identifier(date_column)}, '%Y-%m')
-                END AS month_label,
-                COALESCE(NULLIF(TRIM(CAST({duck_identifier(group_column)} AS VARCHAR)), ''), 'Unassigned') AS group_name,
+                {month_start_expression} AS month_start,
+                {month_label_expression} AS month_label,
+                {group_expression} AS group_name,
                 COUNT(DISTINCT workorder_id) AS count_value
             FROM critical_team_workorders
             {where_sql}
-            GROUP BY month_start, month_label, group_name
-            ORDER BY month_start NULLS FIRST, group_name
+            GROUP BY
+                {month_start_expression},
+                {month_label_expression},
+                {group_expression}
+            ORDER BY
+                CASE WHEN {month_start_expression} IS NULL THEN 0 ELSE 1 END,
+                {month_start_expression},
+                {group_expression}
             """,
-            params,
-        ).fetchall()
-        names = [description[0] for description in con.description]
+            [*critical_team_base_params(source), *params],
+        )
 
     return {
         "sheet_id": sheet_id,
@@ -603,6 +732,7 @@ def critical_team_workorders(
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
+    source = critical_team_data_source()
     clauses = []
     params: list[Any] = []
 
@@ -629,13 +759,13 @@ def critical_team_workorders(
         if not selected:
             return
         placeholders = ", ".join(["?"] * len(selected))
-        clauses.append(f"{duck_identifier(column)} IN ({placeholders})")
+        clauses.append(f"{sql_identifier(column)} IN ({placeholders})")
         params.extend(selected)
 
     def add_date_filter(column: str, mode: str, date_from: str | None, date_to: str | None) -> None:
         start_date = date_from.strip() if date_from else ""
         end_date = date_to.strip() if date_to else ""
-        date_expression = f"CAST({duck_identifier(column)} AS DATE)"
+        date_expression = f"CAST({sql_identifier(column)} AS DATE)"
 
         if mode == "exact" and start_date:
             clauses.append(f"{date_expression} = CAST(? AS DATE)")
@@ -658,10 +788,10 @@ def critical_team_workorders(
         clauses.append(
             """
             (
-                workorder_id ILIKE ?
-                OR facility_id ILIKE ?
-                OR submit_to ILIKE ?
-                OR wo_closed_by ILIKE ?
+                CAST(workorder_id AS varchar(4000)) LIKE ?
+                OR CAST(facility_id AS varchar(4000)) LIKE ?
+                OR CAST(submit_to AS varchar(4000)) LIKE ?
+                OR CAST(wo_closed_by AS varchar(4000)) LIKE ?
             )
             """
         )
@@ -682,7 +812,7 @@ def critical_team_workorders(
             params.extend(statuses)
 
     add_number_filter("workorders_id", workorder_id_mode, workorder_id_from, workorder_id_to)
-    add_number_filter("TRY_CAST(facility_id AS BIGINT)", facility_id_mode, facility_id_from, facility_id_to)
+    add_number_filter("TRY_CONVERT(BIGINT, facility_id)", facility_id_mode, facility_id_from, facility_id_to)
     add_category_filter("submit_to", submit_to_filter)
     add_category_filter("wo_closed_by", wo_closed_by_filter)
     add_category_filter("critical_team_status", critical_team_status_filter)
@@ -716,11 +846,18 @@ def critical_team_workorders(
     tie_breaker = tie_breakers.get(sort_by, ", workorders_id")
 
     with critical_team_connection() as con:
-        total = int(
-            con.execute(f"SELECT COUNT(*) FROM critical_team_workorders {where_sql}", params).fetchone()[0]
-        )
-        rows = con.execute(
+        cursor = con.cursor()
+        total = int(cursor.execute(
             f"""
+            {critical_team_source_cte(source)}
+            SELECT COUNT(*) FROM critical_team_workorders {where_sql}
+            """,
+            [*critical_team_base_params(source), *params],
+        ).fetchone()[0])
+        names, rows = fetch_all(
+            cursor,
+            f"""
+            {critical_team_source_cte(source)}
             SELECT
                 workorder_id,
                 workorders_id,
@@ -735,12 +872,13 @@ def critical_team_workorders(
                 wo_closed_date
             FROM critical_team_workorders
             {where_sql}
-            ORDER BY {order_expression} {direction} NULLS LAST{tie_breaker}
-            LIMIT ? OFFSET ?
+            ORDER BY
+                CASE WHEN {order_expression} IS NULL THEN 1 ELSE 0 END,
+                {order_expression} {direction}{tie_breaker}
+            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
             """,
-            [*params, limit, offset],
-        ).fetchall()
-        names = [description[0] for description in con.description]
+            [*critical_team_base_params(source), *params, offset, limit],
+        )
 
     return {
         "total": total,
