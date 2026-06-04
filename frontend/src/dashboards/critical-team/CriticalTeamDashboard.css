@@ -3,7 +3,7 @@
   grid-template-columns: 282px minmax(0, 1fr);
   gap: 16px;
   width: min(1880px, 100%);
-  height: 100vh;
+  height: 100dvh;
   margin: 0 auto;
   padding: 16px;
   overflow: hidden;
@@ -20,7 +20,7 @@
 .left-nav {
   position: sticky;
   top: 16px;
-  height: calc(100vh - 32px);
+  height: calc(100dvh - 32px);
   overflow: auto;
 }
 
@@ -124,7 +124,7 @@
 .sheet-canvas {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 32px);
+  height: calc(100dvh - 32px);
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -761,7 +761,50 @@ table {
 }
 
 .detail-table {
-  min-width: 1760px;
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.detail-table th,
+.detail-table td {
+  max-width: 0;
+  padding: 7px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detail-table .sort-button {
+  min-width: 0;
+  white-space: nowrap;
+  gap: 3px;
+  font-size: 11.5px;
+}
+
+.detail-table .sort-button span {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.detail-table .sort-button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.detail-table .date-filter-cell,
+.detail-table .number-filter-cell {
+  min-width: 0;
+}
+
+.detail-table .column-filter-select,
+.detail-table .date-picker-trigger,
+.detail-table .number-filter-input,
+.detail-table .multi-filter-trigger {
+  min-width: 0;
+  height: 28px;
+  padding-inline: 7px;
 }
 
 .matrix-table th:not(:first-child),
@@ -1210,7 +1253,7 @@ tbody tr:hover {
   grid-template-columns: 272px minmax(0, 1fr);
   gap: 18px;
   width: min(1840px, calc(100% - 48px));
-  height: calc(100vh - 48px);
+  height: calc(100dvh - 48px);
   margin: 24px auto;
   padding: 18px;
   border: 1px solid rgba(255, 255, 255, 0.72);
@@ -1806,7 +1849,7 @@ td {
   .workbook-shell.detail-mode {
     grid-template-columns: 248px minmax(0, 1fr);
     width: calc(100% - 24px);
-    height: calc(100vh - 24px);
+    height: calc(100dvh - 24px);
     margin: 12px auto;
     padding: 12px;
     border-radius: 24px;
@@ -1825,33 +1868,37 @@ td {
   .workbook-shell,
   .workbook-shell.overview-mode,
   .workbook-shell.detail-mode {
+    display: grid;
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
     width: 100%;
-    height: auto;
-    min-height: 100vh;
+    height: 100dvh;
+    min-height: 0;
     margin: 0;
     padding: 10px;
     border-radius: 0;
-    overflow: visible;
+    overflow: hidden;
   }
 
   .left-nav {
     position: static;
-    height: auto;
+    max-height: 168px;
+    overflow: auto;
     border-radius: 18px;
   }
 
   .sheet-canvas {
-    height: auto;
-    overflow: visible;
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
   }
 
   .chart-panel {
-    min-height: 420px;
+    min-height: 0;
   }
 
   .overview-panel {
-    overflow: visible;
+    overflow: hidden;
   }
 
   .overview-kpi-grid {
@@ -1859,7 +1906,7 @@ td {
   }
 
   .overview-trend-card {
-    min-height: 440px;
+    min-height: 0;
   }
 }
 

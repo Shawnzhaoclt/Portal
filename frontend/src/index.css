@@ -85,13 +85,13 @@ body {
   background-attachment: fixed;
 }
 
-html.critical-team-overview-active,
-html.critical-team-overview-active body {
+html.critical-team-dashboard-active,
+html.critical-team-dashboard-active body {
   height: 100%;
   overflow: hidden;
 }
 
-html.critical-team-overview-active #root {
+html.critical-team-dashboard-active #root {
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
@@ -114,4 +114,10 @@ button:disabled {
 
 #root {
   min-height: 100vh;
+}
+
+html.critical-team-dashboard-active #root {
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
 }

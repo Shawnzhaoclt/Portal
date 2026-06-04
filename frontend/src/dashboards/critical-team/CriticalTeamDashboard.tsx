@@ -86,15 +86,15 @@ type SheetDefinition = {
 }
 
 const DETAIL_COLUMNS = [
-  { key: 'workorder_id', label: 'Work Order ID', placeholder: 'ID' },
-  { key: 'facility_id', label: 'Facility ID', placeholder: 'Facility' },
-  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter' },
-  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer' },
-  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status' },
-  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD' },
-  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD' },
-  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD' },
-  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD' },
+  { key: 'workorder_id', label: 'Work Order ID', placeholder: 'ID', width: '8%' },
+  { key: 'facility_id', label: 'Facility ID', placeholder: 'Facility', width: '7%' },
+  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter', width: '9%' },
+  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer', width: '9%' },
+  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status', width: '20%' },
+  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD', width: '12%' },
+  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD', width: '14%' },
+  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD', width: '13%' },
+  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD', width: '9%' },
 ] as const
 
 type DetailColumnKey = (typeof DETAIL_COLUMNS)[number]['key']
@@ -1648,15 +1648,18 @@ function CriticalTeamDashboard() {
   const sheetConfig = source?.sheets[selectedSheet.id]
 
   useEffect(() => {
-    const className = 'critical-team-overview-active'
+    const dashboardClassName = 'critical-team-dashboard-active'
+    const overviewClassName = 'critical-team-overview-active'
     const isOverview = selectedSheet.kind === 'overview'
 
-    document.documentElement.classList.toggle(className, isOverview)
-    document.body.classList.toggle(className, isOverview)
+    document.documentElement.classList.add(dashboardClassName)
+    document.body.classList.add(dashboardClassName)
+    document.documentElement.classList.toggle(overviewClassName, isOverview)
+    document.body.classList.toggle(overviewClassName, isOverview)
 
     return () => {
-      document.documentElement.classList.remove(className)
-      document.body.classList.remove(className)
+      document.documentElement.classList.remove(dashboardClassName, overviewClassName)
+      document.body.classList.remove(dashboardClassName, overviewClassName)
     }
   }, [selectedSheet.kind])
 
@@ -3302,6 +3305,11 @@ function DetailTable({
       </div>
       <div className="table-wrap">
         <table className="detail-table">
+          <colgroup>
+            {DETAIL_COLUMNS.map((column) => (
+              <col key={column.key} style={{ width: column.width }} />
+            ))}
+          </colgroup>
           <thead>
             <tr>
               {DETAIL_COLUMNS.map((column) => (
@@ -3352,9 +3360,14 @@ function DetailTable({
                   onClick={() => setSelectedDetailRow(rowKey)}
                   onKeyDown={(event) => handleDetailRowKeyDown(event, rowKey)}
                 >
-                  {DETAIL_COLUMNS.map((column) => (
-                    <td key={column.key}>{valueText(row[column.key])}</td>
-                  ))}
+                  {DETAIL_COLUMNS.map((column) => {
+                    const text = valueText(row[column.key])
+                    return (
+                      <td key={column.key} title={text}>
+                        {text}
+                      </td>
+                    )
+                  })}
                 </tr>
               )
             })}
