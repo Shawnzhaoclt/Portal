@@ -35,13 +35,25 @@ export type RangeFilter = {
   max: string
 }
 
+export type DateRangeFilter = {
+  from: string
+  to: string
+}
+
+export type TableColumnFilters = {
+  numeric: Record<string, RangeFilter>
+  dates: Record<string, DateRangeFilter>
+  text: Record<string, string>
+  multi: Record<string, string[]>
+}
+
 export type FilterState = {
   search: string
   facilityId: string
   assetId: string
   inspectionCount: string
   inspectionDate: string
-  material: string
+  material: string[]
   streetWater: BooleanFilterValue
   mostRecent: BooleanFilterValue
   numeric: Record<string, RangeFilter>
@@ -92,6 +104,9 @@ export type FilterOptionsResponse = {
       inspection_dates: string[]
       materials: CellValue[]
       street_water: CellValue[]
+      numeric_ranges?: Record<string, { min: number | null; max: number | null }>
+      date_ranges?: Record<string, { min: string | null; max: string | null }>
+      checklist_values?: Record<string, CellValue[]>
     }
   >
   numeric_filters: Record<string, string>

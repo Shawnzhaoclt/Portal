@@ -16,12 +16,13 @@
     "timeout_seconds": 30
   },
   "critical_assets": {
-    "source_type": "csv",
-    "source_dir": "G:\\Strategic Planning\\Planning\\Dashboards\\critical_asset_tracking",
-    "files": {
-      "test_data_multiple_merge": "test_data_multiple_merge.csv",
-      "test_data_pipes_merge": "test_data_pipes_merge.csv",
-      "test_data_structures_merge": "test_data_structures_merge.csv"
+    "source_type": "duckdb",
+    "workbook": "critical_asset_tracking_pilot.twbx",
+    "database": "G:\\Strategic Planning\\Planning\\stm_risk_data_opt_test\\intermediate\\amteam\\amteam.duckdb",
+    "tables": {
+      "both": "CRITICAL_ASSET_TRACKING_MULTIPLE",
+      "pipes": "CRITICAL_ASSET_TRACKING_PIPES",
+      "structures": "CRITICAL_ASSET_TRACKING_STRUCTURES"
     }
   }
 }

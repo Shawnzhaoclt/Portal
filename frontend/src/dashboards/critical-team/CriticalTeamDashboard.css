@@ -769,7 +769,8 @@ table {
 .detail-table th,
 .detail-table td {
   max-width: 0;
-  padding: 7px 8px;
+  padding: 4px 7px;
+  line-height: 1.14;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -803,7 +804,7 @@ table {
 .detail-table .number-filter-input,
 .detail-table .multi-filter-trigger {
   min-width: 0;
-  height: 28px;
+  height: 24px;
   padding-inline: 7px;
 }
 
@@ -900,7 +901,8 @@ thead {
 th,
 td {
   border-bottom: 1px solid var(--border);
-  padding: 8px 10px;
+  padding: 4px 8px;
+  line-height: 1.14;
   text-align: left;
   white-space: nowrap;
 }
@@ -1059,7 +1061,7 @@ tbody tr:hover {
 }
 
 .column-filter-row th {
-  padding: 5px 6px 7px;
+  padding: 3px 5px 4px;
   background: #e4eef2;
 }
 
@@ -1091,7 +1093,7 @@ tbody tr:hover {
 }
 
 .number-filter-input {
-  height: 30px;
+  height: 24px;
   font-size: 12px;
 }
 

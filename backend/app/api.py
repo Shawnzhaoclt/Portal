@@ -5,6 +5,7 @@ import sys
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
+from backend.app.dashboards.critical_assets import router as critical_assets_router
 from backend.app.dashboards.critical_team import router as critical_team_router
 from backend.app.diagnostics.routes import router as diagnostics_router
 
@@ -17,6 +18,7 @@ app = FastAPI(
 )
 
 app.include_router(critical_team_router)
+app.include_router(critical_assets_router)
 app.include_router(diagnostics_router)
 
 

@@ -36,6 +36,18 @@ class CriticalTeamDataSource:
         return f"{self.schema}.{self.workorder_table} + {self.schema}.{self.wocustfield_table}"
 
 
+@dataclass(frozen=True)
+class CriticalAssetsDataSource:
+    source_type: str
+    workbook: str
+    database: Path
+    tables: dict[str, str]
+
+    @property
+    def source_tables(self) -> str:
+        return ", ".join(self.tables.values())
+
+
 def data_sources_config_path() -> Path:
     configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
     return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
@@ -88,6 +100,27 @@ def critical_team_data_source() -> CriticalTeamDataSource:
         encrypt=bool(config.get("encrypt", True)),
         trust_server_certificate=bool(config.get("trust_server_certificate", True)),
         timeout_seconds=int(config.get("timeout_seconds", 30)),
+    )
+
+
+def critical_assets_data_source() -> CriticalAssetsDataSource:
+    config = load_data_sources_config().get("critical_assets")
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=503,
+            detail={"message": "Missing `critical_assets` datasource config."},
+        )
+
+    tables = config.get("tables") if isinstance(config.get("tables"), dict) else {}
+    return CriticalAssetsDataSource(
+        source_type=str(config.get("source_type", "duckdb")),
+        workbook=str(config.get("workbook", "")),
+        database=Path(str(config.get("database", ""))),
+        tables={
+            "both": str(tables.get("both", "")),
+            "pipes": str(tables.get("pipes", "")),
+            "structures": str(tables.get("structures", "")),
+        },
     )
 
 

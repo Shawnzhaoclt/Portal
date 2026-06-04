@@ -7,6 +7,7 @@
   SourceKey,
   SourceResponse,
   SummaryResponse,
+  TableColumnFilters,
   TableResponse,
 } from './types'
 
@@ -65,8 +66,10 @@ export function paramsFromFilters(filters: FilterState): URLSearchParams {
   if (filters.inspectionDate.trim()) {
     params.set('inspection_date', filters.inspectionDate.trim())
   }
-  if (filters.material) {
-    params.set('material', filters.material)
+  for (const material of filters.material) {
+    if (material) {
+      params.append('material', material)
+    }
   }
   if (filters.streetWater !== 'all') {
     params.set('street_water', filters.streetWater)
@@ -98,6 +101,36 @@ export function paramsFromFilters(filters: FilterState): URLSearchParams {
   return params
 }
 
+function appendTableColumnFilters(params: URLSearchParams, filters?: TableColumnFilters) {
+  if (!filters) {
+    return
+  }
+
+  for (const [column, range] of Object.entries(filters.numeric)) {
+    if (range.min.trim() || range.max.trim()) {
+      params.append('number_filter', `${column}:${range.min.trim()}:${range.max.trim()}`)
+    }
+  }
+
+  for (const [column, range] of Object.entries(filters.dates)) {
+    if (range.from.trim() || range.to.trim()) {
+      params.append('date_filter', `${column}:${range.from.trim()}:${range.to.trim()}`)
+    }
+  }
+
+  for (const [column, value] of Object.entries(filters.text)) {
+    if (value.trim()) {
+      params.append('text_filter', `${column}:${value.trim()}`)
+    }
+  }
+
+  for (const [column, values] of Object.entries(filters.multi)) {
+    for (const value of values) {
+      params.append('multi_filter', `${column}:${value}`)
+    }
+  }
+}
+
 export function fetchSource() {
   return apiGet<SourceResponse>('/api/critical-assets/source')
 }
@@ -121,15 +154,19 @@ export function fetchAggregates(
   return apiGet<AggregatesResponse>(`/api/critical-assets/aggregates/${source}/${metric}`, params)
 }
 
-export function fetchHistory(source: SourceKey, filters: FilterState, limit = 2500) {
+export function fetchHistory(source: SourceKey, filters: FilterState, limit = 2500, worksheet?: string) {
   const params = paramsFromFilters(filters)
   params.set('source', source)
   params.set('limit', String(limit))
+  if (worksheet) {
+    params.set('worksheet', worksheet)
+  }
   return apiGet<HistoryResponse>('/api/critical-assets/history', params)
 }
 
-export function fetchTable(request: TableRequest, filters: FilterState) {
+export function fetchTable(request: TableRequest, filters: FilterState, columnFilters?: TableColumnFilters) {
   const params = paramsFromFilters(filters)
+  appendTableColumnFilters(params, columnFilters)
   params.set('limit', String(request.limit))
   params.set('offset', String(request.offset))
   params.set('sort_dir', request.sortDir)
