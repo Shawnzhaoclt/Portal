@@ -132,8 +132,10 @@ type CompassDragState = {
 const AERIAL_2025_EXPORT_URL =
   'https://meckaerial.mecklenburgcountync.gov/server/rest/services/aerial2025/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=false&f=image'
 
-const MECK_VECTOR_BASEMAP_EXPORT_URL =
-  'https://meckgis.mecklenburgcountync.gov/server/rest/services/Basemap/VectorBasemap/MapServer/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=false&f=image'
+const CLTEX_VECTOR_BASEMAP_STYLE_URL =
+  'https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/resources/styles/root.json'
+const CLTEX_VECTOR_TILE_URL =
+  'https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/tile/{z}/{y}/{x}.pbf'
 const SCALE_5000_ZOOM = 15.85
 const FACILITY_LABEL_MAX_SCALE_DENOMINATOR = 20000
 
@@ -152,23 +154,6 @@ const AERIAL_2025_BASEMAP_SOURCE = {
   attribution: 'MeckCoGIS',
 }
 
-const MECK_VECTOR_BASEMAP_SOURCE = {
-  type: 'raster',
-  tiles: [MECK_VECTOR_BASEMAP_EXPORT_URL],
-  tileSize: 512,
-  attribution: 'Mecklenburg County GIS',
-}
-
-const MECK_VECTOR_BASEMAP_LAYER = {
-  id: 'meckVectorBasemap',
-  type: 'raster',
-  source: 'meckVectorBasemap',
-  maxzoom: SCALE_5000_ZOOM,
-  paint: {
-    'raster-opacity': 0.9,
-  },
-}
-
 const AERIAL_2025_BASEMAP_LAYER = {
   id: 'aerial2025',
   type: 'raster',
@@ -179,18 +164,73 @@ const AERIAL_2025_BASEMAP_LAYER = {
   },
 }
 
+const CLTEX_LIGHT_BACKGROUND_LAYER = {
+  id: 'cltexLightBackground',
+  type: 'background',
+  paint: {
+    'background-color': '#f7f3ea',
+  },
+}
+
 const GIS_BASEMAP_STYLE: MapLibreStyleObject = {
   version: 8,
   sources: {
-    meckVectorBasemap: MECK_VECTOR_BASEMAP_SOURCE,
     aerial2025: AERIAL_2025_BASEMAP_SOURCE,
   },
-  layers: [MECK_VECTOR_BASEMAP_LAYER, AERIAL_2025_BASEMAP_LAYER],
+  layers: [AERIAL_2025_BASEMAP_LAYER],
 }
 
-const DEFAULT_VIEW_STATE: ViewState = {
+function absoluteStyleUrl(value: string, baseUrl: string) {
+  if (/^(?:[a-z][a-z0-9+.-]*:)?\/\//i.test(value) || value.startsWith('data:') || value.startsWith('mapbox://')) return value
+  return new URL(value, baseUrl)
+    .toString()
+    .replaceAll('%7B', '{')
+    .replaceAll('%7D', '}')
+}
+
+function buildCltexBasemapStyle(style: MapLibreStyleObject): MapLibreStyleObject {
+  const normalizedSources = Object.fromEntries(
+    Object.entries(style.sources ?? {}).map(([sourceId, source]) => {
+      const { url: _url, ...nextSource } = source
+      return [
+        sourceId,
+        {
+          ...nextSource,
+          type: 'vector',
+          tiles: [CLTEX_VECTOR_TILE_URL],
+          tileSize: 512,
+          attribution: 'CLTEX Basemap',
+        },
+      ]
+    }),
+  )
+  const cltexLayers = (style.layers ?? [])
+    .filter((layer) => typeof layer.minzoom !== 'number' || layer.minzoom < SCALE_5000_ZOOM)
+    .map((layer) => ({
+      ...layer,
+      maxzoom: typeof layer.maxzoom === 'number' ? Math.min(layer.maxzoom, SCALE_5000_ZOOM) : SCALE_5000_ZOOM,
+    }))
+  return {
+    version: 8,
+    glyphs: style.glyphs ? absoluteStyleUrl(style.glyphs, CLTEX_VECTOR_BASEMAP_STYLE_URL) : undefined,
+    sprite: style.sprite ? absoluteStyleUrl(style.sprite, CLTEX_VECTOR_BASEMAP_STYLE_URL) : undefined,
+    sources: {
+      ...normalizedSources,
+      aerial2025: AERIAL_2025_BASEMAP_SOURCE,
+    },
+    layers: [CLTEX_LIGHT_BACKGROUND_LAYER, ...cltexLayers, AERIAL_2025_BASEMAP_LAYER],
+  }
+}
+
+const CHARLOTTE_CENTER = {
   longitude: -80.8431,
   latitude: 35.2271,
+}
+const MECKLENBURG_COUNTY_BOUNDS: [number, number, number, number] = [-81.08, 34.98, -80.53, 35.53]
+
+const DEFAULT_VIEW_STATE: ViewState = {
+  longitude: CHARLOTTE_CENTER.longitude,
+  latitude: CHARLOTTE_CENTER.latitude,
   zoom: 10.5,
   pitch: 0,
   bearing: 0,
@@ -202,6 +242,8 @@ const SCREEN_DPI = 96
 const INCHES_PER_METER = 39.37
 const FEET_PER_METER = 3.280839895
 const FEET_PER_MILE = 5280
+const MIN_MAP_SCALE_DENOMINATOR = 400000
+const MIN_MAP_ZOOM = zoomForScaleDenominator(MIN_MAP_SCALE_DENOMINATOR, CHARLOTTE_CENTER.latitude)
 const ASSET_LABEL_LAYER_IDS = ['critical_asset_pipes', 'critical_asset_structures']
 const FACILITY_RENDERER_LAYER_ID = 'facility_polygons'
 const MAP_POINT_SYMBOL_SIZE_PX = 5
@@ -722,6 +764,45 @@ function niceScaleValue(value: number) {
   return multiplier * magnitude
 }
 
+function zoomForScaleDenominator(denominator: number, latitude: number) {
+  const latitudeRadians = (latitude * Math.PI) / 180
+  return Math.log2((Math.cos(latitudeRadians) * WEB_MERCATOR_EARTH_CIRCUMFERENCE_METERS * SCREEN_DPI * INCHES_PER_METER) / (MAPLIBRE_TILE_SIZE * denominator))
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function constrainMapViewState(nextViewState: ViewState, size?: MapFrameSize): ViewState {
+  const zoom = Math.max(nextViewState.zoom, MIN_MAP_ZOOM)
+  const atMinimumZoom = zoom <= MIN_MAP_ZOOM + 0.0001
+  const zoomConstrainedViewState = {
+    ...nextViewState,
+    longitude: atMinimumZoom ? CHARLOTTE_CENTER.longitude : nextViewState.longitude,
+    latitude: atMinimumZoom ? CHARLOTTE_CENTER.latitude : nextViewState.latitude,
+    zoom,
+  }
+  if (atMinimumZoom || !size || size.width <= 0 || size.height <= 0) return zoomConstrainedViewState
+
+  const visibleBounds = visibleBboxForView(zoomConstrainedViewState, size)
+  if (!visibleBounds) return zoomConstrainedViewState
+  const halfLngSpan = (visibleBounds[2] - visibleBounds[0]) / 2
+  const halfLatSpan = (visibleBounds[3] - visibleBounds[1]) / 2
+  return {
+    ...zoomConstrainedViewState,
+    longitude: clampNumber(
+      zoomConstrainedViewState.longitude,
+      MECKLENBURG_COUNTY_BOUNDS[0] - halfLngSpan,
+      MECKLENBURG_COUNTY_BOUNDS[2] + halfLngSpan,
+    ),
+    latitude: clampNumber(
+      zoomConstrainedViewState.latitude,
+      MECKLENBURG_COUNTY_BOUNDS[1] - halfLatSpan,
+      MECKLENBURG_COUNTY_BOUNDS[3] + halfLatSpan,
+    ),
+  }
+}
+
 function scaleInfoForView(viewState: ViewState) {
   const latitudeRadians = (viewState.latitude * Math.PI) / 180
   const metersPerPixel =
@@ -965,6 +1046,7 @@ export default function GISCriticalAssetHistoryDashboard() {
   const [visibleLayers, setVisibleLayers] = useState<Record<string, boolean>>({})
   const [featureData, setFeatureData] = useState<Record<string, GISFeatureCollection>>({})
   const [searchFeatureData, setSearchFeatureData] = useState<Record<string, GISFeatureCollection>>({})
+  const [basemapStyle, setBasemapStyle] = useState<MapLibreStyleObject>(GIS_BASEMAP_STYLE)
   const [viewState, setViewState] = useState<ViewState>(DEFAULT_VIEW_STATE)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
   const [spatialFilterEnabled, setSpatialFilterEnabled] = useState(true)
@@ -997,6 +1079,31 @@ export default function GISCriticalAssetHistoryDashboard() {
 
   useEffect(() => {
     loadDashboard()
+  }, [])
+
+  useEffect(() => {
+    const controller = new AbortController()
+
+    async function loadCltexBasemap() {
+      try {
+        const response = await fetch(CLTEX_VECTOR_BASEMAP_STYLE_URL, { signal: controller.signal })
+        if (!response.ok) {
+          throw new Error(`CLTEX basemap request failed: ${response.status}`)
+        }
+        const style = (await response.json()) as MapLibreStyleObject
+        if (!style.layers?.length || !style.sources) {
+          throw new Error('CLTEX basemap style is missing layers or sources')
+        }
+        setBasemapStyle(buildCltexBasemapStyle(style))
+      } catch (nextError) {
+        if (controller.signal.aborted) return
+        console.warn(nextError)
+        setBasemapStyle(GIS_BASEMAP_STYLE)
+      }
+    }
+
+    void loadCltexBasemap()
+    return () => controller.abort()
   }, [])
 
   useEffect(() => {
@@ -1063,7 +1170,7 @@ export default function GISCriticalAssetHistoryDashboard() {
       const nextVisible = Object.fromEntries(metadata.layers.map((layer) => [layer.id, true]))
       setLayers(metadata.layers)
       setVisibleLayers(nextVisible)
-      setViewState(viewStateForBounds(metadata.layers))
+      setViewState(constrainMapViewState(viewStateForBounds(metadata.layers)))
       void loadSearchFeatures(metadata.layers)
       if (!spatialFilterEnabled) {
         await loadLayerFeatures(metadata.layers, null, false)
@@ -1667,7 +1774,7 @@ export default function GISCriticalAssetHistoryDashboard() {
     setVisibleLayers((current) => ({ ...current, [item.layer.id]: true }))
     setFlashTarget({ layer: item.layer, feature: item.feature, token: Date.now() })
     if (bounds) {
-      setViewState((current) => viewStateForFeatureBounds(bounds, current))
+      setViewState((current) => constrainMapViewState(viewStateForFeatureBounds(bounds, current), mapFrameSize))
     }
   }
 
@@ -1679,7 +1786,7 @@ export default function GISCriticalAssetHistoryDashboard() {
     setMapSearchTerm(item.title)
     setMapSearchOpen(false)
     if (bounds) {
-      setViewState((current) => viewStateForFeatureBounds(bounds, current))
+      setViewState((current) => constrainMapViewState(viewStateForFeatureBounds(bounds, current), mapFrameSize))
     }
   }
 
@@ -1921,7 +2028,7 @@ export default function GISCriticalAssetHistoryDashboard() {
               controller
               layers={deckLayers}
               viewState={viewState}
-              onViewStateChange={({ viewState: nextViewState }) => setViewState(nextViewState as ViewState)}
+              onViewStateChange={({ viewState: nextViewState }) => setViewState(constrainMapViewState(nextViewState as ViewState, mapFrameSize))}
               getTooltip={({ object, layer }) => {
                 if (!object?.properties) return null
                 return {
@@ -1929,7 +2036,7 @@ export default function GISCriticalAssetHistoryDashboard() {
                 }
               }}
             >
-              <Map attributionControl={false} mapLib={maplibregl} mapStyle={GIS_BASEMAP_STYLE as never} />
+              <Map attributionControl={false} mapLib={maplibregl} mapStyle={basemapStyle as never} />
             </DeckGL>
 
             <button

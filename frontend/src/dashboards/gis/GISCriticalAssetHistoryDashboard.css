@@ -820,6 +820,10 @@ html.gis-dashboard-active #root {
   background: #020617;
 }
 
+.gis-history-dashboard .gis-map-frame {
+  background: #f7f3ea;
+}
+
 .gis-map-frame::before {
   content: '';
   position: absolute;
