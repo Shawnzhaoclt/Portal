@@ -456,6 +456,16 @@ html.critical-asset-dashboard-active #root {
   position: relative;
   height: 34px;
   margin: 0;
+  border: 0;
+  outline: 0;
+  box-shadow: none;
+}
+
+.asset-dual-range:focus,
+.asset-dual-range:focus-within {
+  border: 0;
+  outline: 0;
+  box-shadow: none;
 }
 
 .asset-dual-range::before {
@@ -487,17 +497,38 @@ html.critical-asset-dashboard-active #root {
   width: 100%;
   height: 34px;
   min-height: 34px;
+  border: 0 !important;
+  border-radius: 0 !important;
   margin: 0;
   padding: 0;
   background: transparent;
+  box-shadow: none !important;
   pointer-events: none;
+  outline: 0 !important;
   appearance: none;
+  -webkit-appearance: none;
+}
+
+.asset-dual-range-input:focus,
+.asset-dual-range-input:focus-visible {
+  border: 0 !important;
+  box-shadow: none !important;
+  outline: 0 !important;
+}
+
+.asset-dual-range-input::-moz-focus-outer {
+  border: 0;
 }
 
 .asset-dual-range-input::-webkit-slider-runnable-track {
   height: 3px;
+  border: 0 !important;
+  border-radius: 0;
   background: transparent;
+  box-shadow: none !important;
+  outline: 0 !important;
   appearance: none;
+  -webkit-appearance: none;
 }
 
 .asset-dual-range-input::-webkit-slider-thumb {
@@ -517,7 +548,11 @@ html.critical-asset-dashboard-active #root {
 
 .asset-dual-range-input::-moz-range-track {
   height: 3px;
+  border: 0 !important;
+  border-radius: 0;
   background: transparent;
+  box-shadow: none !important;
+  outline: 0 !important;
 }
 
 .asset-dual-range-input::-moz-range-thumb {
@@ -532,13 +567,11 @@ html.critical-asset-dashboard-active #root {
 }
 
 .asset-dual-range-input:focus-visible::-webkit-slider-thumb {
-  outline: 3px solid rgba(33, 150, 243, 0.28);
-  outline-offset: 2px;
+  outline: 0 !important;
 }
 
 .asset-dual-range-input:focus-visible::-moz-range-thumb {
-  outline: 3px solid rgba(33, 150, 243, 0.28);
-  outline-offset: 2px;
+  outline: 0 !important;
 }
 
 .asset-slider-inputs input,

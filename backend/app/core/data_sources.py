@@ -48,6 +48,39 @@ class CriticalAssetsDataSource:
         return ", ".join(self.tables.values())
 
 
+@dataclass(frozen=True)
+class GISLayerDataSource:
+    id: str
+    label: str
+    table: str
+    geometry_column: str
+    color: str
+    property_columns: tuple[str, ...]
+    source_type: str | None = None
+    database: str | None = None
+    server: str | None = None
+    schema: str | None = None
+    source_crs: str | None = None
+    target_crs: str | None = None
+    trusted_connection: bool | None = None
+    encrypt: bool | None = None
+    trust_server_certificate: bool | None = None
+    timeout_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class GISDataSource:
+    source_type: str
+    database: Path
+    source_crs: str
+    target_crs: str
+    layers: dict[str, GISLayerDataSource]
+
+    @property
+    def source_tables(self) -> str:
+        return ", ".join(layer.table for layer in self.layers.values())
+
+
 def data_sources_config_path() -> Path:
     configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
     return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
@@ -121,6 +154,48 @@ def critical_assets_data_source() -> CriticalAssetsDataSource:
             "pipes": str(tables.get("pipes", "")),
             "structures": str(tables.get("structures", "")),
         },
+    )
+
+
+def gis_data_source() -> GISDataSource:
+    config = load_data_sources_config().get("gis")
+    if not isinstance(config, dict):
+        raise HTTPException(
+            status_code=503,
+            detail={"message": "Missing `gis` datasource config."},
+        )
+
+    layers_config = config.get("layers") if isinstance(config.get("layers"), dict) else {}
+    layers: dict[str, GISLayerDataSource] = {}
+    for layer_id, layer_config in layers_config.items():
+        if not isinstance(layer_config, dict):
+            continue
+        property_columns = layer_config.get("property_columns")
+        layers[str(layer_id)] = GISLayerDataSource(
+            id=str(layer_id),
+            label=str(layer_config.get("label", layer_id)),
+            table=str(layer_config.get("table", "")),
+            geometry_column=str(layer_config.get("geometry_column", "geometry")),
+            color=str(layer_config.get("color", "#4e79a7")),
+            property_columns=tuple(str(column) for column in property_columns) if isinstance(property_columns, list) else (),
+            source_type=str(layer_config["source_type"]) if layer_config.get("source_type") else None,
+            database=str(layer_config["database"]) if layer_config.get("database") else None,
+            server=str(layer_config["server"]) if layer_config.get("server") else None,
+            schema=str(layer_config["schema"]) if layer_config.get("schema") else None,
+            source_crs=str(layer_config["source_crs"]) if layer_config.get("source_crs") else None,
+            target_crs=str(layer_config["target_crs"]) if layer_config.get("target_crs") else None,
+            trusted_connection=bool(layer_config["trusted_connection"]) if "trusted_connection" in layer_config else None,
+            encrypt=bool(layer_config["encrypt"]) if "encrypt" in layer_config else None,
+            trust_server_certificate=bool(layer_config["trust_server_certificate"]) if "trust_server_certificate" in layer_config else None,
+            timeout_seconds=int(layer_config["timeout_seconds"]) if layer_config.get("timeout_seconds") else None,
+        )
+
+    return GISDataSource(
+        source_type=str(config.get("source_type", "duckdb_spatial")),
+        database=Path(str(config.get("database", ""))),
+        source_crs=str(config.get("source_crs", "EPSG:4326")),
+        target_crs=str(config.get("target_crs", "EPSG:4326")),
+        layers=layers,
     )
 
 

@@ -12,12 +12,19 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.3.3",
+    "@deck.gl/geo-layers": "^9.3.3",
+    "@deck.gl/layers": "^9.3.3",
+    "@deck.gl/react": "^9.3.3",
     "@fontsource-variable/geist": "^5.2.9",
+    "@turf/turf": "^7.3.5",
+    "@vis.gl/react-maplibre": "^8.1.1",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "echarts": "^6.1.0",
     "lucide-react": "^1.17.0",
+    "maplibre-gl": "^5.24.0",
     "radix-ui": "^1.4.3",
     "react": "^19.2.6",
     "react-day-picker": "^10.0.1",
@@ -29,6 +36,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@tailwindcss/vite": "^4.3.0",
+    "@types/geojson": "^7946.0.16",
     "@types/node": "^24.12.3",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

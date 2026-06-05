@@ -26,6 +26,7 @@ dependencies:
   # Vector geospatial: GeoParquet, GeoJSON, shapefiles, etc.
   - geopandas
   - shapely
+  - pyproj
   - pyogrio
   - geojson
   # Raster geospatial: GeoTIFF and Cloud Optimized GeoTIFF
