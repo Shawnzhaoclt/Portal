@@ -94,7 +94,27 @@ def facility_aggregate_renderers() -> tuple[dict[str, str], ...]:
 
 
 FACILITY_AGGREGATE_RENDERERS = facility_aggregate_renderers()
+FACILITY_HISTORY_DELTA_AGGREGATES = tuple(
+    {
+        "field": f"{field_prefix}_{measure['key'].upper()}",
+        "label": label,
+        "source": "pipes",
+        "metric": metric,
+        "measure": str(measure["label"]),
+        "measure_key": str(measure["key"]),
+        "sql_function": str(measure["sql_function"]),
+    }
+    for field_prefix, metric, label in (
+        ("TOTAL_RISK_DELTA_PIPES", "RISK_DELTA", "Total Risk Delta - Pipes Only"),
+        ("CONDITION_RISK_DELTA_PIPES", "COND_RISK_DELTA", "Condition Risk Delta - Pipes Only"),
+        ("FLOOD_RISK_DELTA_PIPES", "FLOOD_RISK_DELTA", "Flood Risk Delta - Pipes Only"),
+        ("CLOG_RISK_DELTA_PIPES", "CLOG_RISK_DELTA", "Clog Risk Delta - Pipes Only"),
+    )
+    for measure in FACILITY_AGGREGATE_MEASURES
+)
+FACILITY_AGGREGATE_VALUE_SPECS = FACILITY_AGGREGATE_RENDERERS + FACILITY_HISTORY_DELTA_AGGREGATES
 FACILITY_AGGREGATE_RENDERER_FIELDS = tuple(str(renderer["field"]) for renderer in FACILITY_AGGREGATE_RENDERERS)
+FACILITY_AGGREGATE_VALUE_FIELDS = tuple(str(renderer["field"]) for renderer in FACILITY_AGGREGATE_VALUE_SPECS)
 
 
 def quote_identifier(value: str) -> str:
@@ -180,7 +200,7 @@ def facility_aggregate_renderer_values() -> dict[str, dict[str, float]]:
         return values
 
     try:
-        for renderer in FACILITY_AGGREGATE_RENDERERS:
+        for renderer in FACILITY_AGGREGATE_VALUE_SPECS:
             source_key = str(renderer["source"])
             table_name = critical_asset_table_name(source, source_key)
             columns = {str(row[0]) for row in connection.execute(f"DESCRIBE {quote_identifier(table_name)}").fetchall()}
@@ -189,13 +209,16 @@ def facility_aggregate_renderer_values() -> dict[str, dict[str, float]]:
                 continue
             from_expression = critical_asset_latest_records_expression(source_key, table_name, columns)
             sql_function = str(renderer["sql_function"])
+            where_clauses = [f"try_cast({quote_identifier(metric)} as double) IS NOT NULL"]
+            if metric.endswith("_DELTA") and "INSPECTION_COUNT" in columns:
+                where_clauses.append(f"try_cast({quote_identifier('INSPECTION_COUNT')} as integer) > 1")
             rows = connection.execute(
                 f"""
                 SELECT
                   {quote_identifier('FacilityID')} as facility_id,
                   {sql_function}(try_cast({quote_identifier(metric)} as double)) as renderer_value
                 FROM {from_expression}
-                WHERE try_cast({quote_identifier(metric)} as double) IS NOT NULL
+                WHERE {' AND '.join(where_clauses)}
                 GROUP BY {quote_identifier('FacilityID')}
                 """
             ).fetchall()
@@ -319,7 +342,7 @@ def uses_latest_inspection_records(source: GISDataSource, layer: GISLayerDataSou
     return {"ITPIPE_ASSETID", "Inspection_Date"}.issubset(configured_columns)
 
 
-def layer_from_expression(source: GISDataSource, layer: GISLayerDataSource) -> str:
+def layer_from_expression(source: GISDataSource, layer: GISLayerDataSource, inspection_history: bool = False) -> str:
     table_name = layer_table_reference(source, layer)
     if not uses_latest_inspection_records(source, layer):
         return table_name
@@ -328,6 +351,28 @@ def layer_from_expression(source: GISDataSource, layer: GISLayerDataSource) -> s
     asset_column = quote_identifier("ITPIPE_ASSETID")
     inspection_date_column = quote_identifier("Inspection_Date")
     inspection_id_column = quote_identifier("INSPECTIONID")
+    if inspection_history:
+        inspection_count_column = quote_identifier("INSPECTION_COUNT")
+        return f"""
+            (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        row_number() OVER (
+                            PARTITION BY {asset_column}
+                            ORDER BY
+                                try_cast({inspection_date_column} AS timestamp) DESC NULLS LAST,
+                                try_cast({inspection_id_column} AS bigint) DESC NULLS LAST
+                        ) AS inspection_history_rank
+                    FROM {table_name}
+                    WHERE {geometry_filter}
+                      AND try_cast({inspection_count_column} AS integer) > 1
+                ) history_ranked
+                WHERE inspection_history_rank = 1
+            ) history_records
+        """
+
     return f"""
         (
             SELECT *
@@ -394,7 +439,7 @@ def layer_property_columns(connection: Any, source: GISDataSource, layer: GISLay
 def layer_metadata_property_columns(connection: Any, source: GISDataSource, layer: GISLayerDataSource) -> list[str]:
     property_columns = layer_property_columns(connection, source, layer)
     if layer.id == "facility_polygons":
-        property_columns.extend(FACILITY_AGGREGATE_RENDERER_FIELDS)
+        property_columns.extend(FACILITY_AGGREGATE_VALUE_FIELDS)
     return property_columns
 
 
@@ -510,6 +555,7 @@ def get_layers(
 def get_layer_features(
     layer_id: str,
     limit: int = Query(500, ge=1, le=5000),
+    history: bool = Query(False),
     min_lng: float | None = Query(None, ge=-180, le=180),
     min_lat: float | None = Query(None, ge=-90, le=90),
     max_lng: float | None = Query(None, ge=-180, le=180),
@@ -524,11 +570,12 @@ def get_layer_features(
         raise HTTPException(status_code=400, detail={"message": "Spatial filter bbox is invalid."})
 
     layer = layer_or_404(source, layer_id)
+    inspection_history = history and layer.id in LATEST_INSPECTION_LAYER_IDS
     connection = connect_gis_database(source, layer)
     try:
         property_columns = layer_property_columns(connection, source, layer)
         if layer_source_type(source, layer) == "sqlserver":
-            from_expression = layer_from_expression(source, layer)
+            from_expression = layer_from_expression(source, layer, inspection_history=False)
             geometry_expression = layer_geometry_expression(source, layer)
             geometry_filter = layer_geometry_not_null_expression(source, layer)
             property_selects = ", ".join(
@@ -545,7 +592,7 @@ def get_layer_features(
                 WHERE {geometry_filter}
             """
         else:
-            from_expression = layer_from_expression(source, layer)
+            from_expression = layer_from_expression(source, layer, inspection_history=inspection_history)
             geometry_expression = layer_geometry_expression(source, layer)
             geometry_filter = layer_geometry_not_null_expression(source, layer)
             property_selects = ", ".join(f"{quote_identifier(column)} AS {quote_identifier(column)}" for column in property_columns)

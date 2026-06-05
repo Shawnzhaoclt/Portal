@@ -142,9 +142,17 @@
           "IS_MOST_RECENT",
           "INSPECTION_COUNT",
           "RISK",
+          "RISK_DELTA",
+          "RISK_DELTA_SUM",
           "COND_RISK",
+          "COND_RISK_DELTA",
+          "COND_RISK_DELTA_SUM",
           "FLOOD_RISK",
-          "CLOG_RISK"
+          "FLOOD_RISK_DELTA",
+          "FLOOD_RISK_DELTA_SUM",
+          "CLOG_RISK",
+          "CLOG_RISK_DELTA",
+          "CLOG_RISK_DELTA_SUM"
         ]
       }
     }
