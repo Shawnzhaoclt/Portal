@@ -38,6 +38,12 @@ type AssetLabelDatum = {
   pixelOffset: [number, number]
 }
 
+type FacilityLabelDatum = {
+  anchor: [number, number]
+  position: [number, number]
+  text: string
+}
+
 type TopRecordTab = 'structures' | 'pipes'
 type TopRecordRiskKey = 'total' | 'condition' | 'flood' | 'clog'
 type BooleanFilterValue = 'all' | 'true' | 'false'
@@ -89,6 +95,18 @@ type CountMetricValue = {
   current: number | null
   format?: 'decimal' | 'integer'
   total: number | null
+}
+
+type HistoryHistogramBin = {
+  count: number
+  max: number
+  min: number
+}
+
+type HistoryHistogramData = {
+  bins: HistoryHistogramBin[]
+  maxCount: number
+  total: number
 }
 
 type ScreenPoint = {
@@ -188,6 +206,7 @@ const ASSET_LABEL_LAYER_IDS = ['critical_asset_pipes', 'critical_asset_structure
 const FACILITY_RENDERER_LAYER_ID = 'facility_polygons'
 const MAP_POINT_SYMBOL_SIZE_PX = 5
 const MAP_LINE_SYMBOL_WIDTH_PX = 2
+const PIPE_LINE_SYMBOL_WIDTH_PX = MAP_LINE_SYMBOL_WIDTH_PX * 1.5
 const ASSET_LABEL_TEXT_SIZE_PX = 13
 const ASSET_LABEL_BACKGROUND_PADDING: [number, number] = [7, 4]
 const DARK_LABEL_LEADER_COLOR: [number, number, number, number] = [15, 23, 42, 215]
@@ -195,6 +214,7 @@ const BRIGHT_LABEL_LEADER_COLOR: [number, number, number, number] = [249, 115, 2
 const PIPE_LAYER_ID = 'critical_asset_pipes'
 const STRUCTURE_LAYER_ID = 'critical_asset_structures'
 const STRUCTURE_POINT_SYMBOL_SIZE_PX = MAP_POINT_SYMBOL_SIZE_PX * 0.75
+const NO_DELTA_COLOR: [number, number, number, number] = [148, 163, 184, 132]
 
 function isInspectionHistoryLayer(layerId: string) {
   return layerId === PIPE_LAYER_ID || layerId === STRUCTURE_LAYER_ID
@@ -304,6 +324,7 @@ const PIPE_FILTER_RANGE_CONFIG: Array<{
 const STRUCTURE_FILTER_RANGE_CONFIG = PIPE_FILTER_RANGE_CONFIG.filter((filter) => filter.key !== 'pipe_size')
 const CULVERT_BOTH_FILTER_RANGE_CONFIG = STRUCTURE_FILTER_RANGE_CONFIG
 const PIPE_FILTER_FLAG_PREFIXES = ['INTERSECTS_', 'ZOI_INTERSECTS_']
+const HISTORY_DELTA_LEGEND_VALUES = [-100, -50, -20, 0, 20, 50, 100]
 const TOP_RECORD_RISK_OPTIONS: Array<{
   key: TopRecordRiskKey
   label: string
@@ -343,6 +364,10 @@ const TOP_RECORD_RISK_OPTIONS: Array<{
   },
 ]
 
+function historyRiskOptionForKey(key: TopRecordRiskKey) {
+  return TOP_RECORD_RISK_OPTIONS.find((option) => option.key === key) ?? TOP_RECORD_RISK_OPTIONS[0]
+}
+
 function hexToRgba(hex: string, alpha: number): [number, number, number, number] {
   const normalized = hex.replace('#', '')
   const value = normalized.length === 3 ? normalized.split('').map((part) => part + part).join('') : normalized
@@ -352,6 +377,45 @@ function hexToRgba(hex: string, alpha: number): [number, number, number, number]
   }
   return [(numberValue >> 16) & 255, (numberValue >> 8) & 255, numberValue & 255, alpha]
 }
+
+function interpolateChannel(start: number, end: number, ratio: number) {
+  return Math.round(start + (end - start) * ratio)
+}
+
+function interpolateRgb(start: [number, number, number], end: [number, number, number], ratio: number): [number, number, number] {
+  const safeRatio = Math.max(0, Math.min(1, ratio))
+  return [
+    interpolateChannel(start[0], end[0], safeRatio),
+    interpolateChannel(start[1], end[1], safeRatio),
+    interpolateChannel(start[2], end[2], safeRatio),
+  ]
+}
+
+function universalDeltaColor(value: number | null, alpha: number): [number, number, number, number] {
+  if (value === null || !Number.isFinite(value)) return NO_DELTA_COLOR
+  let rgb: [number, number, number]
+  if (value < -50) {
+    rgb = interpolateRgb([30, 64, 175], [37, 99, 235], (Math.max(-100, value) + 100) / 50)
+  } else if (value < -20) {
+    rgb = interpolateRgb([8, 145, 178], [103, 232, 249], (value + 50) / 30)
+  } else if (value <= 20) {
+    rgb = interpolateRgb([22, 163, 74], [132, 204, 22], (value + 20) / 40)
+  } else if (value <= 50) {
+    rgb = interpolateRgb([245, 158, 11], [249, 115, 22], (value - 20) / 30)
+  } else {
+    rgb = interpolateRgb([239, 68, 68], [185, 28, 28], (Math.min(100, value) - 50) / 50)
+  }
+  return [rgb[0], rgb[1], rgb[2], alpha]
+}
+
+function rgbaCss([r, g, b, a]: [number, number, number, number]) {
+  return `rgba(${r}, ${g}, ${b}, ${a / 255})`
+}
+
+const HISTORY_DELTA_LEGEND_GRADIENT = `linear-gradient(90deg, ${HISTORY_DELTA_LEGEND_VALUES.map((value) => {
+  const position = ((value + 100) / 200) * 100
+  return `${rgbaCss(universalDeltaColor(value, 255))} ${position}%`
+}).join(', ')})`
 
 function combinedBounds(layers: GISLayerMeta[]) {
   const bounds = layers.map((layer) => layer.bounds).filter((layerBounds): layerBounds is [number, number, number, number] => Boolean(layerBounds))
@@ -612,6 +676,44 @@ function formatMetric(value: number | null, digits = 1) {
   return value.toLocaleString(undefined, { maximumFractionDigits: digits })
 }
 
+function buildHistoryHistogram(values: number[], binCount = 10, domainValues: number[] = values): HistoryHistogramData | null {
+  if (!domainValues.length) return null
+  const min = Math.min(...domainValues)
+  const max = Math.max(...domainValues)
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null
+
+  const safeBinCount = Math.max(1, binCount)
+  if (max <= min) {
+    return {
+      bins: Array.from({ length: safeBinCount }, (_, index) => ({
+        count: index === 0 ? values.length : 0,
+        min,
+        max,
+      })),
+      maxCount: values.length,
+      total: values.length,
+    }
+  }
+
+  const width = (max - min) / safeBinCount
+  const bins = Array.from({ length: safeBinCount }, (_, index) => ({
+    count: 0,
+    min: min + width * index,
+    max: index === safeBinCount - 1 ? max : min + width * (index + 1),
+  }))
+  values.forEach((value) => {
+    if (value < min || value > max) return
+    const index = Math.min(safeBinCount - 1, Math.floor((value - min) / width))
+    bins[index].count += 1
+  })
+
+  return {
+    bins,
+    maxCount: Math.max(...bins.map((bin) => bin.count)),
+    total: values.length,
+  }
+}
+
 function niceScaleValue(value: number) {
   if (!Number.isFinite(value) || value <= 0) return 0
   const magnitude = 10 ** Math.floor(Math.log10(value))
@@ -744,6 +846,18 @@ function reserveCollisionBox(box: LabelCollisionBox, reservedBoxes: LabelCollisi
   return true
 }
 
+function facilityLabelCollisionBox(item: FacilityLabelDatum, viewState: ViewState, size: MapFrameSize): LabelCollisionBox | null {
+  const screen = screenPositionForLngLat(item.position, viewState, size)
+  if (!screen) return null
+  const textSize = labelTextSize(item.text, 11, 1.12, 5, 4)
+  return {
+    left: screen.x,
+    right: screen.x + textSize.width,
+    top: screen.y - textSize.height,
+    bottom: screen.y,
+  }
+}
+
 function assetLabelCollisionBox(item: AssetLabelDatum, viewState: ViewState, size: MapFrameSize): LabelCollisionBox | null {
   const screen = screenPositionForLngLat(item.position, viewState, size)
   if (!screen) return null
@@ -827,6 +941,17 @@ function offsetLngLat(position: [number, number], zoom: number, offsetX: number,
   const world = lngLatToWorld(position[0], position[1], zoom)
   const offsetPosition = worldToLngLat(world.x + offsetX, world.y + offsetY, zoom)
   return [offsetPosition.lng, offsetPosition.lat]
+}
+
+function geometryLabelPlacement(geometry: Geometry | null | undefined, zoom: number): { anchor: [number, number]; position: [number, number] } | null {
+  const bounds = geometryBounds(geometry)
+  if (!bounds) return null
+  const anchor: [number, number] = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2]
+  const outsideUpperRight: [number, number] = [bounds[2], bounds[3]]
+  return {
+    anchor,
+    position: offsetLngLat(outsideUpperRight, zoom, 16, -14),
+  }
 }
 
 function geometryCenterPosition(geometry: Geometry | null | undefined): [number, number] | null {
@@ -1094,14 +1219,21 @@ export default function GISCriticalAssetHistoryDashboard() {
   const deckLayers = useMemo(
     () => {
       const labelLeaderColor = labelLeaderColorForBasemap(viewState)
+      const activeLayerRiskOption = historyRiskOptionForKey(activeHistoryRisk)
       const spatialLayers: Array<
-        GeoJsonLayer | PathLayer<AssetLabelDatum> | TextLayer<AssetLabelDatum>
+        GeoJsonLayer | PathLayer<FacilityLabelDatum> | PathLayer<AssetLabelDatum> | TextLayer<FacilityLabelDatum> | TextLayer<AssetLabelDatum>
       > = layers
         .filter((layer) => visibleLayers[layer.id] && filteredFeatureData[layer.id])
         .map((layer) => {
           const geometryType = layer.geometry_type?.toUpperCase() ?? ''
           const isPoint = geometryType.includes('POINT')
           const color = hexToRgba(layer.color, 220)
+          const deltaField =
+            layer.id === PIPE_LAYER_ID
+              ? activeLayerRiskOption.fields.pipes
+              : layer.id === STRUCTURE_LAYER_ID
+                ? activeLayerRiskOption.fields.structures
+                : null
           return new GeoJsonLayer({
             id: `gis-${layer.id}`,
             data: filteredFeatureData[layer.id],
@@ -1112,9 +1244,15 @@ export default function GISCriticalAssetHistoryDashboard() {
             pointRadiusUnits: 'pixels',
             getPointRadius: layer.id === STRUCTURE_LAYER_ID ? STRUCTURE_POINT_SYMBOL_SIZE_PX : MAP_POINT_SYMBOL_SIZE_PX,
             lineWidthUnits: 'pixels',
-            getLineWidth: MAP_LINE_SYMBOL_WIDTH_PX,
-            getFillColor: hexToRgba(layer.color, isPoint ? 170 : 72) as never,
-            getLineColor: color as never,
+            getLineWidth: layer.id === PIPE_LAYER_ID ? PIPE_LINE_SYMBOL_WIDTH_PX : MAP_LINE_SYMBOL_WIDTH_PX,
+            getFillColor: (deltaField
+              ? ({ properties }: { properties?: Record<string, unknown> }) =>
+                  universalDeltaColor(numberFromProperty(properties?.[deltaField]), isPoint ? 218 : 92)
+              : hexToRgba(layer.color, isPoint ? 170 : 72)) as never,
+            getLineColor: (deltaField
+              ? ({ properties }: { properties?: Record<string, unknown> }) =>
+                  universalDeltaColor(numberFromProperty(properties?.[deltaField]), 238)
+              : color) as never,
             getTextColor: color,
             onClick: ({ object }) => {
               if (object?.properties) {
@@ -1146,6 +1284,7 @@ export default function GISCriticalAssetHistoryDashboard() {
           })
         )
       }
+      const reservedLabelBoxes: LabelCollisionBox[] = []
       const assetReservedLabelBoxes: LabelCollisionBox[] = []
       const facilityBoundsById = new globalThis.Map<string, [number, number, number, number]>()
       ;(filteredFeatureData.facility_polygons?.features ?? []).forEach((feature) => {
@@ -1158,6 +1297,57 @@ export default function GISCriticalAssetHistoryDashboard() {
 
       const showAssetLabels = scaleInfo.denominator <= FACILITY_LABEL_MAX_SCALE_DENOMINATOR
       if (showAssetLabels) {
+        if (visibleLayers[FACILITY_RENDERER_LAYER_ID]) {
+          const facilityLabelData = (filteredFeatureData[FACILITY_RENDERER_LAYER_ID]?.features ?? [])
+            .map((feature): FacilityLabelDatum | null => {
+              const facilityId = feature.properties.FacilityID
+              const placement = geometryLabelPlacement(feature.geometry, viewState.zoom)
+              if (!facilityId || !placement) return null
+              return {
+                anchor: placement.anchor,
+                position: placement.position,
+                text: `Facility ID: ${formatValue(facilityId)}`,
+              }
+            })
+            .filter((item): item is FacilityLabelDatum => Boolean(item))
+            .filter((item) => {
+              const box = facilityLabelCollisionBox(item, viewState, mapFrameSize)
+              return Boolean(box && reserveCollisionBox(box, reservedLabelBoxes, mapFrameSize))
+            })
+
+          if (facilityLabelData.length) {
+            spatialLayers.push(
+              new PathLayer<FacilityLabelDatum>({
+                id: 'gis-culvert-facility-id-label-leaders',
+                data: facilityLabelData,
+                pickable: false,
+                getPath: (item: FacilityLabelDatum) => [item.anchor, item.position],
+                getColor: labelLeaderColor,
+                getWidth: 1,
+                widthUnits: 'pixels',
+                widthMinPixels: 1,
+                widthMaxPixels: 1,
+              } as never),
+              new TextLayer<FacilityLabelDatum>({
+                id: 'gis-culvert-facility-id-labels',
+                data: facilityLabelData,
+                pickable: false,
+                getPosition: (item: FacilityLabelDatum) => item.position,
+                getText: (item: FacilityLabelDatum) => item.text,
+                getSize: 11,
+                sizeUnits: 'pixels',
+                lineHeight: 1.12,
+                getColor: [15, 23, 42, 255],
+                background: true,
+                getBackgroundColor: [255, 255, 255, 220],
+                backgroundPadding: [5, 4],
+                getTextAnchor: 'start',
+                getAlignmentBaseline: 'bottom',
+              } as never),
+            )
+          }
+        }
+
         ASSET_LABEL_LAYER_IDS.forEach((layerId) => {
           if (!visibleLayers[layerId]) return
           const layer = layers.find((item) => item.id === layerId)
@@ -1230,7 +1420,7 @@ export default function GISCriticalAssetHistoryDashboard() {
 
       return spatialLayers
     },
-    [filteredFeatureData, flashTarget, flashVisible, layers, mapFrameSize, scaleInfo.denominator, viewState, visibleLayers],
+    [activeHistoryRisk, filteredFeatureData, flashTarget, flashVisible, layers, mapFrameSize, scaleInfo.denominator, viewState, visibleLayers],
   )
 
   const visibleLayerList = useMemo(() => layers.filter((layer) => visibleLayers[layer.id]), [layers, visibleLayers])
@@ -1385,7 +1575,7 @@ export default function GISCriticalAssetHistoryDashboard() {
   const deltaValuePair = (current: number | null, total: number | null): CountMetricValue => ({ current, format: 'decimal', total })
   const valuesFromFeatures = (features: GISFeatureCollection['features'], field: string) =>
     features.map((feature) => numberFromProperty(feature.properties[field])).filter((value): value is number => value !== null)
-  const activeHistoryRiskOption = TOP_RECORD_RISK_OPTIONS.find((option) => option.key === activeHistoryRisk) ?? TOP_RECORD_RISK_OPTIONS[0]
+  const activeHistoryRiskOption = historyRiskOptionForKey(activeHistoryRisk)
   const fullPipeHistoryFeatures = searchFeatureData[PIPE_LAYER_ID]?.features ?? featureData[PIPE_LAYER_ID]?.features ?? []
   const fullStructureHistoryFeatures = searchFeatureData[STRUCTURE_LAYER_ID]?.features ?? featureData[STRUCTURE_LAYER_ID]?.features ?? []
   const filteredHistoryDeltaValues = [
@@ -1396,13 +1586,7 @@ export default function GISCriticalAssetHistoryDashboard() {
     ...valuesFromFeatures(fullPipeHistoryFeatures, activeHistoryRiskOption.fields.pipes),
     ...valuesFromFeatures(fullStructureHistoryFeatures, activeHistoryRiskOption.fields.structures),
   ]
-  const riskValues = visibleFeatures.map(({ feature }) => numberFromProperty(feature.properties.RISK)).filter((value): value is number => value !== null)
-  const conditionValues = visibleFeatures
-    .map(({ feature }) => numberFromProperty(feature.properties.COND_RISK))
-    .filter((value): value is number => value !== null)
-  const floodValues = visibleFeatures.map(({ feature }) => numberFromProperty(feature.properties.FLOOD_RISK)).filter((value): value is number => value !== null)
-  const clogValues = visibleFeatures.map(({ feature }) => numberFromProperty(feature.properties.CLOG_RISK)).filter((value): value is number => value !== null)
-  const average = (values: number[]) => (values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null)
+  const activeHistoryHistogram = buildHistoryHistogram(filteredHistoryDeltaValues, 10, activeHistoryDeltaValues)
   const min = (values: number[]) => (values.length ? Math.min(...values) : null)
   const max = (values: number[]) => (values.length ? Math.max(...values) : null)
   const topRiskFeatures = useMemo(
@@ -1657,6 +1841,7 @@ export default function GISCriticalAssetHistoryDashboard() {
             <div>
               <span>Critical Asset Spatial Intelligence</span>
               <strong>{selectedFeature ? featureTitle(selectedFeature.properties) : 'Critical Asset'}</strong>
+              <small>Only assets with multiple inspections are loaded, so this view focuses on risk changes over time.</small>
             </div>
             <div>
               <div className="gis-map-search">
@@ -1774,6 +1959,21 @@ export default function GISCriticalAssetHistoryDashboard() {
               <span className="gis-scale-bar" style={{ width: `${scaleInfo.barWidth}px` }} />
             </div>
 
+            <div className="gis-delta-legend" aria-label={`${activeHistoryRiskOption.label} color legend from -100 to 100`}>
+              <div>
+                <span>Delta legend</span>
+                <strong>{activeHistoryRiskOption.label}</strong>
+              </div>
+              <i style={{ background: HISTORY_DELTA_LEGEND_GRADIENT }} />
+              <div className="gis-delta-legend-labels">
+                {HISTORY_DELTA_LEGEND_VALUES.map((value) => (
+                  <span key={value} style={{ left: `${((value + 100) / 200) * 100}%` }}>
+                    {value}
+                  </span>
+                ))}
+              </div>
+            </div>
+
             {loading ? <div className="gis-loading">Loading spatial layers...</div> : null}
             {!loading && spatialLoading ? <div className="gis-loading">Applying spatial filter...</div> : null}
           </div>
@@ -1811,25 +2011,39 @@ export default function GISCriticalAssetHistoryDashboard() {
           </div>
         </section>
 
-        <section className="gis-panel gis-risk-panel">
+        <section className="gis-panel gis-risk-panel gis-history-histogram-panel">
           <div className="gis-panel-header">
-            <span>Risk Profile</span>
-            <strong>Loaded Feature Sample</strong>
+            <span>Distribution</span>
+            <strong>{activeHistoryRiskOption.label}</strong>
           </div>
-          {[
-            ['Risk', average(riskValues), '#38bdf8'],
-            ['Condition', average(conditionValues), '#60a5fa'],
-            ['Flood', average(floodValues), '#4ade80'],
-            ['Clog', average(clogValues), '#fb923c'],
-          ].map(([label, value, color]) => (
-            <div className="gis-risk-row" key={label as string}>
-              <span>{label}</span>
-              <div>
-                <i style={{ width: `${Math.min(100, Number(value ?? 0))}%`, background: color as string }} />
+          {activeHistoryHistogram ? (
+            <div className="gis-history-histogram" aria-label={`${activeHistoryRiskOption.label} histogram`}>
+              <div className="gis-history-histogram-summary">
+                <span>Filtered records</span>
+                <strong>{activeHistoryHistogram.total.toLocaleString()}</strong>
               </div>
-              <strong>{formatMetric(value as number | null)}</strong>
+              <div className="gis-history-histogram-bars">
+                {activeHistoryHistogram.bins.map((bin, index) => {
+                  const [r, g, b] = universalDeltaColor((bin.min + bin.max) / 2, 255)
+                  const height = activeHistoryHistogram.maxCount ? Math.max(4, Math.round((bin.count / activeHistoryHistogram.maxCount) * 46)) : 4
+                  return (
+                    <div
+                      aria-label={`${formatMetric(bin.min, 0)} to ${formatMetric(bin.max, 0)}: ${bin.count.toLocaleString()} records`}
+                      className="gis-history-histogram-bin"
+                      key={`${bin.min}-${bin.max}-${index}`}
+                      title={`${formatMetric(bin.min, 0)} to ${formatMetric(bin.max, 0)}: ${bin.count.toLocaleString()} records`}
+                    >
+                      <b>{bin.count.toLocaleString()}</b>
+                      <i style={{ height: `${height}px`, background: `rgb(${r}, ${g}, ${b})` }} />
+                      <span>{formatMetric(bin.min, 0)}</span>
+                    </div>
+                  )
+                })}
+              </div>
             </div>
-          ))}
+          ) : (
+            <div className="gis-history-histogram-empty">No selected delta values.</div>
+          )}
         </section>
 
         <section className="gis-panel gis-selection-panel">
