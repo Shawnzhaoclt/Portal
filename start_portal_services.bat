@@ -1,5 +1,5 @@
 @echo off
-setlocal EnableExtensions
+setlocal EnableExtensions EnableDelayedExpansion
 
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
@@ -70,20 +70,20 @@ if "%BACKEND_RUNNING%"=="0" (
     echo [ERROR] Miniconda/Conda was not found. Install Miniconda or update CONDA_BAT in this file.
   ) else (
     echo Using Conda: %CONDA_BAT%
-    call "%CONDA_BAT%" run -n "%CONDA_ENV%" python -c "import uvicorn" >nul 2>nul
-    if errorlevel 1 if /I not "%CONDA_ENV%"=="arf" (
-      echo [WARN] Conda environment "%CONDA_ENV%" was not found or cannot import uvicorn.
+    call "%CONDA_BAT%" run -n "!CONDA_ENV!" python -c "import uvicorn" >nul 2>nul
+    if errorlevel 1 if /I not "!CONDA_ENV!"=="arf" (
+      echo [WARN] Conda environment "!CONDA_ENV!" was not found or cannot import uvicorn.
       echo [WARN] Trying legacy Conda environment "arf".
       set "CONDA_ENV=arf"
-      call "%CONDA_BAT%" run -n "%CONDA_ENV%" python -c "import uvicorn" >nul 2>nul
+      call "%CONDA_BAT%" run -n "!CONDA_ENV!" python -c "import uvicorn" >nul 2>nul
     )
     if errorlevel 1 (
-      echo [ERROR] Conda environment "%CONDA_ENV%" was not found or cannot import uvicorn.
+      echo [ERROR] Conda environment "!CONDA_ENV!" was not found or cannot import uvicorn.
       call "%CONDA_BAT%" env list
-      echo [ERROR] Conda environment "%CONDA_ENV%" is not ready. Backend API was not started.
+      echo [ERROR] Conda environment "!CONDA_ENV!" is not ready. Backend API was not started.
     ) else (
-      echo [OK] Conda environment "%CONDA_ENV%" is ready.
-      powershell -NoProfile -ExecutionPolicy Bypass -Command "$quote=[char]34; $cmd='set PORTAL_DEFAULT_FRONTEND_BASE_URL=%PUBLIC_FRONTEND_URL%&& set PORTAL_PUBLIC_FRONTEND_BASE_URL=%PUBLIC_FRONTEND_URL%&& ' + $quote + '%CONDA_BAT%' + $quote + ' run -n %CONDA_ENV% uvicorn backend.app.api:app --host 0.0.0.0 --port %BACKEND_PORT%'; Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/c',$cmd) -WorkingDirectory '%ROOT%' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERR%' -WindowStyle Hidden"
+      echo [OK] Conda environment "!CONDA_ENV!" is ready.
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$quote=[char]34; $cmd='set PORTAL_DEFAULT_FRONTEND_BASE_URL=%PUBLIC_FRONTEND_URL%&& set PORTAL_PUBLIC_FRONTEND_BASE_URL=%PUBLIC_FRONTEND_URL%&& ' + $quote + '%CONDA_BAT%' + $quote + ' run -n !CONDA_ENV! uvicorn backend.app.api:app --host 0.0.0.0 --port %BACKEND_PORT%'; Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/c',$cmd) -WorkingDirectory '%ROOT%' -RedirectStandardOutput '%BACKEND_LOG%' -RedirectStandardError '%BACKEND_ERR%' -WindowStyle Hidden"
       powershell -NoProfile -ExecutionPolicy Bypass -Command "$name='Backend API'; $port=%BACKEND_PORT%; $ok=$false; for ($i=0; $i -lt 30; $i++) { if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { $ok=$true; break }; Start-Sleep -Seconds 1 }; if ($ok) { Write-Host ('[OK] {0} is listening on port {1}.' -f $name,$port); exit 0 } else { Write-Host ('[WARN] {0} did not start listening on port {1} within 30 seconds.' -f $name,$port); exit 1 }"
     )
   )
@@ -95,12 +95,44 @@ echo.
 
 if "%FRONTEND_RUNNING%"=="0" (
   echo Starting Frontend Vite on port %FRONTEND_PORT%...
-  where npm >nul 2>nul
-  if errorlevel 1 (
-    echo [ERROR] npm was not found on PATH. Install Node.js or add npm to PATH, then retry.
+  set "FRONTEND_MANAGER="
+  set "FRONTEND_INSTALL_CMD="
+  set "FRONTEND_DEV_CMD="
+  where pnpm >nul 2>nul
+  if not errorlevel 1 (
+    set "FRONTEND_MANAGER=pnpm"
+    set "FRONTEND_INSTALL_CMD=pnpm install --frozen-lockfile"
+    set "FRONTEND_DEV_CMD=pnpm run dev -- --host 0.0.0.0 --port %FRONTEND_PORT% --strictPort"
   ) else (
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$cmd='npm run dev -- --host 0.0.0.0 --port %FRONTEND_PORT% --strictPort'; Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/c',$cmd) -WorkingDirectory '%FRONTEND_DIR%' -RedirectStandardOutput '%FRONTEND_LOG%' -RedirectStandardError '%FRONTEND_ERR%' -WindowStyle Hidden"
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "$name='Frontend Vite'; $port=%FRONTEND_PORT%; $ok=$false; for ($i=0; $i -lt 30; $i++) { if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { $ok=$true; break }; Start-Sleep -Seconds 1 }; if ($ok) { Write-Host ('[OK] {0} is listening on port {1}.' -f $name,$port); exit 0 } else { Write-Host ('[WARN] {0} did not start listening on port {1} within 30 seconds.' -f $name,$port); exit 1 }"
+    where npm >nul 2>nul
+    if not errorlevel 1 (
+      set "FRONTEND_MANAGER=npm"
+      set "FRONTEND_INSTALL_CMD=npm install"
+      set "FRONTEND_DEV_CMD=npm run dev -- --host 0.0.0.0 --port %FRONTEND_PORT% --strictPort"
+    )
+  )
+
+  if not defined FRONTEND_MANAGER (
+    echo [ERROR] pnpm/npm was not found on PATH. Install Node.js or add a package manager to PATH, then retry.
+  ) else (
+    if not exist "%FRONTEND_DIR%\node_modules\vite\bin\vite.js" (
+      echo Frontend dependencies are missing or stale. Running !FRONTEND_INSTALL_CMD!...
+      pushd "%FRONTEND_DIR%"
+      set "CI=true"
+      call !FRONTEND_INSTALL_CMD!
+      set "FRONTEND_INSTALL_EXIT=!errorlevel!"
+      popd
+      if not "!FRONTEND_INSTALL_EXIT!"=="0" (
+        echo [ERROR] Frontend dependency install failed. Frontend Vite was not started.
+      )
+    )
+
+    if exist "%FRONTEND_DIR%\node_modules\vite\bin\vite.js" (
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$cmd='!FRONTEND_DEV_CMD!'; Start-Process -FilePath 'cmd.exe' -ArgumentList @('/d','/c',$cmd) -WorkingDirectory '%FRONTEND_DIR%' -RedirectStandardOutput '%FRONTEND_LOG%' -RedirectStandardError '%FRONTEND_ERR%' -WindowStyle Hidden"
+      powershell -NoProfile -ExecutionPolicy Bypass -Command "$name='Frontend Vite'; $port=%FRONTEND_PORT%; $ok=$false; for ($i=0; $i -lt 30; $i++) { if (Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue) { $ok=$true; break }; Start-Sleep -Seconds 1 }; if ($ok) { Write-Host ('[OK] {0} is listening on port {1}.' -f $name,$port); exit 0 } else { Write-Host ('[WARN] {0} did not start listening on port {1} within 30 seconds.' -f $name,$port); exit 1 }"
+    ) else (
+      echo [ERROR] Vite is still missing after dependency install. Frontend Vite was not started.
+    )
   )
 ) else (
   echo Frontend Vite is already running. No start needed.
