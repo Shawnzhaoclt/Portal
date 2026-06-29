@@ -16,8 +16,13 @@ DEFAULT_DATA_SOURCES_CONFIG = PROJECT_ROOT / "backend" / "app" / "config" / "dat
 DEFAULT_OUTPUT_DB = Path(__file__).resolve().parents[2] / "data" / "critical_team_dashboard.duckdb"
 
 
+def portal_env(name: str, default: str | None = None) -> str | None:
+    legacy_name = f"ARF_{name.removeprefix('PORTAL_')}"
+    return os.getenv(name) or os.getenv(legacy_name) or default
+
+
 def data_sources_config_path() -> Path:
-    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    configured_path = portal_env("PORTAL_DATA_SOURCES_CONFIG")
     return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
 
 
@@ -48,19 +53,19 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--server",
-        default=os.getenv("ARF_CITYWORKS_SERVER", source_config["server"]),
+        default=portal_env("PORTAL_CITYWORKS_SERVER", source_config["server"]),
         help="Cityworks SQL Server. Default comes from backend/app/config/data_sources.json.",
     )
     parser.add_argument(
         "--database",
-        default=os.getenv("ARF_CITYWORKS_DATABASE", source_config["database"]),
+        default=portal_env("PORTAL_CITYWORKS_DATABASE", source_config["database"]),
         help="Cityworks SQL database. Default comes from backend/app/config/data_sources.json.",
     )
     return parser.parse_args()
 
 
 def selected_odbc_driver() -> str:
-    configured_driver = os.getenv("ARF_SQL_DRIVER")
+    configured_driver = portal_env("PORTAL_SQL_DRIVER")
     if configured_driver:
         return configured_driver
 
@@ -73,7 +78,7 @@ def selected_odbc_driver() -> str:
 
 
 def connection_string(server: str, database: str) -> str:
-    configured = os.getenv("ARF_CRITICAL_TEAM_CONNECTION_STRING")
+    configured = portal_env("PORTAL_CRITICAL_TEAM_CONNECTION_STRING")
     if configured:
         return configured
 
@@ -82,8 +87,8 @@ def connection_string(server: str, database: str) -> str:
         f"Server={server};"
         f"Database={database};"
         "Trusted_Connection=yes;"
-        f"Encrypt={os.getenv('ARF_SQL_ENCRYPT', 'yes')};"
-        f"TrustServerCertificate={os.getenv('ARF_SQL_TRUST_SERVER_CERTIFICATE', 'yes')};"
+        f"Encrypt={portal_env('PORTAL_SQL_ENCRYPT', 'yes')};"
+        f"TrustServerCertificate={portal_env('PORTAL_SQL_TRUST_SERVER_CERTIFICATE', 'yes')};"
     )
 
 

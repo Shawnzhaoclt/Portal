@@ -1,1 +1,1 @@
-"""ARF backend package."""
+"""Portal backend package."""

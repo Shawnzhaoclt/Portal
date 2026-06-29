@@ -321,7 +321,7 @@ html.gis-dashboard-active #root {
 
 .gis-dashboard [role='checkbox'][data-state='checked'] {
   border-color: rgba(56, 189, 248, 0.92);
-  background: #0ea5e9;
+  background: var(--brand-blue);
 }
 
 .gis-top-records {
@@ -647,7 +647,7 @@ html.gis-dashboard-active #root {
 }
 
 .gis-spatial-filter-switch.active i {
-  background: #0ea5e9;
+  background: var(--brand-blue);
 }
 
 .gis-spatial-filter-switch.active i::before {
@@ -1278,8 +1278,8 @@ html.gis-dashboard-active #root {
       to right,
       rgba(184, 211, 237, 0.52) 0%,
       rgba(184, 211, 237, 0.52) var(--min-pct),
-      #1976d2 var(--min-pct),
-      #1976d2 var(--max-pct),
+      var(--brand-blue) var(--min-pct),
+      var(--brand-blue) var(--max-pct),
       rgba(184, 211, 237, 0.52) var(--max-pct),
       rgba(184, 211, 237, 0.52) 100%
     );
@@ -1324,7 +1324,7 @@ html.gis-dashboard-active #root {
   margin-top: -5px;
   border: 0;
   border-radius: 999px;
-  background: #1976d2;
+  background: var(--brand-blue);
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.36);
   cursor: pointer;
   pointer-events: auto;
@@ -1336,7 +1336,7 @@ html.gis-dashboard-active #root {
   height: 13px;
   border: 0;
   border-radius: 999px;
-  background: #1976d2;
+  background: var(--brand-blue);
   box-shadow: 0 2px 5px rgba(0, 0, 0, 0.36);
   cursor: pointer;
   pointer-events: auto;
@@ -2085,4 +2085,270 @@ html.gis-dashboard-active #root {
   .gis-layer-filter-ranges {
     grid-template-columns: minmax(0, 1fr);
   }
+}
+
+html.theme-dark .gis-dashboard {
+  --gis-bg: var(--app-bg);
+  --gis-panel: var(--panel-bg-soft);
+  --gis-panel-strong: var(--panel-bg);
+  --gis-border: var(--panel-border);
+  --gis-border-strong: var(--accent);
+  --gis-text: var(--panel-text);
+  --gis-muted: var(--panel-muted);
+  --gis-subtle: var(--panel-disabled);
+  --gis-blue: var(--accent);
+  --gis-cyan: #22d3ee;
+  color: var(--gis-text);
+  background: var(--app-bg);
+}
+
+html.theme-light .gis-dashboard {
+  --gis-bg: var(--app-bg);
+  --gis-panel: var(--panel-bg-soft);
+  --gis-panel-strong: var(--panel-bg);
+  --gis-border: var(--panel-border);
+  --gis-border-strong: var(--accent);
+  --gis-text: var(--panel-text);
+  --gis-muted: var(--panel-muted);
+  --gis-subtle: var(--panel-disabled);
+  --gis-blue: var(--accent);
+  --gis-cyan: #0891b2;
+  color: var(--gis-text);
+  background: var(--app-bg);
+}
+
+html.theme-dark .gis-panel,
+html.theme-light .gis-panel,
+html.theme-dark .gis-system-card,
+html.theme-light .gis-system-card,
+html.theme-dark .gis-metric-card,
+html.theme-light .gis-metric-card,
+html.theme-dark .gis-map-toolbar,
+html.theme-light .gis-map-toolbar,
+html.theme-dark .gis-renderer-modal,
+html.theme-light .gis-renderer-modal,
+html.theme-dark .gis-layer-filter-panel,
+html.theme-light .gis-layer-filter-panel,
+html.theme-dark .gis-history-histogram,
+html.theme-light .gis-history-histogram,
+html.theme-dark .gis-delta-legend,
+html.theme-light .gis-delta-legend,
+html.theme-dark .gis-map-scale,
+html.theme-light .gis-map-scale {
+  border-color: var(--panel-border);
+  color: var(--panel-text);
+  background: var(--panel-bg-soft);
+  box-shadow: var(--app-shadow);
+}
+
+html.theme-dark .gis-panel,
+html.theme-light .gis-panel {
+  background: var(--panel-bg-soft);
+}
+
+html.theme-dark .gis-layer-toggle,
+html.theme-light .gis-layer-toggle,
+html.theme-dark .gis-layer-filter-button,
+html.theme-light .gis-layer-filter-button,
+html.theme-dark .gis-top-record-tabs,
+html.theme-light .gis-top-record-tabs,
+html.theme-dark .gis-top-record-tabs button,
+html.theme-light .gis-top-record-tabs button,
+html.theme-dark .gis-top-record-list button,
+html.theme-light .gis-top-record-list button,
+html.theme-dark .gis-spatial-filter-switch,
+html.theme-light .gis-spatial-filter-switch,
+html.theme-dark .gis-map-search-box,
+html.theme-light .gis-map-search-box,
+html.theme-dark .gis-map-search-results,
+html.theme-light .gis-map-search-results,
+html.theme-dark .gis-map-search-list button,
+html.theme-light .gis-map-search-list button,
+html.theme-dark .gis-layer-filter-grid label,
+html.theme-light .gis-layer-filter-grid label,
+html.theme-dark .gis-layer-filter-section,
+html.theme-light .gis-layer-filter-section,
+html.theme-dark .gis-layer-slider-filter,
+html.theme-light .gis-layer-slider-filter,
+html.theme-dark .gis-layer-boolean-filter,
+html.theme-light .gis-layer-boolean-filter,
+html.theme-dark .gis-layer-material-list,
+html.theme-light .gis-layer-material-list,
+html.theme-dark .gis-layer-flag-list,
+html.theme-light .gis-layer-flag-list,
+html.theme-dark .gis-layer-boolean-filter button,
+html.theme-light .gis-layer-boolean-filter button,
+html.theme-dark .gis-renderer-modal-header button,
+html.theme-light .gis-renderer-modal-header button,
+html.theme-dark .gis-renderer-modal-footer button,
+html.theme-light .gis-renderer-modal-footer button,
+html.theme-dark .gis-risk-focus-grid button,
+html.theme-light .gis-risk-focus-grid button {
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background: var(--control-bg);
+}
+
+html.theme-dark .gis-layer-toggle:hover,
+html.theme-light .gis-layer-toggle:hover,
+html.theme-dark .gis-layer-filter-button:hover,
+html.theme-light .gis-layer-filter-button:hover,
+html.theme-dark .gis-layer-filter-button.active,
+html.theme-light .gis-layer-filter-button.active,
+html.theme-dark .gis-top-record-tabs button:hover,
+html.theme-light .gis-top-record-tabs button:hover,
+html.theme-dark .gis-top-record-tabs button.active,
+html.theme-light .gis-top-record-tabs button.active,
+html.theme-dark .gis-top-record-list button:hover,
+html.theme-light .gis-top-record-list button:hover,
+html.theme-dark .gis-map-search-list button:hover,
+html.theme-light .gis-map-search-list button:hover,
+html.theme-dark .gis-spatial-filter-switch:hover,
+html.theme-light .gis-spatial-filter-switch:hover,
+html.theme-dark .gis-spatial-filter-switch.active,
+html.theme-light .gis-spatial-filter-switch.active,
+html.theme-dark .gis-layer-boolean-filter button.active,
+html.theme-light .gis-layer-boolean-filter button.active,
+html.theme-dark .gis-renderer-modal-header button:hover,
+html.theme-light .gis-renderer-modal-header button:hover,
+html.theme-dark .gis-renderer-modal-footer button:hover,
+html.theme-light .gis-renderer-modal-footer button:hover,
+html.theme-dark .gis-risk-focus-grid button:hover,
+html.theme-light .gis-risk-focus-grid button:hover,
+html.theme-dark .gis-risk-focus-grid button.active,
+html.theme-light .gis-risk-focus-grid button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel-active-bg);
+}
+
+html.theme-dark .gis-map-search-box input,
+html.theme-light .gis-map-search-box input,
+html.theme-dark .gis-layer-filter-grid input,
+html.theme-light .gis-layer-filter-grid input {
+  color: var(--panel-text);
+}
+
+html.theme-dark .gis-map-search-box input::placeholder,
+html.theme-light .gis-map-search-box input::placeholder {
+  color: var(--panel-muted);
+}
+
+html.theme-dark .gis-system-card > svg,
+html.theme-light .gis-system-card > svg,
+html.theme-dark .gis-metric-card svg,
+html.theme-light .gis-metric-card svg,
+html.theme-dark .gis-map-search-box svg,
+html.theme-light .gis-map-search-box svg,
+html.theme-dark .gis-layer-filter-button svg,
+html.theme-light .gis-layer-filter-button svg {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--panel-border));
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+}
+
+html.theme-dark .gis-panel-header strong,
+html.theme-light .gis-panel-header strong,
+html.theme-dark .gis-system-card strong,
+html.theme-light .gis-system-card strong,
+html.theme-dark .gis-top-records-header strong,
+html.theme-light .gis-top-records-header strong,
+html.theme-dark .gis-map-toolbar strong,
+html.theme-light .gis-map-toolbar strong,
+html.theme-dark .gis-map-search-list strong,
+html.theme-light .gis-map-search-list strong,
+html.theme-dark .gis-metric-card strong,
+html.theme-light .gis-metric-card strong,
+html.theme-dark .gis-selected-title strong,
+html.theme-light .gis-selected-title strong,
+html.theme-dark .gis-details-list dd,
+html.theme-light .gis-details-list dd,
+html.theme-dark .gis-renderer-modal-header strong,
+html.theme-light .gis-renderer-modal-header strong,
+html.theme-dark .gis-risk-focus-grid strong,
+html.theme-light .gis-risk-focus-grid strong,
+html.theme-dark .gis-history-histogram-summary strong,
+html.theme-light .gis-history-histogram-summary strong,
+html.theme-dark .gis-delta-legend strong,
+html.theme-light .gis-delta-legend strong {
+  color: var(--panel-text);
+}
+
+html.theme-dark .gis-panel-header span,
+html.theme-light .gis-panel-header span,
+html.theme-dark .gis-layer-toggle em,
+html.theme-light .gis-layer-toggle em,
+html.theme-dark .gis-system-card span,
+html.theme-light .gis-system-card span,
+html.theme-dark .gis-system-card small,
+html.theme-light .gis-system-card small,
+html.theme-dark .gis-top-records-header span,
+html.theme-light .gis-top-records-header span,
+html.theme-dark .gis-top-record-tabs small,
+html.theme-light .gis-top-record-tabs small,
+html.theme-dark .gis-history-histogram-summary span,
+html.theme-light .gis-history-histogram-summary span,
+html.theme-dark .gis-history-histogram-bin span,
+html.theme-light .gis-history-histogram-bin span,
+html.theme-dark .gis-history-dashboard .gis-map-toolbar > div:first-child small,
+html.theme-light .gis-history-dashboard .gis-map-toolbar > div:first-child small,
+html.theme-dark .gis-delta-legend span,
+html.theme-light .gis-delta-legend span,
+html.theme-dark .gis-delta-legend-labels span,
+html.theme-light .gis-delta-legend-labels span,
+html.theme-dark .gis-scale-bar-label,
+html.theme-light .gis-scale-bar-label,
+html.theme-dark .gis-map-search-count,
+html.theme-light .gis-map-search-count,
+html.theme-dark .gis-map-search-empty,
+html.theme-light .gis-map-search-empty,
+html.theme-dark .gis-map-search-list span,
+html.theme-light .gis-map-search-list span,
+html.theme-dark .gis-map-search-list small,
+html.theme-light .gis-map-search-list small,
+html.theme-dark .gis-details-list dt,
+html.theme-light .gis-details-list dt,
+html.theme-dark .gis-risk-focus-grid span,
+html.theme-light .gis-risk-focus-grid span,
+html.theme-dark .gis-history-histogram-summary span,
+html.theme-light .gis-history-histogram-summary span {
+  color: var(--panel-muted);
+}
+
+html.theme-dark .gis-history-histogram-summary strong,
+html.theme-light .gis-history-histogram-summary strong,
+html.theme-dark .gis-history-histogram-bin b,
+html.theme-light .gis-history-histogram-bin b,
+html.theme-dark .gis-delta-legend strong,
+html.theme-light .gis-delta-legend strong,
+html.theme-dark .gis-scale-number,
+html.theme-light .gis-scale-number {
+  color: var(--panel-text);
+}
+
+html.theme-dark .gis-renderer-modal-footer button:last-child,
+html.theme-light .gis-renderer-modal-footer button:last-child {
+  border-color: var(--accent);
+  color: var(--primary-foreground);
+  background: var(--accent);
+}
+
+html.theme-dark .gis-loading,
+html.theme-light .gis-loading,
+html.theme-dark .gis-empty-selection,
+html.theme-light .gis-empty-selection,
+html.theme-dark .gis-top-record-empty,
+html.theme-light .gis-top-record-empty,
+html.theme-dark .gis-history-histogram-empty,
+html.theme-light .gis-history-histogram-empty {
+  border-color: var(--panel-border);
+  color: var(--panel-muted);
+  background: var(--panel-bg-soft);
+}
+
+html.theme-dark .gis-error-banner,
+html.theme-light .gis-error-banner {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--panel-border));
+  color: var(--danger);
+  background: var(--danger-bg);
 }

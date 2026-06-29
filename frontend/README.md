@@ -1,6 +1,6 @@
-# ARF Frontend
+# Portal Frontend
 
-React + Vite frontend for ARF dashboards.
+React + Vite frontend for Portal dashboards.
 
 ## Layout
 

@@ -17,8 +17,13 @@ DEFAULT_OUTPUT_DB = Path(__file__).resolve().parents[2] / "data" / "critical_ass
 DEFAULT_EXPORT_JSON = Path(__file__).resolve().parents[2] / "public" / "data" / "critical-assets.json"
 
 
+def portal_env(name: str) -> str | None:
+    legacy_name = f"ARF_{name.removeprefix('PORTAL_')}"
+    return os.getenv(name) or os.getenv(legacy_name)
+
+
 def data_sources_config_path() -> Path:
-    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    configured_path = portal_env("PORTAL_DATA_SOURCES_CONFIG")
     return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
 
 

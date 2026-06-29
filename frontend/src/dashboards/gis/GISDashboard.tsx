@@ -7,6 +7,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { Activity, BarChart3, Database, Filter, Layers, MapPinned, Search, ShieldAlert, Target } from 'lucide-react'
 import '../critical-team/CriticalTeamDashboard.css'
 import './GISDashboard.css'
+import './MapTilesTheme.css'
 import { Checkbox } from '@/components/ui/checkbox'
 import { fetchGISLayerFeatures, fetchGISLayers } from './api'
 import type { GISFeature, GISFeatureCollection, GISLayerMeta, GISLayerRenderer } from './types'
@@ -249,7 +250,7 @@ const NO_DATA_FILL_COLOR: [number, number, number, number] = [148, 163, 184, 70]
 const NO_DATA_LINE_COLOR: [number, number, number, number] = [148, 163, 184, 160]
 const ASSET_LABEL_LAYER_IDS = ['critical_asset_pipes', 'critical_asset_structures']
 const FACILITY_RENDERER_LAYER_ID = 'facility_polygons'
-const DEFAULT_FACILITY_RENDERER_FIELD = 'TOTAL_RISK_PIPES_MAX'
+const DEFAULT_FACILITY_RENDERER_FIELD = 'CONDITION_RISK_BOTH_MAX'
 const MAP_POINT_SYMBOL_SIZE_PX = 5
 const MAP_LINE_SYMBOL_WIDTH_PX = 2
 const ASSET_LABEL_TEXT_SIZE_PX = 13
@@ -1080,7 +1081,7 @@ export default function GISDashboard() {
   const [basemapStyle, setBasemapStyle] = useState<MapLibreStyleObject>(GIS_BASEMAP_STYLE)
   const [viewState, setViewState] = useState<ViewState>(DEFAULT_VIEW_STATE)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
-  const [spatialFilterEnabled, setSpatialFilterEnabled] = useState(true)
+  const spatialFilterEnabled = true
   const [spatialLoading, setSpatialLoading] = useState(false)
   const [mapFrameSize, setMapFrameSize] = useState<MapFrameSize>({ width: 0, height: 0 })
   const [mapSearchTerm, setMapSearchTerm] = useState('')
@@ -1097,7 +1098,7 @@ export default function GISDashboard() {
   const [topRecordRiskByTab, setTopRecordRiskByTab] = useState<Record<TopRecordTab, TopRecordRiskKey>>({
     culverts: 'total',
     structures: 'condition',
-    pipes: 'total',
+    pipes: 'condition',
   })
   const [flashTarget, setFlashTarget] = useState<FlashTarget | null>(null)
   const [flashVisible, setFlashVisible] = useState(false)
@@ -1643,7 +1644,6 @@ export default function GISDashboard() {
         .filter((item): item is MapSearchResult => Boolean(item)),
     )
   }, [filteredSearchFeatureData, layers, mapSearchTerm])
-  const loadedRecordCount = visibleFeatures.length
   const culvertFeatures = filteredFeatureData[FACILITY_RENDERER_LAYER_ID]?.features ?? []
   const allCulvertFeatures = searchFeatureData[FACILITY_RENDERER_LAYER_ID]?.features ?? featureData[FACILITY_RENDERER_LAYER_ID]?.features ?? []
   const pipeFeatures = filteredFeatureData[PIPE_LAYER_ID]?.features ?? []
@@ -1984,136 +1984,153 @@ export default function GISDashboard() {
   return (
     <div className="gis-dashboard gis-control-room gis-facility-dashboard">
       <main className="gis-control-grid">
-        <section className="gis-panel gis-overview-panel">
-          <div className="gis-panel-header">
-            <span>Connections</span>
-            <strong>Spatial Layers</strong>
-          </div>
-          <button
-            className="gis-system-card gis-renderer-summary-card"
-            type="button"
-            onClick={openRendererWizard}
-            disabled={!facilityRenderers.length}
-            title="Choose facility risk renderer"
-          >
-            <MapPinned size={24} />
-            <div>
-              <span>Active Facility View</span>
-              <strong>{activeFacilityRenderer ? rendererRiskTypeLabel(activeFacilityRenderer) : 'Single Symbol'}</strong>
-              <small>{activeFacilityRenderer ? `${rendererMeasureLabel(activeFacilityRenderer)} values rendering` : 'Select rendering values'}</small>
+        <aside className="gis-left-rail">
+          <section className="gis-panel gis-overview-panel">
+            <div className="gis-panel-header">
+              <span>Connections</span>
+              <strong>Spatial Layers</strong>
             </div>
-          </button>
-
-          <div className="gis-layer-list">
-            {layers.map((layer) => (
-              <div className="gis-layer-item" key={layer.id}>
-                <label className="gis-layer-toggle">
-                  <Checkbox
-                    checked={Boolean(visibleLayers[layer.id])}
-                    onCheckedChange={(checked) => setVisibleLayers((current) => ({ ...current, [layer.id]: Boolean(checked) }))}
-                  />
-                  <i style={{ background: layer.color }} />
-                  <span>{layer.label}</span>
-                  <em>{(spatialFilterEnabled ? layerRenderedCounts[layer.id] ?? 0 : layer.row_count).toLocaleString()}</em>
-                  {(() => {
-                    const isFilterableLayer =
-                      layer.id === FACILITY_RENDERER_LAYER_ID || layer.id === PIPE_LAYER_ID || layer.id === STRUCTURE_LAYER_ID
-                    const isActiveFilterLayer =
-                      (layer.id === FACILITY_RENDERER_LAYER_ID && culvertFiltersActive) ||
-                      (layer.id === PIPE_LAYER_ID && pipeFiltersActive) ||
-                      (layer.id === STRUCTURE_LAYER_ID && structureFiltersActive)
-                    return (
-                      <button
-                        className={`gis-layer-filter-button ${isActiveFilterLayer ? 'active' : ''}`}
-                        disabled={!isFilterableLayer}
-                        type="button"
-                        title={isFilterableLayer ? `Filter ${layer.label}` : 'Attribute filters are available for culverts, pipes, and structures'}
-                        aria-label={isFilterableLayer ? `Filter ${layer.label}` : `Filter ${layer.label}`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          if (isFilterableLayer) {
-                            setLayerFilterPanelOpen(layer.id)
-                          }
-                        }}
-                      >
-                        <Filter size={13} />
-                      </button>
-                    )
-                  })()}
-                </label>
+            <button
+              className="gis-system-card gis-renderer-summary-card"
+              type="button"
+              onClick={openRendererWizard}
+              disabled={!facilityRenderers.length}
+              title="Choose facility risk renderer"
+            >
+              <MapPinned size={24} />
+              <div>
+                <span>Active Facility View</span>
+                <strong>{activeFacilityRenderer ? rendererRiskTypeLabel(activeFacilityRenderer) : 'Single Symbol'}</strong>
+                <small>{activeFacilityRenderer ? `${rendererMeasureLabel(activeFacilityRenderer)} values rendering` : 'Select rendering values'}</small>
               </div>
-            ))}
-          </div>
+            </button>
 
-          <div className="gis-top-records">
-            <div className="gis-top-records-header">
-              <span>TOP 10</span>
+            <div className="gis-layer-list">
+              {layers.map((layer) => (
+                <div className="gis-layer-item" key={layer.id}>
+                  <label className="gis-layer-toggle">
+                    <Checkbox
+                      checked={Boolean(visibleLayers[layer.id])}
+                      onCheckedChange={(checked) => setVisibleLayers((current) => ({ ...current, [layer.id]: Boolean(checked) }))}
+                    />
+                    <i style={{ background: layer.color }} />
+                    <span>{layer.label}</span>
+                    <em>{(spatialFilterEnabled ? layerRenderedCounts[layer.id] ?? 0 : layer.row_count).toLocaleString()}</em>
+                    {(() => {
+                      const isFilterableLayer =
+                        layer.id === FACILITY_RENDERER_LAYER_ID || layer.id === PIPE_LAYER_ID || layer.id === STRUCTURE_LAYER_ID
+                      const isActiveFilterLayer =
+                        (layer.id === FACILITY_RENDERER_LAYER_ID && culvertFiltersActive) ||
+                        (layer.id === PIPE_LAYER_ID && pipeFiltersActive) ||
+                        (layer.id === STRUCTURE_LAYER_ID && structureFiltersActive)
+                      return (
+                        <button
+                          className={`gis-layer-filter-button ${isActiveFilterLayer ? 'active' : ''}`}
+                          disabled={!isFilterableLayer}
+                          type="button"
+                          title={isFilterableLayer ? `Filter ${layer.label}` : 'Attribute filters are available for culverts, pipes, and structures'}
+                          aria-label={isFilterableLayer ? `Filter ${layer.label}` : `Filter ${layer.label}`}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            if (isFilterableLayer) {
+                              setLayerFilterPanelOpen(layer.id)
+                            }
+                          }}
+                        >
+                          <Filter size={13} />
+                        </button>
+                      )
+                    })()}
+                  </label>
+                </div>
+              ))}
+            </div>
+
+          </section>
+
+          <section className="gis-panel gis-top-records-panel">
+            <div className="gis-panel-header">
+              <span>Top 10</span>
               <strong>{currentTopRecords.length.toLocaleString()}</strong>
             </div>
-            <div className="gis-top-record-tabs" role="tablist" aria-label="Top filtered records">
-              {[
-                ['culverts', 'Culvert'],
-                ['structures', 'Structures'],
-                ['pipes', 'Pipes'],
-              ].map(([tab, label]) => (
-                <button
-                  aria-selected={topRecordTab === tab}
-                  className={topRecordTab === tab ? 'active' : ''}
-                  key={tab}
-                  role="tab"
-                  type="button"
-                  onClick={() => setTopRecordTab(tab as TopRecordTab)}
-                >
-                  {label}
-                  <small>{topRecordTabs[tab as TopRecordTab].length}</small>
-                </button>
-              ))}
-            </div>
-            <div className="gis-top-risk-selector" aria-label={`Ranking risk for ${topRecordTab}`} role="radiogroup">
-              {TOP_RECORD_RISK_OPTIONS.map((option) => (
-                <button
-                  aria-checked={currentTopRecordRisk === option.key}
-                  className={currentTopRecordRisk === option.key ? 'active' : ''}
-                  key={option.key}
-                  role="radio"
-                  type="button"
-                  onClick={() => setTopRecordRiskByTab((current) => ({ ...current, [topRecordTab]: option.key }))}
-                >
-                  <i aria-hidden="true" />
-                  {option.label}
-                </button>
-              ))}
-            </div>
-            <div className="gis-top-record-list" role="tabpanel">
-              {currentTopRecords.length ? (
-                currentTopRecords.map((item, index) => (
-                  <button key={item.id} type="button" onClick={() => zoomToTopRecord(item)}>
-                    <span>{index + 1}</span>
-                    <div>
-                      <strong>{item.title}</strong>
-                      <small>{item.subtitle}</small>
-                    </div>
-                    <em>
-                      {formatMetric(item.value)}
-                      <small>{item.valueLabel}</small>
-                    </em>
+            <div className="gis-top-records">
+              <div className="gis-top-record-tabs" role="tablist" aria-label="Top filtered records">
+                {[
+                  ['culverts', 'Culvert'],
+                  ['structures', 'Structures'],
+                  ['pipes', 'Pipes'],
+                ].map(([tab, label]) => (
+                  <button
+                    aria-selected={topRecordTab === tab}
+                    className={topRecordTab === tab ? 'active' : ''}
+                    key={tab}
+                    role="tab"
+                    type="button"
+                    onClick={() => setTopRecordTab(tab as TopRecordTab)}
+                  >
+                    {label}
+                    <small>{topRecordTabs[tab as TopRecordTab].length}</small>
                   </button>
-                ))
-              ) : (
-                <div className="gis-top-record-empty">No filtered records with risk values.</div>
-              )}
+                ))}
+              </div>
+              <div className="gis-top-risk-selector" aria-label={`Ranking risk for ${topRecordTab}`} role="radiogroup">
+                {TOP_RECORD_RISK_OPTIONS.map((option) => (
+                  <button
+                    aria-checked={currentTopRecordRisk === option.key}
+                    className={currentTopRecordRisk === option.key ? 'active' : ''}
+                    key={option.key}
+                    role="radio"
+                    type="button"
+                    onClick={() => setTopRecordRiskByTab((current) => ({ ...current, [topRecordTab]: option.key }))}
+                  >
+                    <i aria-hidden="true" />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+              <div className="gis-top-record-list" role="tabpanel">
+                {currentTopRecords.length ? (
+                  currentTopRecords.map((item, index) => (
+                    <button key={item.id} type="button" onClick={() => zoomToTopRecord(item)}>
+                      <span>{index + 1}</span>
+                      <div>
+                        <strong>{item.title}</strong>
+                        <small>{item.subtitle}</small>
+                      </div>
+                      <em>
+                        {formatMetric(item.value)}
+                        <small>{item.valueLabel}</small>
+                      </em>
+                    </button>
+                  ))
+                ) : (
+                  <div className="gis-top-record-empty">No filtered records with risk values.</div>
+                )}
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </aside>
 
         <section className="gis-panel gis-map-panel">
-          <div className="gis-map-toolbar">
-            <div>
-              <span>Critical Asset Spatial Intelligence</span>
-              <strong>{selectedFeature ? featureTitle(selectedFeature.properties) : 'Critical Asset'}</strong>
-            </div>
-            <div>
+          {error ? <div className="gis-error-banner">{error}</div> : null}
+          <div className="gis-map-frame" ref={mapFrameRef}>
+            <DeckGL
+              controller
+              layers={deckLayers}
+              viewState={viewState}
+              onViewStateChange={({ viewState: nextViewState }) => setViewState(constrainMapViewState(nextViewState as ViewState, mapFrameSize))}
+              getTooltip={({ object, layer }) => {
+                if (!object?.properties) return null
+                return {
+                  html: featureTooltipHtml(dashboardLayerIdFromDeckLayerId(layer?.id), object.properties),
+                }
+              }}
+            >
+              <Map attributionControl={false} mapLib={maplibregl} mapStyle={basemapStyle as never} />
+            </DeckGL>
+
+            <div className="gis-map-floating-search">
               <div className="gis-map-search">
                 <div className="gis-map-search-box">
                   <Search size={16} />
@@ -2171,36 +2188,7 @@ export default function GISDashboard() {
                   </div>
                 ) : null}
               </div>
-              <button
-                aria-pressed={spatialFilterEnabled}
-                className={`gis-spatial-filter-switch ${spatialFilterEnabled ? 'active' : ''}`}
-                title="Use current visible map area as a spatial filter"
-                type="button"
-                onClick={() => setSpatialFilterEnabled((current) => !current)}
-              >
-                <span>Spatial filter</span>
-                <i aria-hidden="true" />
-              </button>
-              <span>{loadedRecordCount.toLocaleString()} rendered</span>
-              <span>{visibleLayerList.length.toLocaleString()} active layers</span>
             </div>
-          </div>
-          {error ? <div className="gis-error-banner">{error}</div> : null}
-          <div className="gis-map-frame" ref={mapFrameRef}>
-            <DeckGL
-              controller
-              layers={deckLayers}
-              viewState={viewState}
-              onViewStateChange={({ viewState: nextViewState }) => setViewState(constrainMapViewState(nextViewState as ViewState, mapFrameSize))}
-              getTooltip={({ object, layer }) => {
-                if (!object?.properties) return null
-                return {
-                  html: featureTooltipHtml(dashboardLayerIdFromDeckLayerId(layer?.id), object.properties),
-                }
-              }}
-            >
-              <Map attributionControl={false} mapLib={maplibregl} mapStyle={basemapStyle as never} />
-            </DeckGL>
 
             {visibleLayers[FACILITY_RENDERER_LAYER_ID] && activeFacilityRenderer && activeFacilityHistogram ? (
               <div className="gis-culvert-histogram" aria-label={`Filtered Culvert histogram for ${rendererRiskTypeLabel(activeFacilityRenderer)}`}>
@@ -2220,6 +2208,7 @@ export default function GISDashboard() {
                         aria-label={`${formatMetric(bin.min)} to ${formatMetric(bin.max)}: ${bin.count.toLocaleString()} culverts`}
                         className="gis-culvert-histogram-bin"
                         key={`${bin.min}-${bin.max}-${index}`}
+                        style={{ '--bar-height': `${height}px` } as CSSProperties}
                         title={`${formatMetric(bin.min)} - ${formatMetric(bin.max)}: ${bin.count.toLocaleString()}`}
                       >
                         <b>{bin.count.toLocaleString()}</b>

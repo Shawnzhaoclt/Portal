@@ -75,8 +75,8 @@ html.critical-asset-dashboard-active #root {
 
 .chart-label-switch:hover,
 .chart-label-switch.active {
-  border-color: rgba(33, 150, 243, 0.5);
-  color: #1769aa;
+  border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent);
+  color: var(--brand-blue);
   background: rgba(239, 248, 255, 0.86);
 }
 
@@ -103,7 +103,7 @@ html.critical-asset-dashboard-active #root {
 }
 
 .chart-label-switch.active i {
-  background: #2196f3;
+  background: var(--brand-blue);
 }
 
 .chart-label-switch.active i::before {
@@ -192,7 +192,7 @@ html.critical-asset-dashboard-active #root {
   border-radius: 999px;
   padding: 0 9px;
   background: rgba(255, 255, 255, 0.72);
-  color: #17617d;
+  color: var(--brand-blue);
   font-weight: 820;
 }
 
@@ -405,8 +405,8 @@ html.critical-asset-dashboard-active #root {
 
 .asset-column-filter-button:hover,
 .asset-column-filter-button.active {
-  border-color: rgba(33, 150, 243, 0.5);
-  color: #1769aa;
+  border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent);
+  color: var(--brand-blue);
   background: rgba(239, 248, 255, 0.9);
 }
 
@@ -480,12 +480,12 @@ html.critical-asset-dashboard-active #root {
   background:
     linear-gradient(
       to right,
-      #b8d3ed 0%,
-      #b8d3ed var(--min-pct),
-      #1976d2 var(--min-pct),
-      #1976d2 var(--max-pct),
-      #b8d3ed var(--max-pct),
-      #b8d3ed 100%
+      color-mix(in srgb, var(--brand-blue) 28%, #ffffff) 0%,
+      color-mix(in srgb, var(--brand-blue) 28%, #ffffff) var(--min-pct),
+      var(--brand-blue) var(--min-pct),
+      var(--brand-blue) var(--max-pct),
+      color-mix(in srgb, var(--brand-blue) 28%, #ffffff) var(--max-pct),
+      color-mix(in srgb, var(--brand-blue) 28%, #ffffff) 100%
     );
   transform: translateY(-50%);
 }
@@ -539,7 +539,7 @@ html.critical-asset-dashboard-active #root {
   margin-top: -5px;
   border: 0;
   border-radius: 999px;
-  background: #1976d2;
+  background: var(--brand-blue);
   box-shadow: 0 2px 5px rgba(15, 23, 42, 0.22);
   cursor: pointer;
   pointer-events: auto;
@@ -560,7 +560,7 @@ html.critical-asset-dashboard-active #root {
   height: 13px;
   border: 0;
   border-radius: 999px;
-  background: #1976d2;
+  background: var(--brand-blue);
   box-shadow: 0 2px 5px rgba(15, 23, 42, 0.22);
   cursor: pointer;
   pointer-events: auto;
@@ -634,4 +634,135 @@ html.critical-asset-dashboard-active #root {
     flex-wrap: wrap;
     justify-content: flex-start;
   }
+}
+
+.asset-dashboard {
+  color: var(--app-text);
+  background: var(--app-bg);
+}
+
+.chart-label-switch,
+.asset-stat-strip span,
+.asset-table-meta span,
+.asset-slider-range-filter > .asset-slider-range-readout strong,
+.asset-flag-list,
+.asset-filter-checklist,
+.asset-column-filter-button,
+.asset-column-filter-input,
+.asset-column-filter-empty,
+.asset-table-filter-popover,
+.asset-slider-inputs input,
+.asset-date-filter input {
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background: var(--control-bg);
+}
+
+.chart-label-switch:hover,
+.chart-label-switch.active,
+.asset-column-filter-button:hover,
+.asset-column-filter-button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel-active-bg);
+}
+
+.chart-label-switch i {
+  background: var(--panel-border-strong);
+}
+
+.chart-label-switch i::before {
+  background: var(--panel-bg);
+}
+
+.chart-label-switch.active i,
+.asset-dual-range-input::-webkit-slider-thumb,
+.asset-dual-range-input::-moz-range-thumb {
+  background: var(--accent);
+}
+
+.asset-stat-strip span,
+.asset-table-meta span,
+.asset-section-title-row span,
+.asset-slider-readout span,
+.asset-pagination span {
+  color: var(--panel-muted);
+}
+
+.asset-slider-range-filter > .asset-slider-range-readout,
+.asset-data-table td.table-row-heading,
+.asset-data-table .sort-button,
+.asset-slider-filter strong,
+.asset-date-filter strong,
+.asset-checklist-filter strong {
+  color: var(--panel-text);
+}
+
+.asset-flag-row,
+.asset-filter-checklist label,
+.asset-checklist-filter label {
+  color: var(--panel-text);
+}
+
+.asset-dual-range::before {
+  background:
+    linear-gradient(
+      to right,
+      var(--panel-border-strong) 0%,
+      var(--panel-border-strong) var(--min-pct),
+      var(--accent) var(--min-pct),
+      var(--accent) var(--max-pct),
+      var(--panel-border-strong) var(--max-pct),
+      var(--panel-border-strong) 100%
+    );
+}
+
+.asset-data-table thead tr:first-child th {
+  background: var(--table-head-bg);
+}
+
+.asset-data-table thead tr.asset-column-filter-row th {
+  background: var(--table-subhead-bg);
+}
+
+.asset-data-table tbody tr.facility-group-start td {
+  border-top-color: var(--panel-border-strong);
+}
+
+.asset-data-table tbody tr.asset-group-start td:not(.table-row-heading),
+.asset-data-table tbody tr.asset-group-start td.table-row-heading:nth-child(n + 2) {
+  border-top-color: var(--panel-border);
+}
+
+.asset-column-filter-empty {
+  color: var(--panel-disabled);
+  background: var(--panel-toolbar-bg);
+}
+
+.asset-dashboard.portal-view-mode.detail-mode .asset-table-panel {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+/* Portal table entries use square group and container geometry. */
+.asset-dashboard.portal-view-mode .asset-table-panel,
+.asset-dashboard.portal-view-mode .asset-table-wrap,
+.asset-dashboard.portal-view-mode .asset-table-meta span,
+.asset-dashboard.portal-view-mode .asset-column-filter-button,
+.asset-dashboard.portal-view-mode .asset-column-filter-input,
+.asset-dashboard.portal-view-mode .asset-column-filter-empty,
+.asset-dashboard.portal-view-mode .table-download-button,
+.asset-dashboard.portal-view-mode .table-clear-filters-button,
+.asset-dashboard.portal-view-mode .page-size-select,
+.asset-dashboard.portal-view-mode input,
+.asset-dashboard.portal-view-mode select,
+.asset-table-filter-popover,
+.asset-table-filter-popover input,
+.asset-table-filter-popover button,
+.asset-table-filter-popover .asset-flag-list,
+.asset-table-filter-popover .asset-filter-checklist,
+.asset-table-filter-popover .asset-slider-range-filter > .asset-slider-range-readout strong {
+  border-radius: 0;
 }

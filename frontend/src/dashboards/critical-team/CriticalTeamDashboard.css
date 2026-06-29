@@ -51,7 +51,7 @@
   place-items: center;
   border-radius: var(--radius);
   color: #ffffff;
-  background: #155e75;
+  background: var(--brand-blue);
 }
 
 .brand-block strong,
@@ -112,13 +112,13 @@
 
 .nav-group button:hover,
 .nav-group button.active {
-  border-color: #b7d6df;
-  color: #155e75;
-  background: #eaf5f7;
+  border-color: color-mix(in srgb, var(--brand-blue) 34%, transparent);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .nav-group button.active svg {
-  color: #155e75;
+  color: var(--brand-blue);
 }
 
 .sheet-canvas {
@@ -147,13 +147,13 @@
 
 .clear-button:hover,
 .pagination button:hover:not(:disabled) {
-  border-color: #155e75;
-  color: #155e75;
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
 }
 
 .kpi {
-  --kpi-color: #155e75;
-  --kpi-soft: #eaf5f7;
+  --kpi-color: var(--brand-blue);
+  --kpi-soft: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
   position: relative;
   display: grid;
   grid-template-columns: 46px minmax(0, 1fr);
@@ -231,13 +231,13 @@
 }
 
 .kpi-teal {
-  --kpi-color: #155e75;
-  --kpi-soft: #eaf5f7;
+  --kpi-color: var(--brand-blue);
+  --kpi-soft: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .kpi-blue {
-  --kpi-color: #4e79a7;
-  --kpi-soft: #e8f1fb;
+  --kpi-color: var(--brand-blue);
+  --kpi-soft: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .kpi-orange {
@@ -341,8 +341,8 @@
 
 .chart-view-toggle button:hover,
 .chart-view-toggle button.active {
-  color: #075985;
-  background: rgba(224, 242, 254, 0.74);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 12%, transparent);
 }
 
 .chart-export-popover {
@@ -370,7 +370,7 @@
 }
 
 .filter-title svg {
-  color: #155e75;
+  color: var(--brand-blue);
 }
 
 .filter-title strong {
@@ -381,8 +381,8 @@
   flex: 0 0 auto;
   border-radius: 999px;
   padding: 3px 8px;
-  color: #155e75;
-  background: #eaf5f7;
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
   font-size: 12px;
   font-weight: 800;
 }
@@ -425,8 +425,8 @@ select {
 
 input:focus,
 select:focus {
-  border-color: #155e75;
-  box-shadow: 0 0 0 3px rgba(21, 94, 117, 0.12);
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-blue) 12%, transparent);
 }
 
 .input-with-icon,
@@ -471,9 +471,9 @@ select:focus {
 }
 
 .boolean-filter button.active {
-  border-color: #155e75;
-  color: #155e75;
-  background: #eaf5f7;
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .switch-row {
@@ -491,7 +491,7 @@ select:focus {
 .switch-row input {
   width: 18px;
   min-height: 18px;
-  accent-color: #155e75;
+  accent-color: var(--brand-blue);
 }
 
 .check-grid {
@@ -512,9 +512,9 @@ select:focus {
 }
 
 .check-grid button.active {
-  border-color: #155e75;
-  color: #155e75;
-  background: #eaf5f7;
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .checklist-filter > label {
@@ -562,13 +562,13 @@ select:focus {
   gap: 4px;
   margin-top: 12px;
   padding: 10px 11px;
-  border: 1px solid #b7d6df;
+  border: 1px solid color-mix(in srgb, var(--brand-blue) 34%, transparent);
   border-radius: var(--radius);
-  background: #eaf5f7;
+  background: color-mix(in srgb, var(--brand-blue) 10%, #ffffff);
 }
 
 .fixed-filter strong {
-  color: #155e75;
+  color: var(--brand-blue);
   font-size: 11px;
   text-transform: uppercase;
 }
@@ -644,7 +644,7 @@ summary {
 
 .panel-header svg {
   flex: 0 0 auto;
-  color: #155e75;
+  color: var(--brand-blue);
 }
 
 .panel-header h2 {
@@ -716,7 +716,7 @@ summary {
 }
 
 .source-list span {
-  color: #155e75;
+  color: var(--brand-blue);
   font-size: 12px;
   font-weight: 800;
 }
@@ -762,7 +762,7 @@ table {
 
 .detail-table {
   width: 100%;
-  min-width: 0;
+  min-width: 1280px;
   table-layout: fixed;
 }
 
@@ -792,6 +792,16 @@ table {
 .detail-table .sort-button svg {
   width: 12px;
   height: 12px;
+}
+
+.detail-table .static-column-label {
+  display: block;
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 820;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detail-table .date-filter-cell,
@@ -941,11 +951,11 @@ th button {
 }
 
 .sort-button.active {
-  color: #155e75;
+  color: var(--brand-blue);
 }
 
 .sort-button.active svg {
-  color: #155e75;
+  color: var(--brand-blue);
 }
 
 .matrix-sort-button {
@@ -996,12 +1006,15 @@ tbody tr:hover {
 
 .matrix-table tbody tr.selected-row td:first-child,
 .detail-table tbody tr.selected-row td:first-child {
-  box-shadow: inset 0 1px 0 #a9cfd8, inset 0 -1px 0 #a9cfd8, inset 3px 0 0 #155e75;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--brand-blue) 28%, #ffffff),
+    inset 0 -1px 0 color-mix(in srgb, var(--brand-blue) 28%, #ffffff),
+    inset 3px 0 0 var(--brand-blue);
 }
 
 .matrix-table tbody tr[tabindex='0']:focus-visible td,
 .detail-table tbody tr[tabindex='0']:focus-visible td {
-  outline: 2px solid rgba(21, 94, 117, 0.35);
+  outline: 2px solid color-mix(in srgb, var(--brand-blue) 35%, transparent);
   outline-offset: -2px;
 }
 
@@ -1049,8 +1062,8 @@ tbody tr:hover {
 
 .clear-table-filters:hover:not(:disabled),
 .export-button:hover:not(:disabled) {
-  border-color: #155e75;
-  color: #155e75;
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
 }
 
 .clear-table-filters:disabled,
@@ -1292,7 +1305,7 @@ tbody tr:hover {
 .brand-mark {
   border-radius: 16px;
   color: #ffffff;
-  background: linear-gradient(135deg, #35a8ff 0%, #1d7fe5 100%);
+  background: var(--brand-blue);
   box-shadow: none;
 }
 
@@ -1321,8 +1334,8 @@ tbody tr:hover {
 }
 
 .nav-group button:hover {
-  border-color: rgba(71, 170, 255, 0.36);
-  color: #1769aa;
+  border-color: color-mix(in srgb, var(--brand-blue) 38%, transparent);
+  color: var(--brand-blue);
   background: rgba(255, 255, 255, 0.58);
   box-shadow: none;
 }
@@ -1330,7 +1343,7 @@ tbody tr:hover {
 .nav-group button.active {
   border-color: rgba(255, 255, 255, 0.78);
   color: #ffffff;
-  background: linear-gradient(135deg, #31a9ff 0%, #2196f3 58%, #1685df 100%);
+  background: var(--brand-blue);
   box-shadow: none;
 }
 
@@ -1371,7 +1384,7 @@ tbody tr:hover {
 
 .panel-header svg,
 .filter-title svg {
-  color: #1685df;
+  color: var(--brand-blue);
 }
 
 .panel-header h2 {
@@ -1408,9 +1421,9 @@ tbody tr:hover {
 .export-button:hover:not(:disabled),
 .clear-button:hover,
 .pagination button:hover:not(:disabled) {
-  border-color: rgba(33, 150, 243, 0.5);
-  color: #1769aa;
-  background: rgba(239, 248, 255, 0.86);
+  border-color: color-mix(in srgb, var(--brand-blue) 50%, transparent);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, rgba(255, 255, 255, 0.86));
 }
 
 .filter-popover-content,
@@ -1425,9 +1438,9 @@ tbody tr:hover {
 .filter-title span,
 .boolean-filter button.active,
 .check-grid button.active {
-  border-color: rgba(33, 150, 243, 0.34);
-  color: #1769aa;
-  background: rgba(232, 246, 255, 0.92);
+  border-color: color-mix(in srgb, var(--brand-blue) 34%, transparent);
+  color: var(--brand-blue);
+  background: color-mix(in srgb, var(--brand-blue) 10%, rgba(255, 255, 255, 0.92));
 }
 
 .filter-card > p {
@@ -1447,8 +1460,8 @@ select,
 
 input:focus,
 select:focus {
-  border-color: #2196f3;
-  box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.16);
+  border-color: var(--brand-blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-blue) 16%, transparent);
 }
 
 .boolean-filter button,
@@ -1462,16 +1475,16 @@ select:focus {
 .check-grid button:hover,
 .checklist-option:hover,
 .multi-filter-option:hover {
-  background: rgba(236, 247, 255, 0.86);
+  background: color-mix(in srgb, var(--brand-blue) 10%, rgba(255, 255, 255, 0.86));
 }
 
 .fixed-filter {
-  border-color: rgba(33, 150, 243, 0.3);
-  background: rgba(235, 248, 255, 0.74);
+  border-color: color-mix(in srgb, var(--brand-blue) 30%, transparent);
+  background: color-mix(in srgb, var(--brand-blue) 10%, rgba(255, 255, 255, 0.74));
 }
 
 .fixed-filter strong {
-  color: #1769aa;
+  color: var(--brand-blue);
 }
 
 .profile-grid {
@@ -1613,9 +1626,9 @@ select:focus {
 
 .overview-date-mode button:hover,
 .overview-date-mode button.active {
-  border-color: rgba(14, 116, 144, 0.42);
-  background: rgba(224, 242, 254, 0.68);
-  color: #075985;
+  border-color: color-mix(in srgb, var(--brand-blue) 42%, transparent);
+  background: color-mix(in srgb, var(--brand-blue) 12%, rgba(255, 255, 255, 0.68));
+  color: var(--brand-blue);
 }
 
 .month-picker-control {
@@ -1645,7 +1658,7 @@ select:focus {
 }
 
 .month-picker-control svg {
-  color: #1685df;
+  color: var(--brand-blue);
 }
 
 .month-picker-control input {
@@ -1816,15 +1829,15 @@ td {
   box-shadow:
     inset 0 1px 0 rgba(96, 165, 250, 0.34),
     inset 0 -1px 0 rgba(96, 165, 250, 0.34),
-    inset 3px 0 0 #2196f3;
+    inset 3px 0 0 var(--brand-blue);
 }
 
 .sort-button.active {
-  color: #1769aa;
+  color: var(--brand-blue);
 }
 
 .sort-button.active svg {
-  color: #1769aa;
+  color: var(--brand-blue);
 }
 
 .column-filter-select,
@@ -2017,4 +2030,388 @@ td {
   .workbook-shell.overview-mode .overview-trend-card {
     min-height: 0;
   }
+}
+
+/* Portal entries launch each view directly, so dashboard pages use the full canvas. */
+.workbook-shell.portal-view-mode,
+.workbook-shell.portal-view-mode.overview-mode,
+.workbook-shell.portal-view-mode.detail-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.workbook-shell.portal-view-mode .left-nav {
+  display: none;
+}
+
+.workbook-shell.portal-view-mode .sheet-canvas {
+  grid-column: 1;
+}
+
+@media (max-width: 920px) {
+  .workbook-shell.portal-view-mode,
+  .workbook-shell.portal-view-mode.overview-mode,
+  .workbook-shell.portal-view-mode.detail-mode {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+}
+
+/* Shared portal color system. */
+.workbook-shell {
+  color: var(--app-text);
+  background: var(--app-bg);
+}
+
+.left-nav,
+.sheet-panel,
+.filter-card,
+.chart-panel,
+.table-panel,
+.overview-trend-card,
+.filter-popover-content,
+.chart-export-popover,
+.multi-filter-popover {
+  border-color: var(--panel-border);
+  color: var(--panel-text);
+  background: var(--panel-bg-soft);
+  box-shadow: var(--app-shadow);
+}
+
+.brand-block {
+  border-bottom-color: var(--panel-border);
+}
+
+.brand-mark,
+.nav-group button.active,
+.pagination button.active {
+  color: var(--primary-foreground);
+  background: var(--accent);
+}
+
+.brand-block strong,
+.panel-header h2,
+.kpi strong,
+.filter-title strong,
+.asset-slider-filter strong,
+.asset-date-filter strong,
+.asset-checklist-filter strong,
+.matrix-table .sort-button,
+.detail-table .sort-button,
+.static-column-label {
+  color: var(--panel-text);
+}
+
+.brand-block span,
+.nav-group > span,
+.panel-title-copy p,
+.panel-header-meta,
+.filter-card > p,
+.kpi span,
+.overview-kpi-grid .kpi-value small,
+.month-picker-control > span,
+.pagination span,
+.records-per-page,
+.multi-filter-empty {
+  color: var(--panel-muted);
+}
+
+.nav-group button,
+.floating-filter-button,
+.chart-export-button,
+.table-download-button,
+.clear-table-filters,
+.export-button,
+.clear-button,
+.pagination button,
+.chart-view-toggle button,
+.overview-date-mode button,
+.boolean-filter button,
+.check-grid button,
+.column-filter-select,
+.date-picker-trigger,
+.number-filter-input,
+.multi-filter-trigger,
+.page-size-select,
+input,
+select,
+.input-with-icon,
+.search-box,
+.checklist-options,
+.switch-row,
+.fixed-filter,
+.month-picker-control > div {
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background: var(--control-bg);
+}
+
+.nav-group button svg,
+.panel-header svg,
+.filter-title svg,
+.month-picker-control svg,
+.sort-button.active,
+.sort-button.active svg {
+  color: var(--accent);
+}
+
+.nav-group button:hover,
+.floating-filter-button:hover,
+.chart-export-button:hover,
+.table-download-button:hover,
+.clear-table-filters:hover:not(:disabled),
+.export-button:hover:not(:disabled),
+.clear-button:hover,
+.pagination button:hover:not(:disabled),
+.chart-view-toggle button:hover,
+.chart-view-toggle button.active,
+.overview-date-mode button:hover,
+.overview-date-mode button.active,
+.boolean-filter button:hover,
+.boolean-filter button.active,
+.check-grid button:hover,
+.check-grid button.active,
+.checklist-option:hover,
+.multi-filter-option:hover,
+.multi-filter-trigger:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--panel-active-bg);
+}
+
+input:focus,
+select:focus,
+.number-filter-input:focus,
+.multi-filter-trigger:focus-visible,
+.date-picker-trigger:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.fixed-filter {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--control-border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel-bg));
+}
+
+.fixed-filter strong {
+  color: var(--accent);
+}
+
+.kpi {
+  border-color: color-mix(in srgb, var(--kpi-color) 22%, var(--panel-border));
+  background: color-mix(in srgb, var(--kpi-soft) 34%, var(--panel-bg));
+}
+
+.kpi-icon {
+  background: color-mix(in srgb, var(--kpi-soft) 70%, var(--panel-bg));
+}
+
+.kpi-progress-ring::before {
+  border-color: var(--panel-border);
+  background: var(--panel-bg);
+}
+
+.kpi-progress-ring span {
+  color: var(--panel-text);
+}
+
+.table-wrap {
+  border-color: var(--panel-border);
+  background: var(--panel-bg-soft);
+}
+
+.workbook-shell thead {
+  background: var(--table-head-bg);
+}
+
+.workbook-shell th,
+.workbook-shell td {
+  border-bottom-color: var(--panel-border);
+}
+
+.workbook-shell td,
+.asset-data-table td.table-row-heading {
+  color: var(--panel-text);
+}
+
+.matrix-table .matrix-group-header,
+.matrix-group-header,
+.matrix-total-header,
+.year-header,
+.no-date-header,
+.asset-data-table thead tr:first-child th {
+  color: var(--panel-text);
+  background: var(--table-head-bg);
+}
+
+.quarter-header,
+.column-filter-row th,
+.asset-data-table thead tr.asset-column-filter-row th {
+  background: var(--table-subhead-bg);
+}
+
+.period-header,
+.matrix-total-cell {
+  color: var(--panel-text);
+}
+
+.grand-total-row td,
+.grand-total-row td:first-child {
+  color: var(--panel-text);
+  background: color-mix(in srgb, var(--table-head-bg) 70%, var(--panel-bg));
+}
+
+.matrix-table tbody tr:not(.grand-total-row):not(.selected-row):nth-child(even) td,
+.detail-table tbody tr:not(.selected-row):nth-child(even) td,
+.matrix-table tbody tr:not(.grand-total-row):not(.selected-row):nth-child(even) td:first-child,
+.detail-table tbody tr:not(.selected-row):nth-child(even) td:first-child {
+  background: var(--table-row-alt-bg);
+}
+
+.matrix-table tbody tr:not(.grand-total-row):not(.selected-row):nth-child(odd) td,
+.detail-table tbody tr:not(.selected-row):nth-child(odd) td,
+.matrix-table tbody tr:not(.grand-total-row):not(.selected-row):nth-child(odd) td:first-child,
+.detail-table tbody tr:not(.selected-row):nth-child(odd) td:first-child {
+  background: var(--table-row-bg);
+}
+
+.matrix-table tbody tr:not(.selected-row):hover td,
+.detail-table tbody tr:not(.selected-row):hover td {
+  background: var(--row-hover);
+}
+
+.matrix-table tbody tr.selected-row td,
+.detail-table tbody tr.selected-row td,
+.matrix-table tbody tr.selected-row td:first-child,
+.detail-table tbody tr.selected-row td:first-child {
+  color: var(--panel-text);
+  background: var(--table-row-selected-bg);
+}
+
+.column-filter-select,
+.date-picker-trigger,
+.number-filter-input,
+.multi-filter-trigger,
+.page-size-select {
+  background: var(--input-bg);
+}
+
+.loading-bar {
+  border-color: var(--panel-border);
+  color: var(--panel-muted);
+  background: var(--panel-bg-soft);
+}
+
+.error-banner {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--panel-border));
+  color: var(--danger);
+  background: var(--danger-bg);
+}
+
+html.theme-dark .sheet-panel,
+html.theme-dark .filter-card,
+html.theme-dark .chart-panel,
+html.theme-dark .table-panel,
+html.theme-dark .overview-trend-card {
+  backdrop-filter: none;
+}
+
+/* Direct portal table views should not sit inside an extra workbook card. */
+.workbook-shell.portal-view-mode.overview-mode,
+.workbook-shell.portal-view-mode.detail-mode,
+.workbook-shell.portal-view-mode.table-mode,
+.workbook-shell.portal-view-mode.chart-mode {
+  width: 100%;
+  height: 100dvh;
+  max-height: 100dvh;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  padding: 14px;
+  background: var(--app-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.workbook-shell.portal-view-mode.overview-mode .sheet-canvas,
+.workbook-shell.portal-view-mode.detail-mode .sheet-canvas,
+.workbook-shell.portal-view-mode.table-mode .sheet-canvas,
+.workbook-shell.portal-view-mode.chart-mode .sheet-canvas {
+  height: calc(100dvh - 28px);
+}
+
+.workbook-shell.portal-view-mode.overview-mode .overview-panel,
+.workbook-shell.portal-view-mode.detail-mode .table-panel,
+.workbook-shell.portal-view-mode.table-mode .table-panel,
+.workbook-shell.portal-view-mode.chart-mode .chart-panel {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.workbook-shell.portal-view-mode.overview-mode .overview-panel .panel-header,
+.workbook-shell.portal-view-mode.detail-mode .table-panel .panel-header,
+.workbook-shell.portal-view-mode.table-mode .table-panel .panel-header,
+.workbook-shell.portal-view-mode.chart-mode .chart-panel .panel-header {
+  margin-bottom: 10px;
+}
+
+/* Portal chart and table entries use square group and container geometry. */
+.workbook-shell.portal-view-mode .overview-panel,
+.workbook-shell.portal-view-mode .table-panel,
+.workbook-shell.portal-view-mode .chart-panel,
+.workbook-shell.portal-view-mode .overview-trend-card,
+.workbook-shell.portal-view-mode .overview-kpi-grid .kpi,
+.workbook-shell.portal-view-mode .overview-kpi-grid .kpi-icon,
+.workbook-shell.portal-view-mode .overview-panel .floating-filter-button,
+.workbook-shell.portal-view-mode .table-panel .table-wrap,
+.workbook-shell.portal-view-mode .table-panel .table-download-button,
+.workbook-shell.portal-view-mode .table-panel .clear-table-filters,
+.workbook-shell.portal-view-mode .table-panel .export-button,
+.workbook-shell.portal-view-mode .chart-panel .chart-view-toggle,
+.workbook-shell.portal-view-mode .chart-panel .chart-view-toggle button,
+.workbook-shell.portal-view-mode .chart-panel .chart-export-button,
+.workbook-shell.portal-view-mode .chart-panel .floating-filter-button,
+.workbook-shell.portal-view-mode .table-panel .page-size-select,
+.workbook-shell.portal-view-mode .table-panel .column-filter-select,
+.workbook-shell.portal-view-mode .table-panel .date-picker-trigger,
+.workbook-shell.portal-view-mode .table-panel .number-filter-input,
+.workbook-shell.portal-view-mode .table-panel .multi-filter-trigger,
+.workbook-shell.portal-view-mode .table-panel input,
+.workbook-shell.portal-view-mode .table-panel select,
+.multi-filter-popover,
+.multi-filter-popover .multi-filter-option {
+  border-radius: 0;
+}
+
+html.critical-team-overview-active .filter-popover-content,
+html.critical-team-overview-active .filter-card,
+html.critical-team-overview-active .filter-title span,
+html.critical-team-overview-active .check-grid button,
+html.critical-team-overview-active .boolean-filter button,
+html.critical-team-overview-active .input-with-icon,
+html.critical-team-overview-active .search-box,
+html.critical-team-overview-active .checklist-options,
+html.critical-team-overview-active .checklist-option,
+html.critical-team-overview-active .switch-row,
+html.critical-team-overview-active .fixed-filter,
+html.critical-team-overview-active input,
+html.critical-team-overview-active select,
+html.critical-team-chart-active .filter-popover-content,
+html.critical-team-chart-active .filter-card,
+html.critical-team-chart-active .chart-export-popover,
+html.critical-team-chart-active .chart-export-popover button,
+html.critical-team-chart-active .filter-title span,
+html.critical-team-chart-active .check-grid button,
+html.critical-team-chart-active .boolean-filter button,
+html.critical-team-chart-active .input-with-icon,
+html.critical-team-chart-active .search-box,
+html.critical-team-chart-active .checklist-options,
+html.critical-team-chart-active .checklist-option,
+html.critical-team-chart-active .switch-row,
+html.critical-team-chart-active .fixed-filter,
+html.critical-team-chart-active input,
+html.critical-team-chart-active select {
+  border-radius: 0;
 }

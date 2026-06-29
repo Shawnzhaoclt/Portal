@@ -1,1 +1,1 @@
-"""FastAPI application package for ARF."""
+"""FastAPI application package for Portal."""

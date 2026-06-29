@@ -108,6 +108,7 @@ export function fetchCriticalTeamSheet(sheetId: string, filters: CriticalTeamFil
 const WORKORDER_NUMBER_FILTER_PARAM_PREFIXES: Record<string, string> = {
   workorder_id: 'workorder_id',
   facility_id: 'facility_id',
+  condition_risk: 'condition_risk',
 }
 
 const WORKORDER_CATEGORY_FILTER_PARAMS: Record<string, string> = {

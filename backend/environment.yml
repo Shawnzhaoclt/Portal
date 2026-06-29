@@ -1,4 +1,4 @@
-name: arf
+name: portal
 channels:
   - conda-forge
 dependencies:

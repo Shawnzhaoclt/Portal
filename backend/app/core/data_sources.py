@@ -16,6 +16,11 @@ from backend.app.core.paths import PROJECT_ROOT
 DEFAULT_DATA_SOURCES_CONFIG = PROJECT_ROOT / "backend" / "app" / "config" / "data_sources.json"
 
 
+def portal_env(name: str) -> str | None:
+    legacy_name = f"ARF_{name.removeprefix('PORTAL_')}"
+    return os.getenv(name) or os.getenv(legacy_name)
+
+
 @dataclass(frozen=True)
 class CriticalTeamDataSource:
     source_type: str
@@ -82,7 +87,7 @@ class GISDataSource:
 
 
 def data_sources_config_path() -> Path:
-    configured_path = os.getenv("ARF_DATA_SOURCES_CONFIG")
+    configured_path = portal_env("PORTAL_DATA_SOURCES_CONFIG")
     return Path(configured_path) if configured_path else DEFAULT_DATA_SOURCES_CONFIG
 
 
@@ -93,7 +98,7 @@ def load_data_sources_config() -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail={
-                "message": "ARF data source config file was not found.",
+                "message": "Portal data source config file was not found.",
                 "path": str(path),
             },
         )
@@ -104,7 +109,7 @@ def load_data_sources_config() -> dict[str, Any]:
         raise HTTPException(
             status_code=503,
             detail={
-                "message": "ARF data source config file is not valid JSON.",
+                "message": "Portal data source config file is not valid JSON.",
                 "path": str(path),
                 "error": str(error),
             },
@@ -200,7 +205,7 @@ def gis_data_source() -> GISDataSource:
 
 
 def selected_sql_server_driver() -> str:
-    configured_driver = os.getenv("ARF_SQL_DRIVER")
+    configured_driver = portal_env("PORTAL_SQL_DRIVER")
     if configured_driver:
         return configured_driver
 
@@ -213,7 +218,7 @@ def selected_sql_server_driver() -> str:
 
 
 def critical_team_connection_string(source: CriticalTeamDataSource | None = None) -> str:
-    configured = os.getenv("ARF_CRITICAL_TEAM_CONNECTION_STRING")
+    configured = portal_env("PORTAL_CRITICAL_TEAM_CONNECTION_STRING")
     if configured:
         return configured
 

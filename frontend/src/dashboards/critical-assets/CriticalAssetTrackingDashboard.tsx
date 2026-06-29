@@ -161,7 +161,7 @@ const SOURCE_META: Record<SourceKey, { label: string; shortLabel: string; color:
   both: {
     label: 'Multiple Assets',
     shortLabel: 'Both',
-    color: '#155e75',
+    color: '#255a8f',
     soft: '#e3f6fb',
   },
   pipes: {
@@ -179,14 +179,14 @@ const SOURCE_META: Record<SourceKey, { label: string; shortLabel: string; color:
 }
 
 const METRIC_META: Record<MetricKey, { label: string; column: string; color: string }> = {
-  risk: { label: 'Risk', column: 'RISK', color: '#155e75' },
+  risk: { label: 'Risk', column: 'RISK', color: '#255a8f' },
   condition: { label: 'Condition Risk', column: 'COND_RISK', color: '#4e79a7' },
   flood: { label: 'Flood Risk', column: 'FLOOD_RISK', color: '#3f7f4a' },
   clog: { label: 'Clog Risk', column: 'CLOG_RISK', color: '#c96f16' },
 }
 
 const HISTORY_SERIES = [
-  { key: 'RISK', label: 'Risk', color: '#155e75' },
+  { key: 'RISK', label: 'Risk', color: '#255a8f' },
   { key: 'COND_RISK', label: 'Condition Risk', color: '#4e79a7' },
   { key: 'FLOOD_RISK', label: 'Flood Risk', color: '#3f7f4a' },
   { key: 'CLOG_RISK', label: 'Clog Risk', color: '#c96f16' },
@@ -234,17 +234,6 @@ const TABLE_COLUMN_WIDTHS: Record<string, number> = {
 
 const ASSET_SHEETS: AssetSheet[] = [
   {
-    id: 'risk-facility-aggregate-pipes',
-    title: 'Risk Facility Aggregate - Pipes',
-    workbookTitle: 'Risk Facility Aggregate (Pipes)',
-    category: 'Facility Aggregates',
-    description: 'Risk scores summarized by facility for pipe assets.',
-    kind: 'aggregate',
-    source: 'pipes',
-    metric: 'risk',
-    icon: BarChart3,
-  },
-  {
     id: 'condition-facility-aggregate-both',
     title: 'Condition Risk Facility Aggregate - Both',
     workbookTitle: 'Condition Risk Facility Aggregate (Both)',
@@ -253,39 +242,6 @@ const ASSET_SHEETS: AssetSheet[] = [
     kind: 'aggregate',
     source: 'both',
     metric: 'condition',
-    icon: BarChart3,
-  },
-  {
-    id: 'condition-facility-aggregate-pipes',
-    title: 'Condition Risk Facility Aggregate - Pipes',
-    workbookTitle: 'Condition Risk Facility Aggregate (Pipes)',
-    category: 'Facility Aggregates',
-    description: 'Condition risk summarized by facility for pipe assets.',
-    kind: 'aggregate',
-    source: 'pipes',
-    metric: 'condition',
-    icon: BarChart3,
-  },
-  {
-    id: 'condition-facility-aggregate-structures',
-    title: 'Condition Risk Facility Aggregate - Structures',
-    workbookTitle: 'Condition Risk Facility Aggregate (Structures)',
-    category: 'Facility Aggregates',
-    description: 'Condition risk summarized by facility for structure assets.',
-    kind: 'aggregate',
-    source: 'structures',
-    metric: 'condition',
-    icon: BarChart3,
-  },
-  {
-    id: 'flood-facility-aggregate-pipes',
-    title: 'Flood Risk Facility Aggregate - Pipes',
-    workbookTitle: 'Flood Risk Facility Aggregate (Pipes)',
-    category: 'Facility Aggregates',
-    description: 'Flood risk summarized by facility for pipe assets.',
-    kind: 'aggregate',
-    source: 'pipes',
-    metric: 'flood',
     icon: BarChart3,
   },
   {
@@ -300,16 +256,6 @@ const ASSET_SHEETS: AssetSheet[] = [
     icon: BarChart3,
   },
   {
-    id: 'history-graph-both',
-    title: 'History Graph - Both',
-    workbookTitle: 'History Graph (Both)',
-    category: 'History',
-    description: 'Monthly average risk trend across all tracked assets.',
-    kind: 'history',
-    source: 'both',
-    icon: BarChart3,
-  },
-  {
     id: 'history-table-both',
     title: 'History Table - Both',
     workbookTitle: 'History Table (Both)',
@@ -319,17 +265,24 @@ const ASSET_SHEETS: AssetSheet[] = [
     source: 'both',
     icon: Table2,
   },
-  {
-    id: 'history-table-pipes',
-    title: 'History Table - Pipes',
-    workbookTitle: 'History Table (Pipes)',
-    category: 'History',
-    description: 'Paged, sortable pipe inspection history with pipe-specific fields.',
-    kind: 'table',
-    source: 'pipes',
-    icon: Table2,
-  },
 ]
+
+function initialSheetIdFromUrl() {
+  if (typeof window === 'undefined') return ASSET_SHEETS[0].id
+  const requestedSheetId = new URLSearchParams(window.location.search).get('sheet')
+  return ASSET_SHEETS.some((sheet) => sheet.id === requestedSheetId) ? requestedSheetId : ASSET_SHEETS[0].id
+}
+
+function syncSheetIdToUrl(sheetId: string) {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (sheetId === ASSET_SHEETS[0].id) {
+    url.searchParams.delete('sheet')
+  } else {
+    url.searchParams.set('sheet', sheetId)
+  }
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+}
 
 function createInitialFilters(): FilterState {
   return {
@@ -1039,7 +992,7 @@ function createHistoryChartOption(rows: AssetRow[], showLabels: boolean): EChart
 }
 
 export default function CriticalAssetTrackingDashboard() {
-  const [selectedSheetId, setSelectedSheetId] = useState('risk-facility-aggregate-pipes')
+  const [selectedSheetId, setSelectedSheetId] = useState(initialSheetIdFromUrl)
   const [filterOptions, setFilterOptions] = useState<FilterOptionsResponse | null>(null)
   const [aggregates, setAggregates] = useState<AggregatesResponse | null>(null)
   const [history, setHistory] = useState<HistoryResponse | null>(null)
@@ -1062,6 +1015,11 @@ export default function CriticalAssetTrackingDashboard() {
     () => ASSET_SHEETS.find((sheet) => sheet.id === selectedSheetId) ?? ASSET_SHEETS[0],
     [selectedSheetId],
   )
+
+  useEffect(() => {
+    syncSheetIdToUrl(selectedSheet.id)
+  }, [selectedSheet.id])
+
   const filtersActive = useMemo(
     () => hasActiveAssetFilters(filters) || hasActiveTableColumnFilters(tableColumnFilters),
     [filters, tableColumnFilters],
@@ -1229,7 +1187,7 @@ export default function CriticalAssetTrackingDashboard() {
   }
 
   return (
-    <div className="workbook-shell asset-dashboard detail-mode">
+    <div className="workbook-shell asset-dashboard detail-mode portal-view-mode">
       <aside className="left-nav">
         <div className="brand-block">
           <div className="brand-mark">

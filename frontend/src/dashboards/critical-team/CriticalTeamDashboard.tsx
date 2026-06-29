@@ -88,13 +88,14 @@ type SheetDefinition = {
 const DETAIL_COLUMNS = [
   { key: 'workorder_id', label: 'Work Order ID', placeholder: 'ID', width: '8%' },
   { key: 'facility_id', label: 'Facility ID', placeholder: 'Facility', width: '7%' },
-  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter', width: '9%' },
-  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer', width: '9%' },
-  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status', width: '20%' },
-  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD', width: '12%' },
-  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD', width: '14%' },
-  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD', width: '13%' },
-  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD', width: '9%' },
+  { key: 'condition_risk', label: 'Condition Risk', placeholder: 'Risk', width: '8%' },
+  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter', width: '8%' },
+  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer', width: '8%' },
+  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status', width: '18%' },
+  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD', width: '11%' },
+  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD', width: '13%' },
+  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD', width: '12%' },
+  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD', width: '7%' },
 ] as const
 
 type DetailColumnKey = (typeof DETAIL_COLUMNS)[number]['key']
@@ -104,7 +105,7 @@ const DETAIL_DATE_COLUMN_KEYS = [
   'report_complete_date',
   'wo_closed_date',
 ] as const
-const DETAIL_NUMBER_COLUMN_KEYS = ['workorder_id', 'facility_id'] as const
+const DETAIL_NUMBER_COLUMN_KEYS = ['workorder_id', 'facility_id', 'condition_risk'] as const
 const DETAIL_CATEGORY_COLUMN_KEYS = ['submit_to', 'wo_closed_by', 'critical_team_status'] as const
 
 type DetailDateColumnKey = (typeof DETAIL_DATE_COLUMN_KEYS)[number]
@@ -144,7 +145,7 @@ type PivotSortState = {
 }
 
 const DETAIL_PAGE_SIZE_OPTIONS = [25, 50, 100, 250, 500]
-const DEFAULT_DETAIL_SORT: DetailSortState = { column: 'project_start_date', direction: 'desc' }
+const DEFAULT_DETAIL_SORT: DetailSortState = { column: 'condition_risk', direction: 'desc' }
 const CHART_EXPORT_PIXEL_RATIO = 300 / 96
 
 function isDetailDateColumn(column: DetailColumnKey): column is DetailDateColumnKey {
@@ -222,7 +223,7 @@ const SHEETS: SheetDefinition[] = [
   },
   {
     id: 'insp-comp-date-table',
-    title: 'Inspection Completion Date Table',
+    title: 'Inspection Completion Date',
     kind: 'table',
     category: 'Tables',
     description: 'Inspection completion date cross-tab by submitter.',
@@ -231,7 +232,7 @@ const SHEETS: SheetDefinition[] = [
   },
   {
     id: 'report-comp-date-table',
-    title: 'Report Completion Date Table',
+    title: 'Report Completion Date',
     kind: 'table',
     category: 'Tables',
     description: 'Report completion date cross-tab by submitter.',
@@ -240,7 +241,7 @@ const SHEETS: SheetDefinition[] = [
   },
   {
     id: 'insp-comp-date-reviews-table',
-    title: 'Inspection Completion Date Reviews Table',
+    title: 'Review Completion Date',
     kind: 'table',
     category: 'Tables',
     description: 'Review-complete cross-tab by reviewer and closed month.',
@@ -256,6 +257,23 @@ const SHEETS: SheetDefinition[] = [
     description: 'Operational detail rows from the same Cityworks source.',
   },
 ]
+
+function initialSheetIdFromUrl() {
+  if (typeof window === 'undefined') return 'overview'
+  const requestedSheetId = new URLSearchParams(window.location.search).get('sheet')
+  return SHEETS.some((sheet) => sheet.id === requestedSheetId) ? requestedSheetId : 'overview'
+}
+
+function syncSheetIdToUrl(sheetId: string) {
+  if (typeof window === 'undefined') return
+  const url = new URL(window.location.href)
+  if (sheetId === 'overview') {
+    url.searchParams.delete('sheet')
+  } else {
+    url.searchParams.set('sheet', sheetId)
+  }
+  window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
+}
 
 const INITIAL_FILTERS: CriticalTeamFilters = {
   tableauDefaults: true,
@@ -337,6 +355,16 @@ function formatNumber(value: number | null | undefined) {
   return new Intl.NumberFormat().format(value)
 }
 
+function formatFixedDecimal(value: number | null | undefined, digits = 2) {
+  if (value === null || value === undefined || Number.isNaN(value)) {
+    return '-'
+  }
+  return new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  }).format(value)
+}
+
 function formatPercent(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) {
     return '-'
@@ -364,12 +392,16 @@ function fileNameSlug(value: string) {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'export'
 }
 
-function valueText(value: AssetRow[string]) {
+function valueText(value: AssetRow[string], column?: DetailColumnKey) {
   if (value === null || value === undefined || value === '') {
     return '—'
   }
   if (typeof value === 'boolean') {
     return value ? 'Yes' : 'No'
+  }
+  if (column === 'condition_risk') {
+    const numericValue = typeof value === 'number' ? value : Number(value)
+    return Number.isFinite(numericValue) ? formatFixedDecimal(numericValue, 2) : String(value)
   }
   if (typeof value === 'number') {
     return formatNumber(value)
@@ -506,6 +538,10 @@ function xlsxCell(value: AssetRow[string], column: DetailColumnKey, rowIndex: nu
   const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
   if (value === null || value === undefined || value === '') {
     return `<c r="${cellRef}"/>`
+  }
+
+  if (typeof value === 'number') {
+    return `<c r="${cellRef}"><v>${value}</v></c>`
   }
 
   const rawText = String(value).trim()
@@ -1056,7 +1092,7 @@ function makeOverviewTrendOption(
       data: seriesList.map((series) => series.label),
       textStyle: { color: '#334155', fontSize: 12, fontWeight: 650 },
       pageButtonPosition: 'end',
-      pageIconColor: '#2196f3',
+      pageIconColor: '#255a8f',
       pageIconInactiveColor: '#b7c5cf',
     },
     xAxis: {
@@ -1353,7 +1389,7 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
       data: groups,
       textStyle: { color: '#334155', fontSize: 12 },
       pageButtonPosition: 'end',
-      pageIconColor: '#155e75',
+      pageIconColor: '#255a8f',
       pageIconInactiveColor: '#b7c5cf',
     },
     xAxis: [
@@ -1622,7 +1658,7 @@ function downloadPivotTable(title: string, data: CriticalTeamSheetResponse | nul
 }
 
 function CriticalTeamDashboard() {
-  const [selectedSheetId, setSelectedSheetId] = useState('overview')
+  const [selectedSheetId, setSelectedSheetId] = useState(initialSheetIdFromUrl)
   const [filters, setFilters] = useState<CriticalTeamFilters>(INITIAL_FILTERS)
   const [overviewFilters, setOverviewFilters] = useState<CriticalTeamOverviewFilters>(
     createDefaultOverviewFilters,
@@ -1648,18 +1684,26 @@ function CriticalTeamDashboard() {
   const sheetConfig = source?.sheets[selectedSheet.id]
 
   useEffect(() => {
+    syncSheetIdToUrl(selectedSheet.id)
+  }, [selectedSheet.id])
+
+  useEffect(() => {
     const dashboardClassName = 'critical-team-dashboard-active'
     const overviewClassName = 'critical-team-overview-active'
+    const chartClassName = 'critical-team-chart-active'
     const isOverview = selectedSheet.kind === 'overview'
+    const isChart = selectedSheet.kind === 'chart'
 
     document.documentElement.classList.add(dashboardClassName)
     document.body.classList.add(dashboardClassName)
     document.documentElement.classList.toggle(overviewClassName, isOverview)
     document.body.classList.toggle(overviewClassName, isOverview)
+    document.documentElement.classList.toggle(chartClassName, isChart)
+    document.body.classList.toggle(chartClassName, isChart)
 
     return () => {
-      document.documentElement.classList.remove(dashboardClassName, overviewClassName)
-      document.body.classList.remove(dashboardClassName, overviewClassName)
+      document.documentElement.classList.remove(dashboardClassName, overviewClassName, chartClassName)
+      document.body.classList.remove(dashboardClassName, overviewClassName, chartClassName)
     }
   }, [selectedSheet.kind])
 
@@ -1885,10 +1929,14 @@ function CriticalTeamDashboard() {
 
   const shellClassName =
     selectedSheet.kind === 'overview'
-      ? 'workbook-shell overview-mode'
+      ? 'workbook-shell overview-mode portal-view-mode'
       : selectedSheet.kind === 'details'
-        ? 'workbook-shell detail-mode'
-        : 'workbook-shell'
+        ? 'workbook-shell detail-mode portal-view-mode'
+        : selectedSheet.kind === 'table'
+          ? 'workbook-shell table-mode portal-view-mode'
+          : selectedSheet.kind === 'chart'
+            ? 'workbook-shell chart-mode portal-view-mode'
+            : 'workbook-shell portal-view-mode'
 
   return (
     <div className={shellClassName}>
@@ -3055,13 +3103,20 @@ function DateColumnFilter({
 function NumberColumnFilter({
   label,
   filter,
+  allowDecimal = false,
   onChange,
 }: {
   label: string
   filter: DetailNumberFilter
+  allowDecimal?: boolean
   onChange: (next: Partial<DetailNumberFilter>) => void
 }) {
   function cleanNumber(value: string) {
+    if (allowDecimal) {
+      const cleaned = value.replace(/[^\d.]/g, '')
+      const [integerPart, ...decimalParts] = cleaned.split('.')
+      return decimalParts.length > 0 ? `${integerPart}.${decimalParts.join('')}` : integerPart
+    }
     return value.replace(/\D/g, '')
   }
 
@@ -3086,8 +3141,8 @@ function NumberColumnFilter({
         <Input
           type="number"
           min="0"
-          step="1"
-          inputMode="numeric"
+          step={allowDecimal ? '0.01' : '1'}
+          inputMode={allowDecimal ? 'decimal' : 'numeric'}
           className="number-filter-input"
           value={filter.from}
           aria-label={`${label} ${filter.mode === 'between' ? 'minimum' : 'number'}`}
@@ -3098,8 +3153,8 @@ function NumberColumnFilter({
         <Input
           type="number"
           min="0"
-          step="1"
-          inputMode="numeric"
+          step={allowDecimal ? '0.01' : '1'}
+          inputMode={allowDecimal ? 'decimal' : 'numeric'}
           className="number-filter-input"
           value={filter.to}
           aria-label={`${label} maximum`}
@@ -3224,6 +3279,7 @@ function DetailTable({
         <NumberColumnFilter
           label={column.label}
           filter={columnFilters.numbers[columnKey]}
+          allowDecimal={columnKey === 'condition_risk'}
           onChange={(next) => onNumberFilterChange(columnKey, next)}
         />
       )
@@ -3312,36 +3368,43 @@ function DetailTable({
           </colgroup>
           <thead>
             <tr>
-              {DETAIL_COLUMNS.map((column) => (
-                <th
-                  key={column.key}
-                  aria-sort={
-                    sort.column === column.key
-                      ? sort.direction === 'asc'
-                        ? 'ascending'
-                        : 'descending'
-                      : 'none'
-                  }
-                >
-                  <button
-                    className={sort.column === column.key ? 'sort-button active' : 'sort-button'}
-                    type="button"
-                    onClick={() => onSortChange(column.key)}
-                    title={`Sort by ${column.label}`}
+              {DETAIL_COLUMNS.map((column) => {
+                const sortable = !('sortable' in column && column.sortable === false)
+                return (
+                  <th
+                    key={column.key}
+                    aria-sort={
+                      sortable && sort.column === column.key
+                        ? sort.direction === 'asc'
+                          ? 'ascending'
+                          : 'descending'
+                        : 'none'
+                    }
                   >
-                    <span>{column.label}</span>
-                    {sort.column === column.key ? (
-                      sort.direction === 'asc' ? (
-                        <ArrowUp size={13} />
-                      ) : (
-                        <ArrowDown size={13} />
-                      )
+                    {sortable ? (
+                      <button
+                        className={sort.column === column.key ? 'sort-button active' : 'sort-button'}
+                        type="button"
+                        onClick={() => onSortChange(column.key)}
+                        title={`Sort by ${column.label}`}
+                      >
+                        <span>{column.label}</span>
+                        {sort.column === column.key ? (
+                          sort.direction === 'asc' ? (
+                            <ArrowUp size={13} />
+                          ) : (
+                            <ArrowDown size={13} />
+                          )
+                        ) : (
+                          <ArrowDownUp size={13} />
+                        )}
+                      </button>
                     ) : (
-                      <ArrowDownUp size={13} />
+                      <span className="static-column-label">{column.label}</span>
                     )}
-                  </button>
-                </th>
-              ))}
+                  </th>
+                )
+              })}
             </tr>
             <tr className="column-filter-row">
               {DETAIL_COLUMNS.map((column) => (
@@ -3361,7 +3424,7 @@ function DetailTable({
                   onKeyDown={(event) => handleDetailRowKeyDown(event, rowKey)}
                 >
                   {DETAIL_COLUMNS.map((column) => {
-                    const text = valueText(row[column.key])
+                    const text = valueText(row[column.key], column.key)
                     return (
                       <td key={column.key} title={text}>
                         {text}

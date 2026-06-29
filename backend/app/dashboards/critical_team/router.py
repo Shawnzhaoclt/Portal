@@ -3,11 +3,13 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from typing import Any
 
+import duckdb
 import pyodbc
 from fastapi import APIRouter, HTTPException, Query
 
 from backend.app.core.data_sources import (
     CriticalTeamDataSource,
+    critical_assets_data_source,
     critical_team_connection_string,
     critical_team_data_source,
 )
@@ -17,6 +19,9 @@ from backend.app.core.sql import bracket_identifier, qualified_table_name
 
 router = APIRouter(prefix="/api/critical-team", tags=["critical-team"])
 
+CRITICAL_FACILITY_RISK_TABLE = "critical_facility_highest_risk_assets_by_facility"
+CRITICAL_FACILITY_RISK_FACILITY_COLUMN = "FacilityID"
+CRITICAL_FACILITY_RISK_VALUE_COLUMN = "COND_RISK"
 CRITICAL_TEAM_DATE_COLUMNS = {
     "project_start": "project_start_date",
     "inspection_complete": "inspection_complete_date",
@@ -61,7 +66,7 @@ CRITICAL_TEAM_SHEETS = {
         "exclude_blank_group": False,
     },
     "insp-comp-date-table": {
-        "title": "Insp_Comp_Date_Table",
+        "title": "Inspection Completion Date",
         "kind": "table",
         "date_key": "inspection_complete",
         "group_column": "submit_to",
@@ -79,7 +84,7 @@ CRITICAL_TEAM_SHEETS = {
         "exclude_blank_group": False,
     },
     "report-comp-date-table": {
-        "title": "Report_Comp_Date_Table",
+        "title": "Report Completion Date",
         "kind": "table",
         "date_key": "report_complete",
         "group_column": "submit_to",
@@ -97,7 +102,7 @@ CRITICAL_TEAM_SHEETS = {
         "exclude_blank_group": True,
     },
     "insp-comp-date-reviews-table": {
-        "title": "Insp_Comp_Date_Reviews_Table",
+        "title": "Review Completion Date",
         "kind": "table",
         "date_key": "work_order_closed",
         "group_column": "wo_closed_by",
@@ -121,11 +126,22 @@ CRITICAL_TEAM_COLUMNS = [
     ("inspection_complete_date", "date"),
     ("report_complete_date", "date"),
     ("critical_team_status", "varchar"),
+    ("condition_risk", "double"),
 ]
 
 
 def sql_identifier(identifier: str) -> str:
     return bracket_identifier(identifier)
+
+
+def duckdb_identifier(identifier: str) -> str:
+    return '"' + identifier.replace('"', '""') + '"'
+
+
+def normalize_facility_id(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
 
 
 def critical_team_connection() -> pyodbc.Connection:
@@ -211,6 +227,191 @@ def fetch_one(cursor: pyodbc.Cursor, sql: str, params: list[Any] | None = None) 
     cursor.execute(sql, params or [])
     names = [description[0] for description in cursor.description]
     return names, cursor.fetchone()
+
+
+def critical_facility_condition_risk_by_facility(facility_ids: list[Any]) -> dict[str, float | None]:
+    normalized_ids = sorted({normalized for value in facility_ids if (normalized := normalize_facility_id(value))})
+    if not normalized_ids:
+        return {}
+
+    try:
+        source = critical_assets_data_source()
+    except HTTPException:
+        return {}
+
+    if source.source_type.lower() != "duckdb" or not source.database.exists():
+        return {}
+
+    try:
+        connection = duckdb.connect(str(source.database), read_only=True)
+    except duckdb.Error:
+        return {}
+
+    try:
+        column_rows = connection.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE lower(table_name) = ?
+            """,
+            [CRITICAL_FACILITY_RISK_TABLE.lower()],
+        ).fetchall()
+        columns_by_lower = {str(row[0]).lower(): str(row[0]) for row in column_rows}
+        facility_column = columns_by_lower.get(CRITICAL_FACILITY_RISK_FACILITY_COLUMN.lower())
+        condition_risk_column = columns_by_lower.get(CRITICAL_FACILITY_RISK_VALUE_COLUMN.lower())
+        if not facility_column or not condition_risk_column:
+            return {}
+
+        placeholders = ", ".join(["?"] * len(normalized_ids))
+        rows = connection.execute(
+            f"""
+            WITH ranked_condition_risk AS (
+                SELECT
+                    trim(cast({duckdb_identifier(facility_column)} AS varchar)) AS facility_id,
+                    try_cast({duckdb_identifier(condition_risk_column)} AS double) AS condition_risk,
+                    row_number() OVER (
+                        PARTITION BY trim(cast({duckdb_identifier(facility_column)} AS varchar))
+                        ORDER BY try_cast({duckdb_identifier(condition_risk_column)} AS double) DESC NULLS LAST
+                    ) AS condition_risk_rank
+                FROM {duckdb_identifier(CRITICAL_FACILITY_RISK_TABLE)}
+                WHERE trim(cast({duckdb_identifier(facility_column)} AS varchar)) IN ({placeholders})
+            )
+            SELECT facility_id, condition_risk
+            FROM ranked_condition_risk
+            WHERE condition_risk_rank = 1
+            """,
+            normalized_ids,
+        ).fetchall()
+    except duckdb.Error:
+        return {}
+    finally:
+        connection.close()
+
+    return {normalize_facility_id(facility_id): condition_risk for facility_id, condition_risk in rows}
+
+
+def critical_facility_ids_for_condition_risk_filter(
+    mode: str,
+    value_from: float | None,
+    value_to: float | None,
+) -> list[str] | None:
+    if mode == "any":
+        return None
+    if mode in {"exact", "greater", "less"} and value_from is None:
+        return None
+    if mode == "between" and value_from is None and value_to is None:
+        return None
+
+    try:
+        source = critical_assets_data_source()
+    except HTTPException:
+        return []
+
+    if source.source_type.lower() != "duckdb" or not source.database.exists():
+        return []
+
+    try:
+        connection = duckdb.connect(str(source.database), read_only=True)
+    except duckdb.Error:
+        return []
+
+    try:
+        column_rows = connection.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE lower(table_name) = ?
+            """,
+            [CRITICAL_FACILITY_RISK_TABLE.lower()],
+        ).fetchall()
+        columns_by_lower = {str(row[0]).lower(): str(row[0]) for row in column_rows}
+        facility_column = columns_by_lower.get(CRITICAL_FACILITY_RISK_FACILITY_COLUMN.lower())
+        condition_risk_column = columns_by_lower.get(CRITICAL_FACILITY_RISK_VALUE_COLUMN.lower())
+        if not facility_column or not condition_risk_column:
+            return []
+
+        filter_clauses = ["condition_risk IS NOT NULL"]
+        filter_params: list[Any] = []
+        if mode == "exact" and value_from is not None:
+            filter_clauses.append("condition_risk = ?")
+            filter_params.append(value_from)
+        elif mode == "greater" and value_from is not None:
+            filter_clauses.append("condition_risk > ?")
+            filter_params.append(value_from)
+        elif mode == "less" and value_from is not None:
+            filter_clauses.append("condition_risk < ?")
+            filter_params.append(value_from)
+        elif mode == "between":
+            if value_from is not None:
+                filter_clauses.append("condition_risk >= ?")
+                filter_params.append(value_from)
+            if value_to is not None:
+                filter_clauses.append("condition_risk <= ?")
+                filter_params.append(value_to)
+
+        rows = connection.execute(
+            f"""
+            WITH ranked_condition_risk AS (
+                SELECT
+                    trim(cast({duckdb_identifier(facility_column)} AS varchar)) AS facility_id,
+                    try_cast({duckdb_identifier(condition_risk_column)} AS double) AS condition_risk,
+                    row_number() OVER (
+                        PARTITION BY trim(cast({duckdb_identifier(facility_column)} AS varchar))
+                        ORDER BY try_cast({duckdb_identifier(condition_risk_column)} AS double) DESC NULLS LAST
+                    ) AS condition_risk_rank
+                FROM {duckdb_identifier(CRITICAL_FACILITY_RISK_TABLE)}
+            )
+            SELECT facility_id
+            FROM ranked_condition_risk
+            WHERE condition_risk_rank = 1
+              AND {" AND ".join(filter_clauses)}
+            """,
+            filter_params,
+        ).fetchall()
+    except duckdb.Error:
+        return []
+    finally:
+        connection.close()
+
+    return [normalize_facility_id(row[0]) for row in rows if normalize_facility_id(row[0])]
+
+
+def attach_condition_risk_to_workorders(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    condition_risk_by_facility = critical_facility_condition_risk_by_facility(
+        [row.get("facility_id") for row in rows]
+    )
+    for row in rows:
+        row["condition_risk"] = condition_risk_by_facility.get(normalize_facility_id(row.get("facility_id")))
+    return rows
+
+
+def sortable_number(value: Any) -> float:
+    if value is None:
+        return 0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def sort_workorders_by_condition_risk(
+    rows: list[dict[str, Any]],
+    sort_dir: str,
+) -> list[dict[str, Any]]:
+    descending = sort_dir.lower() == "desc"
+
+    def sort_key(row: dict[str, Any]) -> tuple[bool, float, float, float]:
+        condition_risk = row.get("condition_risk")
+        condition_risk_is_null = condition_risk is None
+        condition_risk_value = sortable_number(condition_risk)
+        return (
+            condition_risk_is_null,
+            -condition_risk_value if descending else condition_risk_value,
+            sortable_number(row.get("facility_id")),
+            sortable_number(row.get("workorders_id")),
+        )
+
+    return sorted(rows, key=sort_key)
 
 
 def critical_team_sheet(sheet_id: str) -> dict[str, Any]:
@@ -712,6 +913,9 @@ def critical_team_workorders(
     facility_id_mode: str = Query(default="any", pattern="^(any|exact|between|greater|less)$"),
     facility_id_from: int | None = Query(default=None),
     facility_id_to: int | None = Query(default=None),
+    condition_risk_mode: str = Query(default="any", pattern="^(any|exact|between|greater|less)$"),
+    condition_risk_from: float | None = Query(default=None),
+    condition_risk_to: float | None = Query(default=None),
     submit_to_filter: list[str] | None = Query(default=None),
     wo_closed_by_filter: list[str] | None = Query(default=None),
     critical_team_status_filter: list[str] | None = Query(default=None),
@@ -753,6 +957,20 @@ def critical_team_workorders(
             if value_to is not None:
                 clauses.append(f"{expression} <= ?")
                 params.append(value_to)
+
+    def add_facility_id_set_filter(facility_ids: list[str] | None) -> None:
+        if facility_ids is None:
+            return
+        if not facility_ids:
+            clauses.append("1 = 0")
+            return
+        chunk_clauses = []
+        for index in range(0, len(facility_ids), 1000):
+            chunk = facility_ids[index:index + 1000]
+            placeholders = ", ".join(["?"] * len(chunk))
+            chunk_clauses.append(f"LTRIM(RTRIM(CAST(facility_id AS varchar(4000)))) IN ({placeholders})")
+            params.extend(chunk)
+        clauses.append(f"({' OR '.join(chunk_clauses)})")
 
     def add_category_filter(column: str, values: list[str] | None) -> None:
         selected = [value for value in values or [] if value]
@@ -813,6 +1031,13 @@ def critical_team_workorders(
 
     add_number_filter("workorders_id", workorder_id_mode, workorder_id_from, workorder_id_to)
     add_number_filter("TRY_CONVERT(BIGINT, facility_id)", facility_id_mode, facility_id_from, facility_id_to)
+    add_facility_id_set_filter(
+        critical_facility_ids_for_condition_risk_filter(
+            condition_risk_mode,
+            condition_risk_from,
+            condition_risk_to,
+        )
+    )
     add_category_filter("submit_to", submit_to_filter)
     add_category_filter("wo_closed_by", wo_closed_by_filter)
     add_category_filter("critical_team_status", critical_team_status_filter)
@@ -844,21 +1069,7 @@ def critical_team_workorders(
         "facility_id": ", facility_id, workorders_id",
     }
     tie_breaker = tie_breakers.get(sort_by, ", workorders_id")
-
-    with critical_team_connection() as con:
-        cursor = con.cursor()
-        total = int(cursor.execute(
-            f"""
-            {critical_team_source_cte(source)}
-            SELECT COUNT(*) FROM critical_team_workorders {where_sql}
-            """,
-            [*critical_team_base_params(source), *params],
-        ).fetchone()[0])
-        names, rows = fetch_all(
-            cursor,
-            f"""
-            {critical_team_source_cte(source)}
-            SELECT
+    select_sql = """
                 workorder_id,
                 workorders_id,
                 facility_id,
@@ -870,19 +1081,54 @@ def critical_team_workorders(
                 inspection_complete_date,
                 report_complete_date,
                 wo_closed_date
-            FROM critical_team_workorders
-            {where_sql}
-            ORDER BY
-                CASE WHEN {order_expression} IS NULL THEN 1 ELSE 0 END,
-                {order_expression} {direction}{tie_breaker}
-            OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+    """
+
+    with critical_team_connection() as con:
+        cursor = con.cursor()
+        total = int(cursor.execute(
+            f"""
+            {critical_team_source_cte(source)}
+            SELECT COUNT(*) FROM critical_team_workorders {where_sql}
             """,
-            [*critical_team_base_params(source), *params, offset, limit],
-        )
+            [*critical_team_base_params(source), *params],
+        ).fetchone()[0])
+        if sort_by == "condition_risk":
+            names, rows = fetch_all(
+                cursor,
+                f"""
+                {critical_team_source_cte(source)}
+                SELECT
+                    {select_sql}
+                FROM critical_team_workorders
+                {where_sql}
+                """,
+                [*critical_team_base_params(source), *params],
+            )
+        else:
+            names, rows = fetch_all(
+                cursor,
+                f"""
+                {critical_team_source_cte(source)}
+                SELECT
+                    {select_sql}
+                FROM critical_team_workorders
+                {where_sql}
+                ORDER BY
+                    CASE WHEN {order_expression} IS NULL THEN 1 ELSE 0 END,
+                    {order_expression} {direction}{tie_breaker}
+                OFFSET ? ROWS FETCH NEXT ? ROWS ONLY
+                """,
+                [*critical_team_base_params(source), *params, offset, limit],
+            )
+
+    records = [clean_record(dict(zip(names, row))) for row in rows]
+    records = attach_condition_risk_to_workorders(records)
+    if sort_by == "condition_risk":
+        records = sort_workorders_by_condition_risk(records, sort_dir)[offset:offset + limit]
 
     return {
         "total": total,
         "limit": limit,
         "offset": offset,
-        "rows": [clean_record(dict(zip(names, row))) for row in rows],
+        "rows": records,
     }

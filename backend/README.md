@@ -1,4 +1,4 @@
-# ARF Backend
+# Portal Backend
 
 FastAPI code now lives under `backend/app` instead of the repository root.
 
@@ -21,7 +21,7 @@ Add future team dashboards as sibling router modules under `backend/app/dashboar
 Use the package path:
 
 ```powershell
-conda run -n arf uvicorn backend.app.api:app --host 127.0.0.1 --port 8000
+conda run -n portal uvicorn backend.app.api:app --host 127.0.0.1 --port 8000
 ```
 
 Runtime logs are written under `backend/app`:

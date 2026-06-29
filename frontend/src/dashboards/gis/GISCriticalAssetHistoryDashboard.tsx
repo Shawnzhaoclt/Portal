@@ -7,6 +7,7 @@ import 'maplibre-gl/dist/maplibre-gl.css'
 import { Activity, Filter, Layers, MapPinned, Search, Target } from 'lucide-react'
 import '../critical-team/CriticalTeamDashboard.css'
 import './GISCriticalAssetHistoryDashboard.css'
+import './MapTilesTheme.css'
 import { Checkbox } from '@/components/ui/checkbox'
 import { fetchGISLayerFeatures, fetchGISLayers } from './api'
 import type { GISFeature, GISFeatureCollection, GISLayerMeta } from './types'
@@ -367,6 +368,7 @@ const STRUCTURE_FILTER_RANGE_CONFIG = PIPE_FILTER_RANGE_CONFIG.filter((filter) =
 const CULVERT_BOTH_FILTER_RANGE_CONFIG = STRUCTURE_FILTER_RANGE_CONFIG
 const PIPE_FILTER_FLAG_PREFIXES = ['INTERSECTS_', 'ZOI_INTERSECTS_']
 const HISTORY_DELTA_LEGEND_VALUES = [-100, -50, -20, 0, 20, 50, 100]
+const DEFAULT_HISTORY_RISK: TopRecordRiskKey = 'condition'
 const TOP_RECORD_RISK_OPTIONS: Array<{
   key: TopRecordRiskKey
   label: string
@@ -1049,7 +1051,7 @@ export default function GISCriticalAssetHistoryDashboard() {
   const [basemapStyle, setBasemapStyle] = useState<MapLibreStyleObject>(GIS_BASEMAP_STYLE)
   const [viewState, setViewState] = useState<ViewState>(DEFAULT_VIEW_STATE)
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null)
-  const [spatialFilterEnabled, setSpatialFilterEnabled] = useState(true)
+  const spatialFilterEnabled = true
   const [spatialLoading, setSpatialLoading] = useState(false)
   const [mapFrameSize, setMapFrameSize] = useState<MapFrameSize>({ width: 0, height: 0 })
   const [mapSearchTerm, setMapSearchTerm] = useState('')
@@ -1059,7 +1061,7 @@ export default function GISCriticalAssetHistoryDashboard() {
   const [structureLayerFilters, setStructureLayerFilters] = useState<AssetLayerFilters>(createInitialStructureLayerFilters)
   const [layerFilterPanelOpen, setLayerFilterPanelOpen] = useState<string | null>(null)
   const [riskFocusPanelOpen, setRiskFocusPanelOpen] = useState(false)
-  const [activeHistoryRisk, setActiveHistoryRisk] = useState<TopRecordRiskKey>('total')
+  const [activeHistoryRisk, setActiveHistoryRisk] = useState<TopRecordRiskKey>(DEFAULT_HISTORY_RISK)
   const [topRecordTab, setTopRecordTab] = useState<TopRecordTab>('structures')
   const [flashTarget, setFlashTarget] = useState<FlashTarget | null>(null)
   const [flashVisible, setFlashVisible] = useState(false)
@@ -1564,7 +1566,6 @@ export default function GISCriticalAssetHistoryDashboard() {
         .filter((item): item is MapSearchResult => Boolean(item)),
     )
   }, [filteredSearchFeatureData, layers, mapSearchTerm])
-  const loadedRecordCount = visibleFeatures.length
   const culvertFeatures = filteredFeatureData[FACILITY_RENDERER_LAYER_ID]?.features ?? []
   const pipeFeatures = filteredFeatureData[PIPE_LAYER_ID]?.features ?? []
   const structureFeatures = filteredFeatureData[STRUCTURE_LAYER_ID]?.features ?? []
@@ -1839,118 +1840,134 @@ export default function GISCriticalAssetHistoryDashboard() {
   return (
     <div className="gis-dashboard gis-control-room gis-history-dashboard">
       <main className="gis-control-grid">
-        <section className="gis-panel gis-overview-panel">
-          <div className="gis-panel-header">
-            <span>Connections</span>
-            <strong>Spatial Layers</strong>
-          </div>
-          <button
-            className="gis-system-card gis-renderer-summary-card"
-            type="button"
-            onClick={() => setRiskFocusPanelOpen(true)}
-            title="Choose dashboard risk focus"
-          >
-            <MapPinned size={24} />
-            <div>
-              <span>Active Facility View</span>
-              <strong>{activeHistoryRiskOption.label}</strong>
-              <small>Top records and history focus</small>
+        <aside className="gis-left-rail">
+          <section className="gis-panel gis-overview-panel">
+            <div className="gis-panel-header">
+              <span>Connections</span>
+              <strong>Spatial Layers</strong>
             </div>
-          </button>
-
-          <div className="gis-layer-list">
-            {layers.filter((layer) => layer.id !== FACILITY_RENDERER_LAYER_ID).map((layer) => (
-              <div className="gis-layer-item" key={layer.id}>
-                <label className="gis-layer-toggle">
-                  <Checkbox
-                    checked={Boolean(visibleLayers[layer.id])}
-                    onCheckedChange={(checked) => setVisibleLayers((current) => ({ ...current, [layer.id]: Boolean(checked) }))}
-                  />
-                  <i style={{ background: layer.color }} />
-                  <span>{layer.label}</span>
-                  <em>{(spatialFilterEnabled ? layerRenderedCounts[layer.id] ?? 0 : historyLayerTotalCount(layer.id)).toLocaleString()}</em>
-                  {(() => {
-                    const isFilterableLayer = layer.id === PIPE_LAYER_ID || layer.id === STRUCTURE_LAYER_ID
-                    const isActiveFilterLayer =
-                      (layer.id === PIPE_LAYER_ID && pipeFiltersActive) ||
-                      (layer.id === STRUCTURE_LAYER_ID && structureFiltersActive)
-                    return (
-                      <button
-                        className={`gis-layer-filter-button ${isActiveFilterLayer ? 'active' : ''}`}
-                        disabled={!isFilterableLayer}
-                        type="button"
-                        title={isFilterableLayer ? `Filter ${layer.label}` : 'Attribute filters are available for culverts, pipes, and structures'}
-                        aria-label={isFilterableLayer ? `Filter ${layer.label}` : `Filter ${layer.label}`}
-                        onClick={(event) => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          if (isFilterableLayer) {
-                            setLayerFilterPanelOpen(layer.id)
-                          }
-                        }}
-                      >
-                        <Filter size={13} />
-                      </button>
-                    )
-                  })()}
-                </label>
+            <button
+              className="gis-system-card gis-renderer-summary-card"
+              type="button"
+              onClick={() => setRiskFocusPanelOpen(true)}
+              title="Choose dashboard risk focus"
+            >
+              <MapPinned size={24} />
+              <div>
+                <span>Active Facility View</span>
+                <strong>{activeHistoryRiskOption.label}</strong>
+                <small>Top records and history focus</small>
               </div>
-            ))}
-          </div>
+            </button>
 
-          <div className="gis-top-records">
-            <div className="gis-top-records-header">
-              <span>TOP 10</span>
-              <strong>{currentTopRecords.length.toLocaleString()}</strong>
-            </div>
-            <div className="gis-top-record-tabs" role="tablist" aria-label="Top filtered records">
-              {[
-                ['structures', 'Structures'],
-                ['pipes', 'Pipes'],
-              ].map(([tab, label]) => (
-                <button
-                  aria-selected={topRecordTab === tab}
-                  className={topRecordTab === tab ? 'active' : ''}
-                  key={tab}
-                  role="tab"
-                  type="button"
-                  onClick={() => setTopRecordTab(tab as TopRecordTab)}
-                >
-                  {label}
-                  <small>{topRecordTabs[tab as TopRecordTab].length}</small>
-                </button>
+            <div className="gis-layer-list">
+              {layers.filter((layer) => layer.id !== FACILITY_RENDERER_LAYER_ID).map((layer) => (
+                <div className="gis-layer-item" key={layer.id}>
+                  <label className="gis-layer-toggle">
+                    <Checkbox
+                      checked={Boolean(visibleLayers[layer.id])}
+                      onCheckedChange={(checked) => setVisibleLayers((current) => ({ ...current, [layer.id]: Boolean(checked) }))}
+                    />
+                    <i style={{ background: layer.color }} />
+                    <span>{layer.label}</span>
+                    <em>{(spatialFilterEnabled ? layerRenderedCounts[layer.id] ?? 0 : historyLayerTotalCount(layer.id)).toLocaleString()}</em>
+                    {(() => {
+                      const isFilterableLayer = layer.id === PIPE_LAYER_ID || layer.id === STRUCTURE_LAYER_ID
+                      const isActiveFilterLayer =
+                        (layer.id === PIPE_LAYER_ID && pipeFiltersActive) ||
+                        (layer.id === STRUCTURE_LAYER_ID && structureFiltersActive)
+                      return (
+                        <button
+                          className={`gis-layer-filter-button ${isActiveFilterLayer ? 'active' : ''}`}
+                          disabled={!isFilterableLayer}
+                          type="button"
+                          title={isFilterableLayer ? `Filter ${layer.label}` : 'Attribute filters are available for culverts, pipes, and structures'}
+                          aria-label={isFilterableLayer ? `Filter ${layer.label}` : `Filter ${layer.label}`}
+                          onClick={(event) => {
+                            event.preventDefault()
+                            event.stopPropagation()
+                            if (isFilterableLayer) {
+                              setLayerFilterPanelOpen(layer.id)
+                            }
+                          }}
+                        >
+                          <Filter size={13} />
+                        </button>
+                      )
+                    })()}
+                  </label>
+                </div>
               ))}
             </div>
-            <div className="gis-top-record-list" role="tabpanel">
-              {currentTopRecords.length ? (
-                currentTopRecords.map((item, index) => (
-                  <button key={item.id} type="button" onClick={() => zoomToTopRecord(item)}>
-                    <span>{index + 1}</span>
-                    <div>
-                      <strong>{item.title}</strong>
-                      <small>{item.subtitle}</small>
-                    </div>
-                    <em>
-                      {formatMetric(item.value)}
-                      <small>{item.valueLabel}</small>
-                    </em>
-                  </button>
-                ))
-              ) : (
-                <div className="gis-top-record-empty">No filtered records with risk values.</div>
-              )}
+
+          </section>
+
+          <section className="gis-panel gis-top-records-panel">
+            <div className="gis-panel-header">
+              <span>Top 10</span>
+              <strong>{currentTopRecords.length.toLocaleString()}</strong>
             </div>
-          </div>
-        </section>
+            <div className="gis-top-records">
+              <div className="gis-top-record-tabs" role="tablist" aria-label="Top filtered records">
+                {[
+                  ['structures', 'Structures'],
+                  ['pipes', 'Pipes'],
+                ].map(([tab, label]) => (
+                  <button
+                    aria-selected={topRecordTab === tab}
+                    className={topRecordTab === tab ? 'active' : ''}
+                    key={tab}
+                    role="tab"
+                    type="button"
+                    onClick={() => setTopRecordTab(tab as TopRecordTab)}
+                  >
+                    {label}
+                    <small>{topRecordTabs[tab as TopRecordTab].length}</small>
+                  </button>
+                ))}
+              </div>
+              <div className="gis-top-record-list" role="tabpanel">
+                {currentTopRecords.length ? (
+                  currentTopRecords.map((item, index) => (
+                    <button key={item.id} type="button" onClick={() => zoomToTopRecord(item)}>
+                      <span>{index + 1}</span>
+                      <div>
+                        <strong>{item.title}</strong>
+                        <small>{item.subtitle}</small>
+                      </div>
+                      <em>
+                        {formatMetric(item.value)}
+                        <small>{item.valueLabel}</small>
+                      </em>
+                    </button>
+                  ))
+                ) : (
+                  <div className="gis-top-record-empty">No filtered records with risk values.</div>
+                )}
+              </div>
+            </div>
+          </section>
+        </aside>
 
         <section className="gis-panel gis-map-panel">
-          <div className="gis-map-toolbar">
-            <div>
-              <span>Critical Asset Spatial Intelligence</span>
-              <strong>{selectedFeature ? featureTitle(selectedFeature.properties) : 'Critical Asset'}</strong>
-              <small>Only assets with multiple inspections are loaded, so this view focuses on risk changes over time.</small>
-            </div>
-            <div>
+          {error ? <div className="gis-error-banner">{error}</div> : null}
+          <div className="gis-map-frame" ref={mapFrameRef}>
+            <DeckGL
+              controller
+              layers={deckLayers}
+              viewState={viewState}
+              onViewStateChange={({ viewState: nextViewState }) => setViewState(constrainMapViewState(nextViewState as ViewState, mapFrameSize))}
+              getTooltip={({ object, layer }) => {
+                if (!object?.properties) return null
+                return {
+                  html: featureTooltipHtml(dashboardLayerIdFromDeckLayerId(layer?.id), object.properties),
+                }
+              }}
+            >
+              <Map attributionControl={false} mapLib={maplibregl} mapStyle={basemapStyle as never} />
+            </DeckGL>
+
+            <div className="gis-map-floating-search">
               <div className="gis-map-search">
                 <div className="gis-map-search-box">
                   <Search size={16} />
@@ -2008,36 +2025,7 @@ export default function GISCriticalAssetHistoryDashboard() {
                   </div>
                 ) : null}
               </div>
-              <button
-                aria-pressed={spatialFilterEnabled}
-                className={`gis-spatial-filter-switch ${spatialFilterEnabled ? 'active' : ''}`}
-                title="Use current visible map area as a spatial filter"
-                type="button"
-                onClick={() => setSpatialFilterEnabled((current) => !current)}
-              >
-                <span>Spatial filter</span>
-                <i aria-hidden="true" />
-              </button>
-              <span>{loadedRecordCount.toLocaleString()} rendered</span>
-              <span>{visibleLayerList.length.toLocaleString()} active layers</span>
             </div>
-          </div>
-          {error ? <div className="gis-error-banner">{error}</div> : null}
-          <div className="gis-map-frame" ref={mapFrameRef}>
-            <DeckGL
-              controller
-              layers={deckLayers}
-              viewState={viewState}
-              onViewStateChange={({ viewState: nextViewState }) => setViewState(constrainMapViewState(nextViewState as ViewState, mapFrameSize))}
-              getTooltip={({ object, layer }) => {
-                if (!object?.properties) return null
-                return {
-                  html: featureTooltipHtml(dashboardLayerIdFromDeckLayerId(layer?.id), object.properties),
-                }
-              }}
-            >
-              <Map attributionControl={false} mapLib={maplibregl} mapStyle={basemapStyle as never} />
-            </DeckGL>
 
             <button
               aria-label={`Map north arrow. Current bearing ${mapBearingDisplay(viewState.bearing)} degrees. Drag to rotate or click to reset north.`}
@@ -2132,12 +2120,13 @@ export default function GISCriticalAssetHistoryDashboard() {
               <div className="gis-history-histogram-bars">
                 {activeHistoryHistogram.bins.map((bin, index) => {
                   const [r, g, b] = universalDeltaColor((bin.min + bin.max) / 2, 255)
-                  const height = activeHistoryHistogram.maxCount ? Math.max(4, Math.round((bin.count / activeHistoryHistogram.maxCount) * 46)) : 4
+                  const height = activeHistoryHistogram.maxCount ? Math.max(4, Math.round((bin.count / activeHistoryHistogram.maxCount) * 58)) : 4
                   return (
                     <div
                       aria-label={`${formatMetric(bin.min, 0)} to ${formatMetric(bin.max, 0)}: ${bin.count.toLocaleString()} records`}
                       className="gis-history-histogram-bin"
                       key={`${bin.min}-${bin.max}-${index}`}
+                      style={{ '--bar-height': `${height}px` } as CSSProperties}
                       title={`${formatMetric(bin.min, 0)} to ${formatMetric(bin.max, 0)}: ${bin.count.toLocaleString()} records`}
                     >
                       <b>{bin.count.toLocaleString()}</b>
@@ -2250,10 +2239,10 @@ export default function GISCriticalAssetHistoryDashboard() {
         />
       ) : null}
       {riskFocusPanelOpen ? (
-        <div className="gis-renderer-modal-backdrop" role="presentation" onClick={() => setRiskFocusPanelOpen(false)}>
+        <div className="gis-renderer-modal-backdrop gis-risk-focus-modal-backdrop" role="presentation" onClick={() => setRiskFocusPanelOpen(false)}>
           <section
             aria-modal="true"
-            className="gis-renderer-modal"
+            className="gis-renderer-modal gis-risk-focus-modal"
             role="dialog"
             aria-label="History risk focus selector"
             onClick={(event) => event.stopPropagation()}
