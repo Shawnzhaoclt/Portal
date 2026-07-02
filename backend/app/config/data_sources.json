@@ -18,7 +18,7 @@
   "critical_assets": {
     "source_type": "duckdb",
     "workbook": "critical_asset_tracking_pilot.twbx",
-    "database": "G:\\Strategic Planning\\Planning\\stm_risk_data_opt_test\\intermediate\\amteam\\amteam.duckdb",
+    "database": "G:\\Strategic Planning\\Planning\\stm_risk_data\\intermediate\\amteam\\amteam.duckdb",
     "tables": {
       "both": "CRITICAL_ASSET_TRACKING_MULTIPLE",
       "pipes": "CRITICAL_ASSET_TRACKING_PIPES",
@@ -27,7 +27,7 @@
   },
   "gis": {
     "source_type": "duckdb_spatial",
-    "database": "G:\\Strategic Planning\\Planning\\stm_risk_data_opt_test\\intermediate\\amteam\\amteam.duckdb",
+    "database": "G:\\Strategic Planning\\Planning\\stm_risk_data\\intermediate\\amteam\\amteam.duckdb",
     "source_crs": "EPSG:6543",
     "target_crs": "EPSG:4326",
     "layers": {

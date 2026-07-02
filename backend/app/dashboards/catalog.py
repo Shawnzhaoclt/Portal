@@ -10,6 +10,20 @@ router = APIRouter(prefix="/api/dashboards", tags=["dashboard-catalog"])
 
 DASHBOARDS: list[dict[str, str]] = [
     {
+        "id": "proactive_team_cctv_review",
+        "title": "Proactive Team CCTV Review",
+        "description": "Search CCTV pipe records, choose inspections, and compile proactive team review reports with defects and media.",
+        "path": "/dashboard_proactive_team_cctv_review",
+        "category": "Operations",
+    },
+    {
+        "id": "amteam_inspection_viewer",
+        "title": "Proactive Team CCTV Review Report",
+        "description": "Search CCTV pipe records, choose inspections, and compile review reports with defects and media.",
+        "path": "/dashboard_amteam_inspection_viewer",
+        "category": "Operations",
+    },
+    {
         "id": "critical_team",
         "title": "Critical Team Dashboard",
         "description": "Work order status, milestone trends, and critical team inspection details.",

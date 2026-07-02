@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.dashboards.catalog import router as dashboard_catalog_router
+from backend.app.dashboards.amteam import router as amteam_router
 from backend.app.dashboards.critical_assets import router as critical_assets_router
 from backend.app.dashboards.critical_team import router as critical_team_router
 from backend.app.dashboards.gis import router as gis_router
@@ -44,6 +45,7 @@ app.add_middleware(
 )
 
 app.include_router(dashboard_catalog_router)
+app.include_router(amteam_router)
 app.include_router(critical_team_router)
 app.include_router(critical_assets_router)
 app.include_router(gis_router)

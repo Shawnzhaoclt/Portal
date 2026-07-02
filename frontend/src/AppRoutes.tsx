@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react'
 import DashboardLinksPage from './DashboardLinksPage'
 import HomePage from './HomePage'
+import AMTeamInspectionViewer from './dashboards/amteam/AMTeamInspectionViewer'
+import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
 import GISCriticalAssetHistoryDashboard from './dashboards/gis/GISCriticalAssetHistoryDashboard'
 import GISDashboard from './dashboards/gis/GISDashboard'
 import {
   CRITICAL_ASSET_TRACKING_ROUTE,
+  AMTEAM_INSPECTION_VIEWER_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
   GIS_HISTORY_ROUTE,
+  PROACTIVE_TEAM_CCTV_REVIEW_ROUTE,
 } from './dashboardCatalog'
 import { applyAppTheme, getInitialTheme, type AppTheme } from './theme'
 
@@ -50,6 +54,16 @@ export default function AppRoutes() {
   if (path === CRITICAL_ASSET_TRACKING_ROUTE) {
     setPageMeta('Critical Asset Tracking')
     return <CriticalAssetTrackingDashboard />
+  }
+
+  if (path === PROACTIVE_TEAM_CCTV_REVIEW_ROUTE) {
+    setPageMeta('Proactive Team CCTV Review')
+    return <ProactiveTeamCCTVReview />
+  }
+
+  if (path === AMTEAM_INSPECTION_VIEWER_ROUTE) {
+    setPageMeta('Proactive Team CCTV Review Report')
+    return <AMTeamInspectionViewer />
   }
 
   if (path === GIS_FACILITY_ROUTE) {
