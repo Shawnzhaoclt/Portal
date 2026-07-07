@@ -7,13 +7,24 @@ import CriticalAssetTrackingDashboard from './dashboards/critical-assets/Critica
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
 import GISCriticalAssetHistoryDashboard from './dashboards/gis/GISCriticalAssetHistoryDashboard'
 import GISDashboard from './dashboards/gis/GISDashboard'
+import ManagementPage from './management/ManagementPage'
+import PlanningPendingAifQaTable from './dashboards/planning/PlanningPendingAifQaTable'
+import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
+import { storedManagementToken } from './management/api'
 import {
+  ADMIN_MANAGEMENT_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
   AMTEAM_INSPECTION_VIEWER_ROUTE,
+  CRITICAL_TEAM_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
   GIS_HISTORY_ROUTE,
+  PORTAL_LOGIN_ROUTE,
+  PLANNING_PENDING_AIF_QA_ROUTE,
   PROACTIVE_TEAM_CCTV_REVIEW_ROUTE,
+  STM_RISK_MAP_ROUTE,
+  criticalAssetSheetIdFromPath,
+  criticalTeamSheetIdFromPath,
 } from './dashboardCatalog'
 import { applyAppTheme, getInitialTheme, type AppTheme } from './theme'
 
@@ -36,6 +47,7 @@ export default function AppRoutes() {
   const path = window.location.pathname
   const params = new URLSearchParams(window.location.search)
   const embedMode = params.get('embed') === '1' || params.get('embedded') === '1'
+  const isLoginRoute = path === PORTAL_LOGIN_ROUTE || path === '/management_login'
 
   useEffect(() => {
     applyAppTheme(theme)
@@ -46,14 +58,21 @@ export default function AppRoutes() {
     return () => document.documentElement.classList.remove('dashboard-embed-mode')
   }, [embedMode])
 
+  if (!isLoginRoute && !storedManagementToken()) {
+    setPageMeta('Portal Sign In')
+    window.location.replace(PORTAL_LOGIN_ROUTE)
+    return null
+  }
+
   if (path === '/') {
     setPageMeta('Storm Water Asset Intelligence Portal')
     return <HomePage theme={theme} onThemeChange={setTheme} />
   }
 
-  if (path === CRITICAL_ASSET_TRACKING_ROUTE) {
+  const criticalAssetSheetId = criticalAssetSheetIdFromPath(path)
+  if (path === CRITICAL_ASSET_TRACKING_ROUTE || criticalAssetSheetId) {
     setPageMeta('Critical Asset Tracking')
-    return <CriticalAssetTrackingDashboard />
+    return <CriticalAssetTrackingDashboard initialSheetId={criticalAssetSheetId ?? undefined} />
   }
 
   if (path === PROACTIVE_TEAM_CCTV_REVIEW_ROUTE) {
@@ -66,6 +85,11 @@ export default function AppRoutes() {
     return <AMTeamInspectionViewer />
   }
 
+  if (path === PLANNING_PENDING_AIF_QA_ROUTE) {
+    setPageMeta('Planning Pending AIF QA/QC')
+    return <PlanningPendingAifQaTable />
+  }
+
   if (path === GIS_FACILITY_ROUTE) {
     setPageMeta('Critical Asset Facility', '/map-favicon.svg')
     return <GISDashboard />
@@ -76,11 +100,37 @@ export default function AppRoutes() {
     return <GISCriticalAssetHistoryDashboard />
   }
 
+  if (path === STM_RISK_MAP_ROUTE) {
+    setPageMeta('STM Risk Map', '/map-favicon.svg')
+    return <MapTilesDashboard />
+  }
+
   if (path === DASHBOARD_LINKS_ROUTE) {
     setPageMeta('Portal Dashboard Links')
     return <DashboardLinksPage />
   }
 
-  setPageMeta('Critical Team Dashboard')
-  return <CriticalTeamDashboard />
+  if (path === ADMIN_MANAGEMENT_ROUTE) {
+    setPageMeta('Portal Management')
+    return <ManagementPage />
+  }
+
+  if (path === PORTAL_LOGIN_ROUTE) {
+    setPageMeta('Portal Sign In')
+    return <ManagementPage loginOnly />
+  }
+
+  if (path === '/management_login') {
+    window.location.replace(PORTAL_LOGIN_ROUTE)
+    return null
+  }
+
+  const criticalTeamSheetId = criticalTeamSheetIdFromPath(path)
+  if (path === CRITICAL_TEAM_ROUTE || criticalTeamSheetId) {
+    setPageMeta('Critical Team Dashboard')
+    return <CriticalTeamDashboard initialSheetId={criticalTeamSheetId ?? undefined} />
+  }
+
+  setPageMeta('Storm Water Asset Intelligence Portal')
+  return <HomePage theme={theme} onThemeChange={setTheme} />
 }

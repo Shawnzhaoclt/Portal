@@ -48,6 +48,7 @@ import type {
   TableColumnFilters,
   TableResponse,
 } from './types'
+import { criticalAssetSheetIdFromPath, criticalAssetSheetPath } from '../../dashboardCatalog'
 
 type AssetSheetKind = 'aggregate' | 'history' | 'table'
 type SortDirection = 'asc' | 'desc'
@@ -267,8 +268,11 @@ const ASSET_SHEETS: AssetSheet[] = [
   },
 ]
 
-function initialSheetIdFromUrl() {
+function initialSheetIdFromUrl(initialSheetId?: string) {
+  if (initialSheetId && ASSET_SHEETS.some((sheet) => sheet.id === initialSheetId)) return initialSheetId
   if (typeof window === 'undefined') return ASSET_SHEETS[0].id
+  const requestedPathSheetId = criticalAssetSheetIdFromPath(window.location.pathname)
+  if (requestedPathSheetId) return requestedPathSheetId
   const requestedSheetId = new URLSearchParams(window.location.search).get('sheet')
   return ASSET_SHEETS.some((sheet) => sheet.id === requestedSheetId) ? requestedSheetId : ASSET_SHEETS[0].id
 }
@@ -276,11 +280,8 @@ function initialSheetIdFromUrl() {
 function syncSheetIdToUrl(sheetId: string) {
   if (typeof window === 'undefined') return
   const url = new URL(window.location.href)
-  if (sheetId === ASSET_SHEETS[0].id) {
-    url.searchParams.delete('sheet')
-  } else {
-    url.searchParams.set('sheet', sheetId)
-  }
+  url.pathname = criticalAssetSheetPath(sheetId)
+  url.searchParams.delete('sheet')
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
@@ -991,8 +992,12 @@ function createHistoryChartOption(rows: AssetRow[], showLabels: boolean): EChart
   }
 }
 
-export default function CriticalAssetTrackingDashboard() {
-  const [selectedSheetId, setSelectedSheetId] = useState(initialSheetIdFromUrl)
+type CriticalAssetTrackingDashboardProps = {
+  initialSheetId?: string
+}
+
+export default function CriticalAssetTrackingDashboard({ initialSheetId }: CriticalAssetTrackingDashboardProps) {
+  const [selectedSheetId, setSelectedSheetId] = useState(() => initialSheetIdFromUrl(initialSheetId))
   const [filterOptions, setFilterOptions] = useState<FilterOptionsResponse | null>(null)
   const [aggregates, setAggregates] = useState<AggregatesResponse | null>(null)
   const [history, setHistory] = useState<HistoryResponse | null>(null)

@@ -1,0 +1,173 @@
+.planning-aif-workbook {
+  width: 100%;
+}
+
+.planning-aif-canvas {
+  width: 100%;
+}
+
+.planning-aif-panel {
+  min-width: 0;
+}
+
+.planning-aif-panel .panel-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  width: 100%;
+}
+
+.planning-aif-panel .panel-header > div:first-child {
+  grid-column: 1;
+}
+
+.planning-aif-panel .panel-header > div > div {
+  display: grid;
+  gap: 2px;
+}
+
+.planning-aif-total {
+  grid-column: 2;
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  color: var(--accent);
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.planning-aif-total strong {
+  color: var(--panel-text);
+  font-size: 28px;
+  line-height: 1;
+  font-weight: 900;
+}
+
+.planning-aif-total span {
+  color: var(--panel-muted);
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: 0;
+}
+
+.planning-aif-search-toolbar {
+  align-items: stretch;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.planning-aif-search {
+  display: grid;
+  grid-template-columns: auto minmax(260px, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.planning-aif-search svg {
+  color: var(--panel-muted);
+}
+
+.planning-aif-search input,
+.planning-aif-table select,
+.planning-aif-table input,
+.planning-aif-panel select,
+.planning-aif-panel input {
+  border-radius: 0;
+}
+
+.planning-aif-search input {
+  height: 34px;
+  min-width: 0;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--panel-text);
+  padding: 0 10px;
+  font: inherit;
+}
+
+.planning-aif-search input::placeholder {
+  color: var(--panel-muted);
+}
+
+.planning-aif-search-button {
+  height: 34px;
+}
+
+.planning-aif-table {
+  min-width: 1540px;
+}
+
+.planning-aif-table th,
+.planning-aif-table td {
+  text-align: center;
+  vertical-align: middle;
+}
+
+.planning-aif-table .sort-button,
+.planning-aif-table .number-filter-cell,
+.planning-aif-table .date-filter-cell,
+.planning-aif-table .text-filter-cell {
+  justify-content: center;
+}
+
+.planning-aif-table .sort-button span {
+  white-space: normal;
+  line-height: 1.15;
+}
+
+.planning-aif-table .number-filter-cell,
+.planning-aif-table .date-filter-cell,
+.planning-aif-table .text-filter-cell {
+  gap: 4px;
+}
+
+.planning-aif-table .number-filter-input,
+.planning-aif-table .date-picker-trigger,
+.planning-aif-table .text-filter-input,
+.planning-aif-table .column-filter-select {
+  min-width: 0;
+}
+
+.planning-aif-table .text-filter-input {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--input-border);
+  background: var(--input-bg);
+  color: var(--panel-text);
+  padding: 0 8px;
+  font: inherit;
+}
+
+.planning-aif-table-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  color: var(--accent);
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.planning-aif-table-link:hover {
+  color: var(--accent-strong);
+}
+
+.planning-aif-panel .clear-table-filters {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  border: 1px solid var(--button-border);
+  border-radius: 0;
+  background: var(--button-bg);
+  color: var(--accent);
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.planning-aif-panel .clear-table-filters:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}

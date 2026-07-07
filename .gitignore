@@ -14,8 +14,14 @@ frontend/.vite-temp/
 frontend/node_modules/.tmp/
 
 # Local/generated dashboard data
+backend/data/
 frontend/data/*.duckdb
 frontend/public/data/*.json
+backend/app/dashboards/map_tiles/runtime/build/pmtiles/
+backend/app/dashboards/map_tiles/runtime/build/terrain/
+backend/app/dashboards/map_tiles/runtime/build/staging/
+backend/app/dashboards/map_tiles/runtime/build/reports/
+backend/app/dashboards/map_tiles/runtime/build/logs/
 
 # Environment/local editor files
 *.local

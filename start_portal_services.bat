@@ -15,10 +15,13 @@ set "CONDA_BAT=%USERPROFILE%\AppData\Local\miniconda3\condabin\conda.bat"
 set "BACKEND_LOG=%ROOT%\backend\app\api.log"
 set "BACKEND_ERR=%ROOT%\backend\app\api.err.log"
 set "FRONTEND_DIR=%ROOT%\frontend"
-set "FRONTEND_LOG=%ROOT%\frontend\vite.log"
-set "FRONTEND_ERR=%ROOT%\frontend\vite.err.log"
+set "FRONTEND_LOG_DIR=%FRONTEND_DIR%\logs"
+set "FRONTEND_LOG=%FRONTEND_LOG_DIR%\vite.log"
+set "FRONTEND_ERR=%FRONTEND_LOG_DIR%\vite.err.log"
 set "NO_PAUSE=0"
 set "CONDA_AVAILABLE=0"
+
+if not exist "%FRONTEND_LOG_DIR%" mkdir "%FRONTEND_LOG_DIR%" >nul 2>nul
 
 if /I "%~1"=="/nopause" set "NO_PAUSE=1"
 
@@ -155,11 +158,13 @@ echo URLs:
 echo   Portal home:              %PUBLIC_FRONTEND_URL%/
 echo   Local portal home:        %LOCAL_FRONTEND_URL%/
 echo   Dashboard links:          %PUBLIC_FRONTEND_URL%/dashboard_links
+echo   Portal management:        %PUBLIC_FRONTEND_URL%/admin_management
 echo   Dashboard catalog API:    %BACKEND_URL%/api/dashboards
 echo   Critical Team:            %PUBLIC_FRONTEND_URL%/dashboard_critical_team
 echo   Critical Asset Tracking:  %PUBLIC_FRONTEND_URL%/dashboard_critical_asset_tracking
-echo   GIS Facility Map:         %PUBLIC_FRONTEND_URL%/dashboard_gis_critical_asset_facility
-echo   GIS History Map:          %PUBLIC_FRONTEND_URL%/dashboard_gis_critical_asset_history
+echo   Critical Asset Facility:  %PUBLIC_FRONTEND_URL%/map_critical_asset_facility
+echo   Critical Asset History:   %PUBLIC_FRONTEND_URL%/map_critical_asset_history
+echo   STM Risk Map:             %PUBLIC_FRONTEND_URL%/map_stm_risk
 echo   Backend health:           %BACKEND_URL%/health
 echo.
 echo Logs:

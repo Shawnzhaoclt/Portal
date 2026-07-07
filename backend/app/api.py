@@ -12,7 +12,11 @@ from backend.app.dashboards.amteam import router as amteam_router
 from backend.app.dashboards.critical_assets import router as critical_assets_router
 from backend.app.dashboards.critical_team import router as critical_team_router
 from backend.app.dashboards.gis import router as gis_router
+from backend.app.dashboards.planning import router as planning_router
+from backend.app.resources.maps.stm_risk_map import router as map_tiles_router
 from backend.app.diagnostics.routes import router as diagnostics_router
+from backend.app.management import router as management_router
+from backend.app.management.seed import initialize_management_database
 
 load_dotenv()
 
@@ -49,7 +53,15 @@ app.include_router(amteam_router)
 app.include_router(critical_team_router)
 app.include_router(critical_assets_router)
 app.include_router(gis_router)
+app.include_router(planning_router)
+app.include_router(map_tiles_router)
 app.include_router(diagnostics_router)
+app.include_router(management_router)
+
+
+@app.on_event("startup")
+def startup() -> None:
+    initialize_management_database()
 
 
 @app.get("/")

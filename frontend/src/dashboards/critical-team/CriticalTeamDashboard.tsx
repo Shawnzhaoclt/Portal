@@ -71,6 +71,7 @@ import type {
   CriticalTeamSummaryResponse,
   CriticalTeamWorkordersResponse,
 } from './types'
+import { criticalTeamSheetIdFromPath, criticalTeamSheetPath } from '../../dashboardCatalog'
 
 type SheetKind = 'overview' | 'chart' | 'table' | 'details'
 
@@ -258,8 +259,11 @@ const SHEETS: SheetDefinition[] = [
   },
 ]
 
-function initialSheetIdFromUrl() {
+function initialSheetIdFromUrl(initialSheetId?: string) {
+  if (initialSheetId && SHEETS.some((sheet) => sheet.id === initialSheetId)) return initialSheetId
   if (typeof window === 'undefined') return 'overview'
+  const requestedPathSheetId = criticalTeamSheetIdFromPath(window.location.pathname)
+  if (requestedPathSheetId) return requestedPathSheetId
   const requestedSheetId = new URLSearchParams(window.location.search).get('sheet')
   return SHEETS.some((sheet) => sheet.id === requestedSheetId) ? requestedSheetId : 'overview'
 }
@@ -267,11 +271,8 @@ function initialSheetIdFromUrl() {
 function syncSheetIdToUrl(sheetId: string) {
   if (typeof window === 'undefined') return
   const url = new URL(window.location.href)
-  if (sheetId === 'overview') {
-    url.searchParams.delete('sheet')
-  } else {
-    url.searchParams.set('sheet', sheetId)
-  }
+  url.pathname = criticalTeamSheetPath(sheetId)
+  url.searchParams.delete('sheet')
   window.history.replaceState(null, '', `${url.pathname}${url.search}${url.hash}`)
 }
 
@@ -1657,8 +1658,12 @@ function downloadPivotTable(title: string, data: CriticalTeamSheetResponse | nul
   URL.revokeObjectURL(url)
 }
 
-function CriticalTeamDashboard() {
-  const [selectedSheetId, setSelectedSheetId] = useState(initialSheetIdFromUrl)
+type CriticalTeamDashboardProps = {
+  initialSheetId?: string
+}
+
+function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
+  const [selectedSheetId, setSelectedSheetId] = useState(() => initialSheetIdFromUrl(initialSheetId))
   const [filters, setFilters] = useState<CriticalTeamFilters>(INITIAL_FILTERS)
   const [overviewFilters, setOverviewFilters] = useState<CriticalTeamOverviewFilters>(
     createDefaultOverviewFilters,

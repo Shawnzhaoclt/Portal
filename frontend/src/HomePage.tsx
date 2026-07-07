@@ -1,26 +1,47 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   BarChart3,
+  Check,
+  ChevronDown,
   Database,
+  FileText,
   Grid3X3,
   Info,
   LogIn,
+  LogOut,
   MapPinned,
   Rows3,
   Search,
+  Settings,
+  Star,
+  UserRound,
+  X,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react'
 import stormwaterLogo from './assets/stormwater-logo.png'
 import {
-  CRITICAL_ASSET_TRACKING_ROUTE,
-  CRITICAL_TEAM_ROUTE,
+  ADMIN_MANAGEMENT_ROUTE,
+  CRITICAL_ASSET_SHEET_ROUTES,
+  CRITICAL_TEAM_SHEET_ROUTES,
   DASHBOARD_CATALOG,
-  GIS_FACILITY_ROUTE,
+  PORTAL_LOGIN_ROUTE,
   type DashboardCatalogItem,
 } from './dashboardCatalog'
-import { fetchGISLayers } from './dashboards/gis/api'
-import type { GISLayerMeta } from './dashboards/gis/types'
+import {
+  clearManagementToken,
+  fetchMe,
+  fetchMyFeaturedResources,
+  fetchMyResources,
+  saveManagementToken,
+  storedManagementToken,
+  switchRole,
+  type PortalFeaturedCategory,
+  type PortalFeaturedResourcesByCategory,
+  type PortalResource as ManagedPortalResource,
+  type PortalRole,
+  type PortalUser,
+} from './management/api'
 import ThemeToggle from './ThemeToggle'
 import type { AppTheme } from './theme'
 import criticalAssetClogAggregateDarkThumb from './assets/portal-thumbnails/critical-asset-clog-aggregate-dark.png'
@@ -31,6 +52,10 @@ import criticalAssetHistoryTableDarkThumb from './assets/portal-thumbnails/criti
 import criticalAssetHistoryTableThumb from './assets/portal-thumbnails/critical-asset-history-table.png'
 import criticalTeamOverviewDarkThumb from './assets/portal-thumbnails/critical-team-overview-dark.png'
 import criticalTeamOverviewThumb from './assets/portal-thumbnails/critical-team-overview.png'
+import criticalTeamInspectionCompletionChartDarkThumb from './assets/portal-thumbnails/critical-team-inspection-completion-chart-dark.png'
+import criticalTeamInspectionCompletionChartThumb from './assets/portal-thumbnails/critical-team-inspection-completion-chart.png'
+import criticalTeamInspectionCompletionTableDarkThumb from './assets/portal-thumbnails/critical-team-inspection-completion-table-dark.png'
+import criticalTeamInspectionCompletionTableThumb from './assets/portal-thumbnails/critical-team-inspection-completion-table.png'
 import criticalTeamProjectStartDarkThumb from './assets/portal-thumbnails/critical-team-project-start-dark.png'
 import criticalTeamProjectStartThumb from './assets/portal-thumbnails/critical-team-project-start.png'
 import criticalTeamReportCompletionChartDarkThumb from './assets/portal-thumbnails/critical-team-report-completion-chart-dark.png'
@@ -47,11 +72,14 @@ import gisCriticalAssetFacilityThumb from './assets/portal-thumbnails/gis-critic
 import gisCriticalAssetFacilityDarkThumb from './assets/portal-thumbnails/gis-critical-asset-facility-dark.png'
 import gisCriticalAssetHistoryThumb from './assets/portal-thumbnails/gis-critical-asset-history.png'
 import gisCriticalAssetHistoryDarkThumb from './assets/portal-thumbnails/gis-critical-asset-history-dark.png'
+import proactiveTeamCctvReviewThumb from './assets/portal-thumbnails/proactive-team-cctv-review.png'
+import proactiveTeamCctvReviewDarkThumb from './assets/portal-thumbnails/proactive-team-cctv-review-dark.png'
+import stmRiskMapThumb from './assets/portal-thumbnails/stm-risk-map.png'
+import stmRiskMapDarkThumb from './assets/portal-thumbnails/stm-risk-map-dark.png'
 import './HomePage.css'
 
-type LayerStatus = 'loading' | 'ready' | 'error'
-type ResourceCategory = 'all' | 'dashboards' | 'maps' | 'tables' | 'datasets' | 'documents'
-type ResourceType = 'Dataset' | 'Map' | 'Dashboard' | 'Table'
+type ResourceCategory = 'all' | 'dashboards' | 'maps' | 'tables' | 'datasets' | 'documents' | 'reports'
+type ResourceType = 'Dataset' | 'Document' | 'Map' | 'Dashboard' | 'Report' | 'Table'
 type ResourcePreview = 'facility' | 'pipe' | 'structure' | 'map' | 'history' | 'dashboard' | 'table'
 
 type PortalResource = {
@@ -74,46 +102,41 @@ type HomePageProps = {
 }
 
 const CATEGORY_OPTIONS: Array<{ key: ResourceCategory; label: string }> = [
-  { key: 'all', label: 'All resources' },
+  { key: 'all', label: 'All Resources' },
   { key: 'dashboards', label: 'Dashboards' },
   { key: 'maps', label: 'Maps' },
   { key: 'tables', label: 'Tables' },
   { key: 'datasets', label: 'Datasets' },
   { key: 'documents', label: 'Documents' },
+  { key: 'reports', label: 'Reports' },
 ]
 
-function sheetHref(path: string, sheetId: string) {
-  return `${path}?sheet=${encodeURIComponent(sheetId)}`
-}
-
-const FALLBACK_SPATIAL_MAPS: PortalResource[] = []
-
-const HIDDEN_SPATIAL_RESOURCE_LABELS = new Set(['culvert facility', 'critical asset pipes', 'critical asset structures'])
 const FEATURED_TABLE_RESOURCE_ORDER = [
-  'critical-team-work-order-detail',
-  'critical-team-report-completion-table',
-  'critical-team-review-table',
-  'critical-asset-history-table',
+  'critical_team_work_order_detail',
+  'critical_team_report_completion_date',
+  'critical_team_review_completion_date',
+  'critical_asset_history_both',
 ]
 const FEATURED_DASHBOARD_RESOURCE_ORDER = [
-  'critical-team-inspection-project-start',
-  'critical-team-report-completion-chart',
-  'critical-team-review-chart',
-  'critical-asset-condition-aggregate',
+  'critical_team_inspection_project_start_date',
+  'critical_team_report_completion_date_chart',
+  'critical_team_inspection_completion_date_reviews',
+  'critical_asset_condition_facility_aggregate_both',
 ]
 const FEATURED_ALL_RESOURCE_ORDER = [
-  'critical-team-inspection-project-start',
-  'critical-team-report-completion-chart',
+  'critical_team_inspection_project_start_date',
+  'critical_team_report_completion_date_chart',
   'gis_critical_asset_facility',
-  'critical-team-work-order-detail',
+  'critical_team_work_order_detail',
 ]
 const DASHBOARD_ALL_RESOURCE_ORDER = [
-  'critical-team-overview',
-  'critical-team-inspection-project-start',
-  'critical-team-report-completion-chart',
-  'critical-team-review-chart',
-  'critical-asset-condition-aggregate',
-  'critical-asset-clog-aggregate',
+  'critical_team_overview',
+  'critical_team_inspection_project_start_date',
+  'critical_team_inspection_completion_date_chart',
+  'critical_team_report_completion_date_chart',
+  'critical_team_inspection_completion_date_reviews',
+  'critical_asset_condition_facility_aggregate_both',
+  'critical_asset_clog_facility_aggregate_pipes',
 ]
 const ALL_RESOURCE_CATEGORY_ORDER: Array<Exclude<ResourceCategory, 'all'>> = [
   'dashboards',
@@ -121,14 +144,23 @@ const ALL_RESOURCE_CATEGORY_ORDER: Array<Exclude<ResourceCategory, 'all'>> = [
   'tables',
   'datasets',
   'documents',
+  'reports',
+]
+const FEATURED_CATEGORY_COMPOSE_ORDER: Exclude<PortalFeaturedCategory, 'all'>[] = [
+  'dashboard',
+  'map',
+  'tab',
+  'dataset',
+  'doc',
+  'report',
 ]
 
 const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
   {
-    id: 'critical-team-overview',
+    id: 'critical_team_overview',
     title: 'Critical Team Overview',
     description: 'Cityworks Critical Asset Inspection work-order source and completion summary.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'overview'),
+    href: CRITICAL_TEAM_SHEET_ROUTES.overview,
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -137,10 +169,22 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Critical Team',
   },
   {
-    id: 'critical-team-inspection-project-start',
+    id: 'critical_team_inspection_project_start_date',
     title: 'Inspection Project Start Date',
     description: 'Count of inspection work orders by project start month and assigned submitter.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'insp-proj-start-date'),
+    href: CRITICAL_TEAM_SHEET_ROUTES['insp-proj-start-date'],
+    category: 'dashboards',
+    type: 'Dashboard',
+    preview: 'dashboard',
+    thumbnail: criticalTeamInspectionCompletionChartThumb,
+    darkThumbnail: criticalTeamInspectionCompletionChartDarkThumb,
+    meta: 'Chart',
+  },
+  {
+    id: 'critical_team_inspection_completion_date_chart',
+    title: 'Inspection Completion Date Chart',
+    description: 'Inspection completion date counts grouped by submitter.',
+    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-bar-chart'],
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -149,10 +193,10 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Chart',
   },
   {
-    id: 'critical-team-report-completion-chart',
+    id: 'critical_team_report_completion_date_chart',
     title: 'Report Completion Date Chart',
     description: 'Report completion date counts grouped by submitter.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'report-comp-date-chart'),
+    href: CRITICAL_TEAM_SHEET_ROUTES['report-comp-date-chart'],
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -161,10 +205,10 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Chart',
   },
   {
-    id: 'critical-team-review-chart',
+    id: 'critical_team_inspection_completion_date_reviews',
     title: 'Inspection Completion Date Reviews',
     description: 'Ready-for-review and review-complete work orders by closed date and reviewer.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'insp-comp-date-reviews'),
+    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-reviews'],
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -173,10 +217,22 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Chart',
   },
   {
-    id: 'critical-team-report-completion-table',
+    id: 'critical_team_inspection_completion_date',
+    title: 'Inspection Completion Date',
+    description: 'Inspection completion date cross-tab by submitter.',
+    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-table'],
+    category: 'tables',
+    type: 'Table',
+    preview: 'table',
+    thumbnail: criticalTeamInspectionCompletionTableThumb,
+    darkThumbnail: criticalTeamInspectionCompletionTableDarkThumb,
+    meta: 'Critical Team',
+  },
+  {
+    id: 'critical_team_report_completion_date',
     title: 'Report Completion Date',
     description: 'Report completion date cross-tab by submitter.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'report-comp-date-table'),
+    href: CRITICAL_TEAM_SHEET_ROUTES['report-comp-date-table'],
     category: 'tables',
     type: 'Table',
     preview: 'table',
@@ -185,10 +241,10 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Critical Team',
   },
   {
-    id: 'critical-team-review-table',
+    id: 'critical_team_review_completion_date',
     title: 'Review Completion Date',
     description: 'Review-complete cross-tab by reviewer and closed month.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'insp-comp-date-reviews-table'),
+    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-reviews-table'],
     category: 'tables',
     type: 'Table',
     preview: 'table',
@@ -197,10 +253,10 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Critical Team',
   },
   {
-    id: 'critical-team-work-order-detail',
+    id: 'critical_team_work_order_detail',
     title: 'Work Order Detail',
     description: 'Operational detail rows from the Cityworks Critical Asset Inspection source.',
-    href: sheetHref(CRITICAL_TEAM_ROUTE, 'workorders'),
+    href: CRITICAL_TEAM_SHEET_ROUTES.workorders,
     category: 'tables',
     type: 'Table',
     preview: 'table',
@@ -212,10 +268,10 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
 
 const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
   {
-    id: 'critical-asset-condition-aggregate',
+    id: 'critical_asset_condition_facility_aggregate_both',
     title: 'Condition Risk Facility Aggregate - Both',
     description: 'Condition risk summarized by facility across pipes and structures.',
-    href: sheetHref(CRITICAL_ASSET_TRACKING_ROUTE, 'condition-facility-aggregate-both'),
+    href: CRITICAL_ASSET_SHEET_ROUTES['condition-facility-aggregate-both'],
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -224,10 +280,10 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
     meta: 'Critical Asset Tracking',
   },
   {
-    id: 'critical-asset-clog-aggregate',
+    id: 'critical_asset_clog_facility_aggregate_pipes',
     title: 'Clog Risk Facility Aggregate - Pipes',
     description: 'Clog risk summarized by facility for pipe assets.',
-    href: sheetHref(CRITICAL_ASSET_TRACKING_ROUTE, 'clog-facility-aggregate-pipes'),
+    href: CRITICAL_ASSET_SHEET_ROUTES['clog-facility-aggregate-pipes'],
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
@@ -236,10 +292,10 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
     meta: 'Critical Asset Tracking',
   },
   {
-    id: 'critical-asset-history-table',
+    id: 'critical_asset_history_both',
     title: 'History - Both',
     description: 'Paged, sortable inspection history across pipes and structures.',
-    href: sheetHref(CRITICAL_ASSET_TRACKING_ROUTE, 'history-table-both'),
+    href: CRITICAL_ASSET_SHEET_ROUTES['history-table-both'],
     category: 'tables',
     type: 'Table',
     preview: 'table',
@@ -249,69 +305,208 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
   },
 ]
 
-function formatCount(value: number | null | undefined) {
-  if (value === null || value === undefined) return '-'
-  return value.toLocaleString()
-}
-
-function previewForLayer(layer: GISLayerMeta): ResourcePreview {
-  const text = `${layer.id} ${layer.label} ${layer.geometry_type ?? ''}`.toLowerCase()
-  if (text.includes('pipe')) return 'pipe'
-  if (text.includes('structure') || text.includes('point')) return 'structure'
-  return 'facility'
-}
-
-function thumbnailForLayer(layer: GISLayerMeta) {
-  const preview = previewForLayer(layer)
-  return preview === 'facility' ? gisCriticalAssetFacilityThumb : gisCriticalAssetHistoryThumb
-}
-
-function darkThumbnailForLayer(layer: GISLayerMeta) {
-  const preview = previewForLayer(layer)
-  return preview === 'facility' ? gisCriticalAssetFacilityDarkThumb : gisCriticalAssetHistoryDarkThumb
-}
-
 function thumbnailForMapResource(item: DashboardCatalogItem) {
+  if (item.id === 'stm_risk_map') return stmRiskMapThumb
   return item.id.includes('history') ? gisCriticalAssetHistoryThumb : gisCriticalAssetFacilityThumb
 }
 
 function darkThumbnailForMapResource(item: DashboardCatalogItem) {
+  if (item.id === 'stm_risk_map') return stmRiskMapDarkThumb
   return item.id.includes('history') ? gisCriticalAssetHistoryDarkThumb : gisCriticalAssetFacilityDarkThumb
 }
 
-function dashboardResource(item: DashboardCatalogItem): PortalResource {
+function categoryForCatalogItem(item: DashboardCatalogItem): Exclude<ResourceCategory, 'all'> {
+  if (item.kind === 'map') return 'maps'
+  if (item.kind === 'tab') return 'tables'
+  if (item.kind === 'doc') return 'documents'
+  if (item.kind === 'report') return 'reports'
+  return 'dashboards'
+}
+
+function typeForCatalogItem(item: DashboardCatalogItem): ResourceType {
+  if (item.kind === 'map') return 'Map'
+  if (item.kind === 'tab') return 'Table'
+  if (item.kind === 'doc') return 'Document'
+  if (item.kind === 'report') return 'Report'
+  return 'Dashboard'
+}
+
+function previewForCatalogItem(item: DashboardCatalogItem): ResourcePreview {
+  if (item.kind === 'map') return item.id.includes('history') ? 'history' : 'map'
+  if (item.kind === 'tab') return 'table'
+  return 'dashboard'
+}
+
+function thumbnailForCatalogItem(item: DashboardCatalogItem) {
+  if (item.kind === 'map') return thumbnailForMapResource(item)
+  if (item.id === 'proactive_team_cctv_review') return proactiveTeamCctvReviewThumb
+  if (item.id === 'planning_pending_aif_qa') return criticalTeamWorkordersThumb
+  if (item.id === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartThumb
+  if (item.id === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableThumb
+  if (item.id.includes('history')) return criticalAssetHistoryTableThumb
+  if (item.id.includes('clog')) return criticalAssetClogAggregateThumb
+  if (item.id.includes('critical_asset')) return criticalAssetConditionAggregateThumb
+  if (item.id.includes('work_order')) return criticalTeamWorkordersThumb
+  if (item.id.includes('report_completion')) return criticalTeamReportCompletionChartThumb
+  if (item.id.includes('review')) return criticalTeamReviewsChartThumb
+  if (item.id.includes('critical_team')) return criticalTeamOverviewThumb
+  return criticalTeamProjectStartThumb
+}
+
+function darkThumbnailForCatalogItem(item: DashboardCatalogItem) {
+  if (item.kind === 'map') return darkThumbnailForMapResource(item)
+  if (item.id === 'proactive_team_cctv_review') return proactiveTeamCctvReviewDarkThumb
+  if (item.id === 'planning_pending_aif_qa') return criticalTeamWorkordersDarkThumb
+  if (item.id === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartDarkThumb
+  if (item.id === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableDarkThumb
+  if (item.id.includes('history')) return criticalAssetHistoryTableDarkThumb
+  if (item.id.includes('clog')) return criticalAssetClogAggregateDarkThumb
+  if (item.id.includes('critical_asset')) return criticalAssetConditionAggregateDarkThumb
+  if (item.id.includes('work_order')) return criticalTeamWorkordersDarkThumb
+  if (item.id.includes('report_completion')) return criticalTeamReportCompletionChartDarkThumb
+  if (item.id.includes('review')) return criticalTeamReviewsChartDarkThumb
+  if (item.id.includes('critical_team')) return criticalTeamOverviewDarkThumb
+  return criticalTeamProjectStartDarkThumb
+}
+
+function catalogResource(item: DashboardCatalogItem): PortalResource {
   return {
     id: item.id,
     title: item.title,
     description: item.description,
     href: item.path,
-    category: 'maps',
-    type: 'Map',
-    preview: item.id.includes('history') ? 'history' : 'map',
-    thumbnail: thumbnailForMapResource(item),
-    darkThumbnail: darkThumbnailForMapResource(item),
+    category: categoryForCatalogItem(item),
+    type: typeForCatalogItem(item),
+    preview: previewForCatalogItem(item),
+    thumbnail: thumbnailForCatalogItem(item),
+    darkThumbnail: darkThumbnailForCatalogItem(item),
     meta: item.category,
   }
 }
 
-function layerMapResource(layer: GISLayerMeta): PortalResource {
+function categoryForManagedResource(resource: ManagedPortalResource): Exclude<ResourceCategory, 'all'> {
+  if (resource.resource_type === 'map') return 'maps'
+  if (resource.resource_type === 'tab') return 'tables'
+  if (resource.resource_type === 'doc') return 'documents'
+  if (resource.resource_type === 'report') return 'reports'
+  if (resource.resource_type === 'dataset') return 'datasets'
+  return 'dashboards'
+}
+
+function featuredCategoryForPortalCategory(category: ResourceCategory): PortalFeaturedCategory {
+  if (category === 'dashboards') return 'dashboard'
+  if (category === 'maps') return 'map'
+  if (category === 'tables') return 'tab'
+  if (category === 'documents') return 'doc'
+  if (category === 'datasets') return 'dataset'
+  if (category === 'reports') return 'report'
+  return 'all'
+}
+
+function composeAllFeaturedResources(featured: PortalFeaturedResourcesByCategory): ManagedPortalResource[] {
+  const orderedResources: ManagedPortalResource[] = []
+  const resourceKeys = new Set<string>()
+
+  for (const category of FEATURED_CATEGORY_COMPOSE_ORDER) {
+    for (const resource of featured[category] ?? []) {
+      if (resourceKeys.has(resource.resource_key)) continue
+      resourceKeys.add(resource.resource_key)
+      orderedResources.push(resource)
+    }
+  }
+
+  return orderedResources
+}
+
+function featuredResourcesForDisplay(
+  resources: ManagedPortalResource[] | undefined,
+  existingResources: PortalResource[],
+  availableResourceKeys: Set<string>,
+  activeCategory: ResourceCategory,
+  searchTerm: string,
+) {
+  return (resources ?? [])
+    .filter((resource) => isPortalCardResource(resource) && availableResourceKeys.has(resource.resource_key))
+    .map((resource) => managedResourceCard(resource, existingResources))
+    .filter((resource) => resourceMatches(resource, activeCategory, searchTerm))
+}
+
+function typeForManagedResource(resource: ManagedPortalResource): ResourceType {
+  if (resource.resource_type === 'map') return 'Map'
+  if (resource.resource_type === 'tab') return 'Table'
+  if (resource.resource_type === 'doc') return 'Document'
+  if (resource.resource_type === 'report') return 'Report'
+  if (resource.resource_type === 'dataset' || resource.resource_type === 'api' || resource.resource_type === 'service') return 'Dataset'
+  return 'Dashboard'
+}
+
+function previewForManagedResource(resource: ManagedPortalResource): ResourcePreview {
+  if (resource.resource_type === 'map') return resource.resource_key.includes('history') ? 'history' : 'map'
+  if (resource.resource_type === 'tab') return 'table'
+  return 'dashboard'
+}
+
+function isStmRiskMapResource(resource: ManagedPortalResource) {
+  return resource.resource_key === 'stm_risk_map' || resource.url.includes('/map_stm_risk')
+}
+
+function thumbnailForManagedResource(resource: ManagedPortalResource) {
+  if (isStmRiskMapResource(resource)) return stmRiskMapThumb
+  if (resource.resource_key === 'proactive_team_cctv_review') return proactiveTeamCctvReviewThumb
+  if (resource.resource_key === 'planning_pending_aif_qa') return criticalTeamWorkordersThumb
+  if (resource.resource_key === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartThumb
+  if (resource.resource_key === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableThumb
+  if (resource.resource_key.includes('history')) return gisCriticalAssetHistoryThumb
+  if (resource.resource_key.includes('facility') || resource.resource_key.includes('map')) return gisCriticalAssetFacilityThumb
+  if (resource.resource_key.includes('critical_asset')) return criticalAssetConditionAggregateThumb
+  if (resource.resource_key.includes('critical_team')) return criticalTeamOverviewThumb
+  return criticalTeamProjectStartThumb
+}
+
+function darkThumbnailForManagedResource(resource: ManagedPortalResource) {
+  if (isStmRiskMapResource(resource)) return stmRiskMapDarkThumb
+  if (resource.resource_key === 'proactive_team_cctv_review') return proactiveTeamCctvReviewDarkThumb
+  if (resource.resource_key === 'planning_pending_aif_qa') return criticalTeamWorkordersDarkThumb
+  if (resource.resource_key === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartDarkThumb
+  if (resource.resource_key === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableDarkThumb
+  if (resource.resource_key.includes('history')) return gisCriticalAssetHistoryDarkThumb
+  if (resource.resource_key.includes('facility') || resource.resource_key.includes('map')) return gisCriticalAssetFacilityDarkThumb
+  if (resource.resource_key.includes('critical_asset')) return criticalAssetConditionAggregateDarkThumb
+  if (resource.resource_key.includes('critical_team')) return criticalTeamOverviewDarkThumb
+  return criticalTeamProjectStartDarkThumb
+}
+
+function managedResourceCard(resource: ManagedPortalResource, existingResources: PortalResource[]): PortalResource {
+  const existing = existingResources.find((item) => item.id === resource.resource_key)
+  if (existing) return existing
   return {
-    id: `map-${layer.id}`,
-    title: layer.label,
-    description: `${layer.geometry_type ?? 'Spatial'} layer with ${formatCount(layer.row_count)} records.`,
-    href: GIS_FACILITY_ROUTE,
-    category: 'maps',
-    type: 'Map',
-    preview: previewForLayer(layer),
-    thumbnail: thumbnailForLayer(layer),
-    darkThumbnail: darkThumbnailForLayer(layer),
-    meta: `${formatCount(layer.row_count)} records`,
-    color: layer.color,
+    id: resource.resource_key,
+    title: resource.name,
+    description: resource.description ?? resource.name,
+    href: resource.url,
+    category: categoryForManagedResource(resource),
+    type: typeForManagedResource(resource),
+    preview: previewForManagedResource(resource),
+    thumbnail: thumbnailForManagedResource(resource),
+    darkThumbnail: darkThumbnailForManagedResource(resource),
+    meta: resource.category ?? resource.resource_type,
   }
 }
 
-function isVisibleSpatialResource(layer: GISLayerMeta) {
-  return !HIDDEN_SPATIAL_RESOURCE_LABELS.has(layer.label.trim().toLowerCase())
+function isPortalCardResource(resource: ManagedPortalResource) {
+  return resource.is_active && resource.resource_type !== 'admin' && resource.resource_type !== 'api' && resource.resource_type !== 'service'
+}
+
+function portalCardResourcesFromResponse(resources: ManagedPortalResource[]) {
+  return resources.filter(isPortalCardResource)
+}
+
+function mergeResources(resources: PortalResource[]) {
+  const merged = new Map<string, PortalResource>()
+  for (const resource of resources) {
+    if (!merged.has(resource.id)) merged.set(resource.id, resource)
+  }
+  return [...merged.values()]
 }
 
 function resourceMatches(resource: PortalResource, category: ResourceCategory, query: string) {
@@ -328,15 +523,19 @@ function resourceMatches(resource: PortalResource, category: ResourceCategory, q
 
 function orderFeaturedResources(resources: PortalResource[], category: ResourceCategory) {
   if (category === 'all') {
-    return FEATURED_ALL_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
+    const orderedResources = FEATURED_ALL_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
       (resource): resource is PortalResource => Boolean(resource),
     )
+    const orderedIds = new Set(orderedResources.map((resource) => resource.id))
+    return [...orderedResources, ...resources.filter((resource) => !orderedIds.has(resource.id))]
   }
 
   if (category === 'dashboards') {
-    return FEATURED_DASHBOARD_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
+    const orderedResources = FEATURED_DASHBOARD_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
       (resource): resource is PortalResource => Boolean(resource),
     )
+    const orderedIds = new Set(orderedResources.map((resource) => resource.id))
+    return [...orderedResources, ...resources.filter((resource) => !orderedIds.has(resource.id))]
   }
 
   if (category !== 'tables') return resources
@@ -382,52 +581,224 @@ function orderAllResources(resources: PortalResource[], category: ResourceCatego
 
 function ResourceTypeIcon({ type }: { type: ResourceType }) {
   if (type === 'Dataset') return <Database size={18} aria-hidden="true" />
+  if (type === 'Document') return <FileText size={18} aria-hidden="true" />
   if (type === 'Map') return <MapPinned size={18} aria-hidden="true" />
+  if (type === 'Report') return <BarChart3 size={18} aria-hidden="true" />
   if (type === 'Table') return <Rows3 size={18} aria-hidden="true" />
   return <BarChart3 size={18} aria-hidden="true" />
 }
 
-function ResourceCard({ resource, theme }: { resource: PortalResource; theme: AppTheme }) {
+function resourcePopupUrl(resource: PortalResource) {
+  try {
+    const url = new URL(resource.href, window.location.origin)
+    if (url.origin === window.location.origin) {
+      url.searchParams.set('embed', '1')
+      return `${url.pathname}${url.search}${url.hash}`
+    }
+    return url.toString()
+  } catch {
+    return resource.href
+  }
+}
+
+function ResourceCard({
+  resource,
+  theme,
+  onOpen,
+}: {
+  resource: PortalResource
+  theme: AppTheme
+  onOpen: (resource: PortalResource) => void
+}) {
   const thumbnail = theme === 'dark' && resource.darkThumbnail ? resource.darkThumbnail : resource.thumbnail
 
   return (
     <article className="home-resource-card">
-      <a className={`home-resource-preview image-preview ${resource.preview}`} href={resource.href} aria-label={`Open ${resource.title}`}>
+      <button className={`home-resource-preview image-preview ${resource.preview}`} type="button" onClick={() => onOpen(resource)} aria-label={`Open ${resource.title}`}>
         <img src={thumbnail} alt="" loading="lazy" />
-      </a>
+      </button>
       <div className="home-resource-body">
-        <a className="home-resource-title" href={resource.href}>
+        <button className="home-resource-title" type="button" onClick={() => onOpen(resource)}>
           <ResourceTypeIcon type={resource.type} />
           <span>{resource.title}</span>
-        </a>
+        </button>
         <div className="home-resource-footer">
-          <a href={resource.href} aria-label={`${resource.title} details`}>
+          <button type="button" onClick={() => onOpen(resource)} aria-label={`${resource.title} details`}>
             <Info size={17} />
-          </a>
+          </button>
         </div>
       </div>
     </article>
   )
 }
 
+function ResourcePopup({
+  resource,
+  onClose,
+}: {
+  resource: PortalResource
+  onClose: () => void
+}) {
+  return (
+    <div
+      className="home-resource-modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
+      <section className="home-resource-modal" role="dialog" aria-modal="true" aria-label={resource.title}>
+        <button className="home-resource-modal-close" type="button" onClick={onClose} aria-label="Close resource popup">
+          <X size={21} />
+        </button>
+        <iframe src={resourcePopupUrl(resource)} title={resource.title} />
+      </section>
+    </div>
+  )
+}
+
+const ACCOUNT_PROFILE_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=profile`
+const ACCOUNT_FAVORITES_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=featured`
+
+function accountDisplayName(user: PortalUser) {
+  return user.first_name || user.display_name || 'Account'
+}
+
+function roleText(role: PortalRole) {
+  if (role === 'system_admin') return 'System admin'
+  if (role === 'admin') return 'Admin'
+  return 'User'
+}
+
+function isManagementRole(role: PortalRole) {
+  return role === 'admin' || role === 'system_admin'
+}
+
+function AccountMenu({
+  user,
+  onSignOut,
+  onSwitchRole,
+}: {
+  user: PortalUser
+  onSignOut: () => void
+  onSwitchRole: (role: PortalRole) => Promise<void>
+}) {
+  const [open, setOpen] = useState(false)
+  const [switchingRole, setSwitchingRole] = useState<PortalRole | null>(null)
+  const [roleError, setRoleError] = useState('')
+  const hasMultipleRoles = user.roles.length > 1
+
+  async function handleSwitchRole(role: PortalRole) {
+    if (switchingRole || role === user.selected_role) return
+    setSwitchingRole(role)
+    setRoleError('')
+    try {
+      await onSwitchRole(role)
+      setOpen(false)
+    } catch (error) {
+      setRoleError(error instanceof Error ? error.message : 'Could not switch role.')
+    } finally {
+      setSwitchingRole(null)
+    }
+  }
+
+  return (
+    <div className="home-account-menu" onBlur={() => window.setTimeout(() => setOpen(false), 120)}>
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className="home-account-button"
+        onClick={() => setOpen((current) => !current)}
+        type="button"
+      >
+        <UserRound size={17} />
+        <span>{accountDisplayName(user)}</span>
+        <ChevronDown size={15} />
+      </button>
+      {open ? (
+        <div className="home-account-menu-panel" onMouseDown={(event) => event.preventDefault()} role="menu">
+          {hasMultipleRoles ? (
+            <div className="home-account-role-section" role="group" aria-label="Switch role">
+              <span className="home-account-role-label">Role</span>
+              {user.roles.map((role) => (
+                <button
+                  aria-checked={role === user.selected_role}
+                  className={role === user.selected_role ? 'home-account-role-button active' : 'home-account-role-button'}
+                  disabled={Boolean(switchingRole)}
+                  key={role}
+                  onClick={() => void handleSwitchRole(role)}
+                  role="menuitemradio"
+                  type="button"
+                >
+                  <span>{roleText(role)}</span>
+                  {role === user.selected_role ? <Check size={15} /> : null}
+                </button>
+              ))}
+              {roleError ? <div className="home-account-role-error">{roleError}</div> : null}
+            </div>
+          ) : null}
+          {isManagementRole(user.selected_role) ? (
+            <a href={ADMIN_MANAGEMENT_ROUTE} role="menuitem">
+              <Settings size={16} />
+              Portal Admin
+            </a>
+          ) : null}
+          <a href={ACCOUNT_PROFILE_ROUTE} role="menuitem">
+            <UserRound size={16} />
+            Profile
+          </a>
+          <a href={ACCOUNT_FAVORITES_ROUTE} role="menuitem">
+            <Star size={16} />
+            Favorites
+          </a>
+          <button type="button" role="menuitem" onClick={onSignOut}>
+            <LogOut size={16} />
+            Sign out
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 export default function HomePage({ theme, onThemeChange }: HomePageProps) {
-  const [layers, setLayers] = useState<GISLayerMeta[]>([])
-  const [layerStatus, setLayerStatus] = useState<LayerStatus>('loading')
   const [activeCategory, setActiveCategory] = useState<ResourceCategory>('all')
   const [searchTerm, setSearchTerm] = useState('')
+  const [managedFeaturedResourcesByCategory, setManagedFeaturedResourcesByCategory] = useState<PortalFeaturedResourcesByCategory>({})
+  const [configuredFeaturedCategories, setConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
+  const [defaultFeaturedResourcesByCategory, setDefaultFeaturedResourcesByCategory] = useState<PortalFeaturedResourcesByCategory>({})
+  const [defaultConfiguredFeaturedCategories, setDefaultConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
+  const [accessibleManagedResources, setAccessibleManagedResources] = useState<ManagedPortalResource[]>([])
+  const [portalUser, setPortalUser] = useState<PortalUser | null>(null)
+  const [popupResource, setPopupResource] = useState<PortalResource | null>(null)
 
   useEffect(() => {
+    if (!storedManagementToken()) return
     let cancelled = false
 
-    fetchGISLayers()
-      .then((response) => {
-        if (cancelled) return
-        setLayers(response.layers)
-        setLayerStatus('ready')
+    Promise.all([fetchMe(), fetchMyResources(), fetchMyFeaturedResources()])
+      .then(([meResponse, resourcesResponse, featuredResponse]) => {
+        if (!cancelled) {
+          setPortalUser(meResponse.user)
+          setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
+          setManagedFeaturedResourcesByCategory(featuredResponse.featured ?? { all: featuredResponse.resources })
+          setConfiguredFeaturedCategories(featuredResponse.configured_categories ?? (featuredResponse.resources.length ? ['all'] : []))
+          setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
+          setDefaultConfiguredFeaturedCategories(
+            featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
+          )
+        }
       })
       .catch(() => {
         if (cancelled) return
-        setLayerStatus('error')
+        clearManagementToken()
+        setPortalUser(null)
+        setAccessibleManagedResources([])
+        setManagedFeaturedResourcesByCategory({})
+        setConfiguredFeaturedCategories([])
+        setDefaultFeaturedResourcesByCategory({})
+        setDefaultConfiguredFeaturedCategories([])
+        window.location.replace(PORTAL_LOGIN_ROUTE)
       })
 
     return () => {
@@ -435,27 +806,163 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     }
   }, [])
 
-  const spatialMapResources = useMemo(
-    () => (layerStatus === 'ready' ? layers.filter(isVisibleSpatialResource).map(layerMapResource) : FALLBACK_SPATIAL_MAPS),
-    [layerStatus, layers],
-  )
-  const mapResources = useMemo(() => DASHBOARD_CATALOG.filter((item) => item.category === 'Maps').map(dashboardResource), [])
+  useEffect(() => {
+    if (!popupResource) return
+
+    const previousBodyOverflow = document.body.style.overflow
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') setPopupResource(null)
+    }
+
+    document.body.style.overflow = 'hidden'
+    document.addEventListener('keydown', handleKeyDown)
+    return () => {
+      document.body.style.overflow = previousBodyOverflow
+      document.removeEventListener('keydown', handleKeyDown)
+    }
+  }, [popupResource])
+
+  function handlePortalSignOut() {
+    clearManagementToken()
+    setPortalUser(null)
+    setAccessibleManagedResources([])
+    setManagedFeaturedResourcesByCategory({})
+    setConfiguredFeaturedCategories([])
+    setDefaultFeaturedResourcesByCategory({})
+    setDefaultConfiguredFeaturedCategories([])
+    window.location.replace(PORTAL_LOGIN_ROUTE)
+  }
+
+  async function handlePortalRoleSwitch(role: PortalRole) {
+    const response = await switchRole(role)
+    saveManagementToken(response.token, role)
+    setPortalUser({ ...response.user, selected_role: role })
+
+    try {
+      const [meResponse, resourcesResponse, featuredResponse] = await Promise.all([
+        fetchMe(response.token),
+        fetchMyResources(response.token),
+        fetchMyFeaturedResources(response.token),
+      ])
+      setPortalUser({ ...meResponse.user, selected_role: role })
+      setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
+      setManagedFeaturedResourcesByCategory(featuredResponse.featured ?? { all: featuredResponse.resources })
+      setConfiguredFeaturedCategories(featuredResponse.configured_categories ?? (featuredResponse.resources.length ? ['all'] : []))
+      setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
+      setDefaultConfiguredFeaturedCategories(
+        featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
+      )
+    } catch {
+      setPortalUser({ ...response.user, selected_role: role })
+      setAccessibleManagedResources([])
+      setManagedFeaturedResourcesByCategory({})
+      setConfiguredFeaturedCategories([])
+      setDefaultFeaturedResourcesByCategory({})
+      setDefaultConfiguredFeaturedCategories([])
+    }
+  }
+
+  const catalogResources = useMemo(() => DASHBOARD_CATALOG.map(catalogResource), [])
   const dashboardResources = useMemo(() => [...CRITICAL_ASSET_RESOURCES, ...CRITICAL_TEAM_RESOURCES], [])
-  const allResources = useMemo(
-    () => [...mapResources, ...dashboardResources, ...spatialMapResources],
-    [dashboardResources, mapResources, spatialMapResources],
+  const baseResources = useMemo(
+    () => mergeResources([...dashboardResources, ...catalogResources]),
+    [catalogResources, dashboardResources],
   )
+  const managedCardResources = useMemo(
+    () => accessibleManagedResources.filter(isPortalCardResource).map((resource) => managedResourceCard(resource, baseResources)),
+    [accessibleManagedResources, baseResources],
+  )
+  const allResources = useMemo(
+    () => mergeResources(managedCardResources),
+    [managedCardResources],
+  )
+  const availableResourceKeys = useMemo(() => new Set(allResources.map((resource) => resource.id)), [allResources])
+  const visibleCategoryOptions = useMemo(
+    () =>
+      CATEGORY_OPTIONS.filter((option) =>
+        option.key === 'all'
+          ? allResources.length > 0
+          : allResources.some((resource) => resource.category === option.key),
+      ),
+    [allResources],
+  )
+
+  useEffect(() => {
+    if (!visibleCategoryOptions.length) {
+      if (activeCategory !== 'all') setActiveCategory('all')
+      return
+    }
+    if (!visibleCategoryOptions.some((option) => option.key === activeCategory)) {
+      setActiveCategory(visibleCategoryOptions[0].key)
+    }
+  }, [activeCategory, visibleCategoryOptions])
+
   const filteredResources = useMemo(
     () => orderAllResources(allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)), activeCategory),
     [activeCategory, allResources, searchTerm],
   )
+  const activeFeaturedCategory = featuredCategoryForPortalCategory(activeCategory)
+  const hasPersonalFeaturedCategory = configuredFeaturedCategories.includes(activeFeaturedCategory)
+  const hasExplicitTeamDefaultFeaturedCategory = defaultConfiguredFeaturedCategories.includes(activeFeaturedCategory)
+  const hasComposedTeamDefaultForAll =
+    activeFeaturedCategory === 'all' &&
+    !hasExplicitTeamDefaultFeaturedCategory &&
+    FEATURED_CATEGORY_COMPOSE_ORDER.some((category) => defaultConfiguredFeaturedCategories.includes(category))
+  const hasTeamDefaultFeaturedCategory = hasExplicitTeamDefaultFeaturedCategory || hasComposedTeamDefaultForAll
+  const personalizedFeaturedResources = useMemo(() => {
+    if (!hasPersonalFeaturedCategory) return []
+    return featuredResourcesForDisplay(
+      managedFeaturedResourcesByCategory[activeFeaturedCategory],
+      allResources,
+      availableResourceKeys,
+      activeCategory,
+      searchTerm,
+    )
+  }, [
+    activeCategory,
+    activeFeaturedCategory,
+    allResources,
+    availableResourceKeys,
+    hasPersonalFeaturedCategory,
+    managedFeaturedResourcesByCategory,
+    searchTerm,
+  ])
+  const teamDefaultFeaturedResources = useMemo(() => {
+    if (hasPersonalFeaturedCategory || !hasTeamDefaultFeaturedCategory) return []
+    const defaultResources =
+      activeFeaturedCategory === 'all' && !hasExplicitTeamDefaultFeaturedCategory
+        ? composeAllFeaturedResources(defaultFeaturedResourcesByCategory)
+        : defaultFeaturedResourcesByCategory[activeFeaturedCategory]
+    return featuredResourcesForDisplay(defaultResources, allResources, availableResourceKeys, activeCategory, searchTerm)
+  }, [
+    activeCategory,
+    activeFeaturedCategory,
+    allResources,
+    availableResourceKeys,
+    defaultFeaturedResourcesByCategory,
+    hasExplicitTeamDefaultFeaturedCategory,
+    hasPersonalFeaturedCategory,
+    hasTeamDefaultFeaturedCategory,
+    searchTerm,
+  ])
   const featuredResourceMatches = useMemo(
-    () =>
-      orderFeaturedResources(
-        [...mapResources, ...dashboardResources].filter((resource) => resourceMatches(resource, activeCategory, searchTerm)),
+    () => {
+      if (hasPersonalFeaturedCategory) return personalizedFeaturedResources
+      if (hasTeamDefaultFeaturedCategory) return teamDefaultFeaturedResources
+      return orderFeaturedResources(
+        allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)),
         activeCategory,
-      ),
-    [activeCategory, dashboardResources, mapResources, searchTerm],
+      )
+    },
+    [
+      activeCategory,
+      allResources,
+      hasPersonalFeaturedCategory,
+      hasTeamDefaultFeaturedCategory,
+      personalizedFeaturedResources,
+      searchTerm,
+      teamDefaultFeaturedResources,
+    ],
   )
   const featuredResources = useMemo(() => featuredResourceMatches.slice(0, 4), [featuredResourceMatches])
 
@@ -470,7 +977,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           </a>
 
           <nav className="home-category-nav" aria-label="Resource categories">
-            {CATEGORY_OPTIONS.map((option) => (
+            {visibleCategoryOptions.map((option) => (
               <button
                 className={activeCategory === option.key ? 'active' : ''}
                 key={option.key}
@@ -493,10 +1000,14 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           </label>
 
           <div className="home-utility-nav" aria-label="Portal utilities">
-            <span>
-              <LogIn size={17} />
-              Sign in
-            </span>
+            {portalUser ? (
+              <AccountMenu user={portalUser} onSignOut={handlePortalSignOut} onSwitchRole={handlePortalRoleSwitch} />
+            ) : (
+              <a href={PORTAL_LOGIN_ROUTE}>
+                <LogIn size={17} />
+                Sign in
+              </a>
+            )}
             <ThemeToggle placement="inline" theme={theme} onThemeChange={onThemeChange} />
           </div>
         </div>
@@ -525,7 +1036,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
         {featuredResources.length ? (
           <div className="home-resource-grid">
             {featuredResources.map((resource) => (
-              <ResourceCard key={resource.id} resource={resource} theme={theme} />
+              <ResourceCard key={resource.id} resource={resource} theme={theme} onOpen={setPopupResource} />
             ))}
           </div>
         ) : (
@@ -575,7 +1086,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
 
           <div className="home-resource-grid">
             {filteredResources.map((resource) => (
-              <ResourceCard key={`all-${resource.id}`} resource={resource} theme={theme} />
+              <ResourceCard key={`all-${resource.id}`} resource={resource} theme={theme} onOpen={setPopupResource} />
             ))}
           </div>
 
@@ -594,6 +1105,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           ) : null}
         </section>
       </section>
+      {popupResource ? <ResourcePopup resource={popupResource} onClose={() => setPopupResource(null)} /> : null}
     </main>
   )
 }

@@ -1,0 +1,46 @@
+{
+  "generated_by": "tools/generate_maplibre_styles.py",
+  "tileset_id": "planning_project",
+  "tileset_output": "build/pmtiles/planning_project.pmtiles",
+  "style_filename": "style.json",
+  "default_map_id": "01_planning_team_working_map_template",
+  "view": {
+    "bounds": [
+      -81.05820507867213,
+      34.98042866490886,
+      -80.55010902138316,
+      35.49306123037348
+    ],
+    "protected_bounds": [
+      -81.05820507867213,
+      35.002167795343645,
+      -80.55010902138316,
+      35.514800360808266
+    ],
+    "minimum_scale": 800000.0,
+    "min_zoom": 9.53,
+    "padding": 24
+  },
+  "maps": [
+    {
+      "id": "02_exhibit_map",
+      "name": "02 Exhibit Map",
+      "style": "02_exhibit_map/style.json",
+      "style_layer_count": 727,
+      "source_layer_count": 256,
+      "label_layer_count": 85,
+      "skipped_layer_count": 8,
+      "unparsed_filter_count": 0
+    },
+    {
+      "id": "01_planning_team_working_map_template",
+      "name": "01 Planning Team Working Map Template",
+      "style": "01_planning_team_working_map_template/style.json",
+      "style_layer_count": 841,
+      "source_layer_count": 264,
+      "label_layer_count": 116,
+      "skipped_layer_count": 9,
+      "unparsed_filter_count": 0
+    }
+  ]
+}

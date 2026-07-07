@@ -312,6 +312,9 @@ html.dashboard-embed-mode,
 html.dashboard-embed-mode body,
 html.dashboard-embed-mode #root {
   min-height: 100%;
+  --portal-popup-close-safe-size: 64px;
+  --portal-popup-close-safe-inset: 10px;
+  --portal-popup-close-button-size: 38px;
 }
 
 html.dashboard-embed-mode body {
