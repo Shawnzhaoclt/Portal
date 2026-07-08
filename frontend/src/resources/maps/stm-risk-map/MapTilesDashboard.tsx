@@ -1,4 +1,4 @@
-import { type ChangeEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as echarts from "echarts";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSONFeature, type MapMouseEvent, type MapOptions } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -7,6 +7,7 @@ import {
   Activity,
   ChevronRight,
   CircleDot,
+  Download,
   Filter,
   Landmark,
   Layers,
@@ -72,6 +73,9 @@ import type {
   StyleLayer,
   ViewConfig,
 } from "./types";
+
+const northArrowCompassUrl = new URL("./assets/north-arrow-compass.svg", import.meta.url).href;
+const MAP_PDF_FRAME_ASPECT_RATIO = 660 / 584;
 
 type IdentifyFeature = SelectedFeature & {
   featureLabel: string;
@@ -557,6 +561,37 @@ type LayerTreeNode = {
   childrenByKey: Map<string, LayerTreeNode>;
 };
 
+type MapPdfSelectionRect = {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  overlayWidth: number;
+  overlayHeight: number;
+};
+
+type MapPdfExportDetails = {
+  mapName: string;
+  author: string;
+};
+
+type MapPdfScaleInfo = {
+  groundWidthFeet: number;
+  scaleBarFeet: number;
+  scaleBarLabel: string;
+  scaleBarWidthRatio: number;
+};
+
+type MapPdfSelectionDragMode = "move" | "resize-nw" | "resize-ne" | "resize-sw" | "resize-se";
+
+type MapPdfSelectionDragState = {
+  pointerId: number;
+  mode: MapPdfSelectionDragMode;
+  startX: number;
+  startY: number;
+  startFrame: MapPdfSelectionRect;
+};
+
 export default function App() {
   const mapNodeRef = useRef<HTMLDivElement | null>(null);
   const splitMapNodeRef = useRef<HTMLDivElement | null>(null);
@@ -611,6 +646,11 @@ export default function App() {
   const drawToolRef = useRef<DrawTool>("select");
   const polygonClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const swipeDragRef = useRef<{ pointerId: number } | null>(null);
+  const mapPdfSelectionDragRef = useRef<MapPdfSelectionDragState | null>(null);
+  const mapPdfDetailsRef = useRef<MapPdfExportDetails>({
+    mapName: "Storm Water Asset Risk Map",
+    author: "",
+  });
   const defaultWidgetLayoutAppliedRef = useRef(false);
 
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -664,6 +704,11 @@ export default function App() {
   const [riskHistogramType, setRiskHistogramType] = useState<RiskSortType>("condition");
   const [riskHistogramActiveLayer, setRiskHistogramActiveLayer] = useState(DEFAULT_RISK_HISTOGRAM_LAYER_SELECTION.cityworks);
   const [riskHistogramLayerSelection, setRiskHistogramLayerSelection] = useState<RiskLayerSelection>(DEFAULT_RISK_HISTOGRAM_LAYER_SELECTION);
+  const [mapPdfExporting, setMapPdfExporting] = useState(false);
+  const [mapPdfExportSelecting, setMapPdfExportSelecting] = useState(false);
+  const [mapPdfDetailsOpen, setMapPdfDetailsOpen] = useState(false);
+  const [mapPdfForm, setMapPdfForm] = useState<MapPdfExportDetails>(mapPdfDetailsRef.current);
+  const [mapPdfSelectionFrame, setMapPdfSelectionFrame] = useState<MapPdfSelectionRect | null>(null);
   const [layerRecords, setLayerRecords] = useState<StyleLayer[]>([]);
   const [layerNameFilter, setLayerNameFilter] = useState("");
   const [layerVisibility, setLayerVisibilityState] = useState<Record<string, boolean>>({});
@@ -2134,6 +2179,7 @@ export default function App() {
         container: mapNodeRef.current,
         style: activeStyle,
         attributionControl: false,
+        preserveDrawingBuffer: true,
         renderWorldCopies: false,
       } as MapOptions);
       const map = new maplibregl.Map(mapOptions);
@@ -2262,6 +2308,7 @@ export default function App() {
         container: splitMapNodeRef.current,
         style: activeStyle,
         attributionControl: false,
+        preserveDrawingBuffer: true,
         renderWorldCopies: false,
       } as MapOptions);
       splitOptions.center = primaryMap.getCenter();
@@ -2409,6 +2456,177 @@ export default function App() {
   const showError = (error: Error) => {
     console.error(error);
   };
+
+  const cancelMapPdfSelection = useCallback(() => {
+    mapPdfSelectionDragRef.current = null;
+    setMapPdfExportSelecting(false);
+    setMapPdfSelectionFrame(null);
+  }, []);
+
+  const exportSelectedMapPdf = useCallback(async (selection: MapPdfSelectionRect) => {
+    const map = mapRef.current;
+    if (!map || mapPdfExporting) {
+      return;
+    }
+
+    setMapPdfExporting(true);
+    setMapPdfExportSelecting(false);
+    setMapPdfSelectionFrame(null);
+    mapPdfSelectionDragRef.current = null;
+    try {
+      await waitForMapRender(map);
+      const canvas = map.getCanvas();
+      if (!canvas.width || !canvas.height) {
+        throw new Error("The map canvas is not ready for export.");
+      }
+
+      const image = await mapCanvasToJpegImage(canvas, selection);
+      const northArrowImage = await imageUrlToJpegImage(northArrowCompassUrl, 640);
+      const scaleInfo = getMapPdfScaleInfo(map, selection);
+      const generatedAt = new Date();
+      const details = mapPdfDetailsRef.current;
+      const pdf = createMapPdfBlob({
+        image,
+        northArrowImage,
+        details,
+        generatedAt,
+        mapBearing: map.getBearing(),
+        scaleInfo,
+      });
+      downloadBlob(pdf, `${fileSafeMapName(details.mapName)}_${dateStamp(generatedAt)}.pdf`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Could not export the current map.";
+      showError(new Error(message));
+      window.alert(`Could not export the selected map area to PDF.\n\n${message}`);
+    } finally {
+      setMapPdfExporting(false);
+    }
+  }, [mapPdfExporting]);
+
+  const startMapPdfSelection = useCallback(() => {
+    if (mapPdfExporting) {
+      return;
+    }
+    const mapBounds = mapNodeRef.current?.getBoundingClientRect();
+    setMapPdfExportSelecting(true);
+    setMapPdfSelectionFrame(
+      mapBounds?.width && mapBounds.height
+        ? createInitialMapPdfSelectionFrame(mapBounds.width, mapBounds.height)
+        : null,
+    );
+    setAssetSearchOpen(false);
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setLayerFilterEditor(null);
+    setMapViewMenuOpen(false);
+  }, [mapPdfExporting]);
+
+  const openMapPdfDetailsDialog = useCallback(() => {
+    if (mapPdfExporting) {
+      return;
+    }
+    setMapPdfForm(mapPdfDetailsRef.current);
+    setMapPdfDetailsOpen(true);
+    setAssetSearchOpen(false);
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setLayerFilterEditor(null);
+    setMapViewMenuOpen(false);
+  }, [mapPdfExporting]);
+
+  const cancelMapPdfDetailsDialog = useCallback(() => {
+    setMapPdfDetailsOpen(false);
+  }, []);
+
+  const submitMapPdfDetails = useCallback((details: MapPdfExportDetails) => {
+    const nextDetails = {
+      mapName: details.mapName.trim() || "Storm Water Asset Risk Map",
+      author: details.author.trim(),
+    };
+    mapPdfDetailsRef.current = nextDetails;
+    setMapPdfForm(nextDetails);
+    setMapPdfDetailsOpen(false);
+    startMapPdfSelection();
+  }, [startMapPdfSelection]);
+
+  useEffect(() => {
+    if (!mapPdfExportSelecting) {
+      return;
+    }
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") {
+        cancelMapPdfSelection();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [cancelMapPdfSelection, mapPdfExportSelecting]);
+
+  useEffect(() => {
+    if (!mapPdfExportSelecting || mapPdfSelectionFrame) {
+      return;
+    }
+    const frameId = window.requestAnimationFrame(() => {
+      const mapBounds = mapNodeRef.current?.getBoundingClientRect();
+      if (mapBounds?.width && mapBounds.height) {
+        setMapPdfSelectionFrame(createInitialMapPdfSelectionFrame(mapBounds.width, mapBounds.height));
+      }
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [mapPdfExportSelecting, mapPdfSelectionFrame]);
+
+  const startMapPdfSelectionFrameDrag = useCallback((mode: MapPdfSelectionDragMode, event: React.PointerEvent<HTMLElement>) => {
+    if (event.button !== 0 || mapPdfExporting || !mapPdfSelectionFrame) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    mapPdfSelectionDragRef.current = {
+      pointerId: event.pointerId,
+      mode,
+      startX: event.clientX,
+      startY: event.clientY,
+      startFrame: mapPdfSelectionFrame,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [mapPdfExporting, mapPdfSelectionFrame]);
+
+  const moveMapPdfSelectionFrame = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = mapPdfSelectionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    setMapPdfSelectionFrame(
+      updateMapPdfSelectionFrameForDrag(
+        drag.startFrame,
+        drag.mode,
+        event.clientX - drag.startX,
+        event.clientY - drag.startY,
+      ),
+    );
+  }, []);
+
+  const finishMapPdfSelectionFrameDrag = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = mapPdfSelectionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    mapPdfSelectionDragRef.current = null;
+  }, []);
+
+  const exportMapPdfSelectionFrame = useCallback(() => {
+    if (!mapPdfSelectionFrame || mapPdfExporting) {
+      return;
+    }
+    void exportSelectedMapPdf(mapPdfSelectionFrame);
+  }, [exportSelectedMapPdf, mapPdfExporting, mapPdfSelectionFrame]);
 
   const openLayerFilterEditor = useCallback((layer: StyleLayer) => {
     const target = layerFilterTarget(layer);
@@ -2690,6 +2908,15 @@ export default function App() {
         </div>
       </header>
 
+      {mapPdfDetailsOpen ? (
+        <MapPdfDetailsDialog
+          details={mapPdfForm}
+          onCancel={cancelMapPdfDetailsDialog}
+          onChange={setMapPdfForm}
+          onSubmit={submitMapPdfDetails}
+        />
+      ) : null}
+
       <main className="relative min-h-0 min-w-0 overflow-hidden bg-[var(--map-bg)]">
         <div className="absolute inset-0 overflow-hidden">
           <div
@@ -2698,6 +2925,18 @@ export default function App() {
             }`}
           >
             <div ref={mapNodeRef} className="h-full w-full" />
+            {mapPdfExportSelecting ? (
+              <MapPdfSelectionOverlay
+                frame={mapPdfSelectionFrame}
+                exporting={mapPdfExporting}
+                onCancel={cancelMapPdfSelection}
+                onExport={exportMapPdfSelectionFrame}
+                onPointerCancel={finishMapPdfSelectionFrameDrag}
+                onPointerDown={startMapPdfSelectionFrameDrag}
+                onPointerMove={moveMapPdfSelectionFrame}
+                onPointerUp={finishMapPdfSelectionFrameDrag}
+              />
+            ) : null}
           </div>
           {mapViewMode !== "single" ? (
             <div
@@ -2761,6 +3000,8 @@ export default function App() {
             drawActive={drawModeActive}
             drawFeatureCount={drawFeatures.length}
             drawTool={drawTool}
+            mapPdfExportActive={mapPdfExportSelecting}
+            mapPdfExporting={mapPdfExporting}
             map3dActive={map3dEnabled}
             mapViewMenuOpen={mapViewMenuOpen}
             mode={mapViewMode}
@@ -2769,6 +3010,7 @@ export default function App() {
             onDeleteSelectedDrawFeature={deleteSelectedDrawFeature}
             onDrawToggle={() => setDrawModeActive((active) => !active)}
             onDrawToolChange={setDrawTool}
+            onMapPdfExportToggle={mapPdfExportSelecting ? cancelMapPdfSelection : openMapPdfDetailsDialog}
             onMap3dToggle={toggle3dMap}
             onMapViewMenuToggle={() => setMapViewMenuOpen((open) => !open)}
             onModeChange={changeMapViewMode}
@@ -3702,28 +3944,200 @@ function emptyRiskHistogram(id: string, label: string, datasetId: string): RiskH
 
 function HeaderIconButton({
   active,
+  disabled = false,
   icon,
   label,
   onClick,
 }: {
   active: boolean;
+  disabled?: boolean;
   icon: React.ReactNode;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`grid h-8 w-8 place-items-center transition-colors ${
+      className={`grid h-8 w-8 place-items-center transition-colors disabled:cursor-wait disabled:opacity-70 ${
         active ? "bg-white/20 text-white" : "text-white/80 hover:bg-white/12 hover:text-white"
       }`}
       type="button"
       title={label}
       aria-label={label}
       aria-pressed={active}
+      disabled={disabled}
       onClick={onClick}
     >
       <span className="[&>svg]:h-4 [&>svg]:w-4">{icon}</span>
     </button>
+  );
+}
+
+function MapPdfDetailsDialog({
+  details,
+  onCancel,
+  onChange,
+  onSubmit,
+}: {
+  details: MapPdfExportDetails;
+  onCancel: () => void;
+  onChange: (details: MapPdfExportDetails) => void;
+  onSubmit: (details: MapPdfExportDetails) => void;
+}) {
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    onSubmit(details);
+  };
+
+  return (
+    <div className="fixed inset-0 z-[70] grid place-items-center bg-[#001827]/35 px-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <form
+        className="grid w-full max-w-[440px] border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_50px_rgba(0,0,0,.32)]"
+        onSubmit={handleSubmit}
+      >
+        <header className="flex items-center justify-between border-b border-[var(--panel-border)] bg-[var(--brand-bg)] px-4 py-3 text-[var(--brand-fg)]">
+          <strong className="text-[13px] font-black uppercase tracking-[.08em]">Export Map PDF</strong>
+          <button
+            className="grid h-8 w-8 place-items-center hover:bg-white/12"
+            type="button"
+            title="Cancel export"
+            aria-label="Cancel export"
+            onClick={onCancel}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+        <section className="grid gap-4 p-4">
+          <label className="grid gap-1">
+            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Map name</span>
+            <input
+              className="h-10 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+              value={details.mapName}
+              onChange={(event) => onChange({ ...details, mapName: event.target.value })}
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Author</span>
+            <input
+              className="h-10 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+              value={details.author}
+              onChange={(event) => onChange({ ...details, author: event.target.value })}
+            />
+          </label>
+        </section>
+        <footer className="flex justify-end gap-2 border-t border-[var(--panel-border)] p-4">
+          <button
+            className="h-9 border border-[var(--control-border)] px-4 text-[12px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]"
+            type="button"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+          <button className="h-9 bg-[var(--accent)] px-4 text-[12px] font-black text-white hover:brightness-105" type="submit">
+            Set export area
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function MapPdfSelectionOverlay({
+  frame,
+  exporting,
+  onCancel,
+  onExport,
+  onPointerCancel,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+}: {
+  frame: MapPdfSelectionRect | null;
+  exporting: boolean;
+  onCancel: () => void;
+  onExport: () => void;
+  onPointerCancel: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerDown: (mode: MapPdfSelectionDragMode, event: React.PointerEvent<HTMLElement>) => void;
+  onPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
+  onPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
+}) {
+  const handles: Array<{ mode: MapPdfSelectionDragMode; className: string; label: string }> = [
+    { mode: "resize-nw", className: "left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize", label: "Resize export area from top left" },
+    { mode: "resize-ne", className: "right-0 top-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize", label: "Resize export area from top right" },
+    { mode: "resize-sw", className: "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize", label: "Resize export area from bottom left" },
+    { mode: "resize-se", className: "bottom-0 right-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize", label: "Resize export area from bottom right" },
+  ];
+
+  return (
+    <div
+      className="absolute inset-0 z-30 bg-[#001827]/10"
+      role="presentation"
+      style={{ touchAction: "none" }}
+    >
+      <div className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--control-text)] shadow-[0_8px_24px_rgba(0,0,0,.22)]">
+        <span>
+          {exporting
+            ? "Exporting selected map area..."
+            : "Move or resize the PDF export frame, then export."}
+        </span>
+        <button
+          className="h-7 bg-[var(--accent)] px-3 text-[10px] font-black uppercase tracking-[.08em] text-white disabled:cursor-wait disabled:opacity-70"
+          type="button"
+          disabled={exporting || !frame}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onExport();
+          }}
+        >
+          Export PDF
+        </button>
+        <button
+          className="h-7 border border-[var(--control-border)] px-2 text-[10px] font-black uppercase tracking-[.08em] text-[var(--accent)] hover:bg-[var(--row-hover)]"
+          type="button"
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onCancel();
+          }}
+        >
+          Cancel
+        </button>
+      </div>
+      {frame ? (
+        <div
+          className="absolute cursor-move border-2 border-[var(--accent)] bg-[var(--accent)]/10 shadow-[0_0_0_9999px_rgba(0,24,39,.18)]"
+          style={{
+            left: frame.left,
+            top: frame.top,
+            width: frame.width,
+            height: frame.height,
+          }}
+          onPointerCancel={onPointerCancel}
+          onPointerDown={(event) => onPointerDown("move", event)}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+        >
+          <div className="pointer-events-none absolute left-0 right-0 top-1/2 border-t border-dashed border-white/80" />
+          <div className="pointer-events-none absolute bottom-0 top-0 left-1/2 border-l border-dashed border-white/80" />
+          <span className="pointer-events-none absolute left-2 top-2 bg-[#001827]/80 px-2 py-1 text-[10px] font-black uppercase tracking-[.08em] text-white">
+            PDF map area
+          </span>
+          {handles.map((handle) => (
+            <button
+              key={handle.mode}
+              className={`absolute h-4 w-4 border-2 border-white bg-[var(--accent)] shadow-[0_1px_6px_rgba(0,0,0,.35)] ${handle.className}`}
+              type="button"
+              title={handle.label}
+              aria-label={handle.label}
+              onPointerCancel={onPointerCancel}
+              onPointerDown={(event) => onPointerDown(handle.mode, event)}
+              onPointerMove={onPointerMove}
+              onPointerUp={onPointerUp}
+            />
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -3759,6 +4173,8 @@ function MapToolStrip({
   drawActive,
   drawFeatureCount,
   drawTool,
+  mapPdfExportActive,
+  mapPdfExporting,
   map3dActive,
   mapViewMenuOpen,
   mode,
@@ -3767,6 +4183,7 @@ function MapToolStrip({
   onDeleteSelectedDrawFeature,
   onDrawToggle,
   onDrawToolChange,
+  onMapPdfExportToggle,
   onMap3dToggle,
   onMapViewMenuToggle,
   onModeChange,
@@ -3774,6 +4191,8 @@ function MapToolStrip({
   drawActive: boolean;
   drawFeatureCount: number;
   drawTool: DrawTool;
+  mapPdfExportActive: boolean;
+  mapPdfExporting: boolean;
   map3dActive: boolean;
   mapViewMenuOpen: boolean;
   mode: MapViewMode;
@@ -3782,6 +4201,7 @@ function MapToolStrip({
   onDeleteSelectedDrawFeature: () => void;
   onDrawToggle: () => void;
   onDrawToolChange: (tool: DrawTool) => void;
+  onMapPdfExportToggle: () => void;
   onMap3dToggle: () => void;
   onMapViewMenuToggle: () => void;
   onModeChange: (mode: MapViewMode) => void;
@@ -3793,7 +4213,7 @@ function MapToolStrip({
   ];
 
   return (
-    <div className="relative z-20 h-[108px] w-9">
+    <div className="relative z-20 h-[144px] w-9">
       <div className="grid border border-[var(--control-border)] bg-[var(--control-bg)] shadow-[0_8px_24px_rgba(0,0,0,.18)]">
         <MapToolButton active={mapViewMenuOpen} label="Select map view mode" onClick={onMapViewMenuToggle}>
           <KeplerSplitIcon className="h-[18px] w-[18px]" />
@@ -3803,6 +4223,20 @@ function MapToolStrip({
         </MapToolButton>
         <MapToolButton active={drawActive} label="Draw on map" onClick={onDrawToggle}>
           <KeplerDrawIcon className="h-[18px] w-[18px]" />
+        </MapToolButton>
+        <MapToolButton
+          active={mapPdfExportActive || mapPdfExporting}
+          disabled={mapPdfExporting}
+          label={
+            mapPdfExporting
+              ? "Exporting map PDF"
+              : mapPdfExportActive
+                ? "Cancel map PDF export"
+                : "Export map PDF"
+          }
+          onClick={onMapPdfExportToggle}
+        >
+          <Download className="h-[18px] w-[18px]" />
         </MapToolButton>
       </div>
       {mapViewMenuOpen ? (
@@ -3839,23 +4273,26 @@ function MapToolStrip({
 function MapToolButton({
   active,
   children,
+  disabled = false,
   label,
   onClick,
 }: {
   active: boolean;
   children: React.ReactNode;
+  disabled?: boolean;
   label: string;
   onClick: () => void;
 }) {
   return (
     <button
-      className={`group relative grid h-9 w-9 place-items-center border-b border-[var(--control-border)] text-[var(--control-text)] transition-colors last:border-b-0 hover:bg-[var(--row-hover)] ${
+      className={`group relative grid h-9 w-9 place-items-center border-b border-[var(--control-border)] text-[var(--control-text)] transition-colors last:border-b-0 hover:bg-[var(--row-hover)] disabled:cursor-wait disabled:opacity-70 ${
         active ? "bg-[var(--panel-active-bg)] text-[var(--accent)]" : ""
       }`}
       type="button"
       title={label}
       aria-label={label}
       aria-pressed={active}
+      disabled={disabled}
       onClick={onClick}
     >
       {children}
@@ -4834,7 +5271,7 @@ function NorthArrowControl({
   return (
     <div className="pointer-events-none">
       <button
-        className={`group relative pointer-events-auto grid h-[58px] w-[46px] cursor-grab select-none grid-rows-[12px_1fr_12px] place-items-center rounded-xl border bg-[var(--control-bg)] text-[var(--accent)] shadow-xl backdrop-blur-sm transition-colors active:cursor-grabbing ${
+        className={`group relative pointer-events-auto grid h-[64px] w-[48px] cursor-grab select-none grid-rows-[1fr_12px] place-items-center border bg-[var(--control-bg)] text-[var(--accent)] shadow-xl backdrop-blur-sm transition-colors active:cursor-grabbing ${
           dragging ? "border-[var(--accent)] ring-2 ring-[var(--accent)]" : "border-[var(--control-border)] hover:border-[var(--accent)]"
         }`}
         type="button"
@@ -4846,21 +5283,17 @@ function NorthArrowControl({
         aria-label={`North arrow. Map bearing ${displayBearing} degrees. ${tooltip}`}
         style={{ touchAction: "none" }}
       >
-        <span className="text-[9px] font-black leading-none text-[var(--control-text)]">N</span>
-        <span className="relative grid h-8 w-8 place-items-center rounded-full border border-[var(--control-border)] bg-[var(--input-bg)]">
-          <span className="absolute h-5 w-px bg-[var(--accent)] opacity-25" />
-          <span className="absolute h-px w-5 bg-[var(--accent)] opacity-25" />
-          <span
-            className="relative h-7 w-5 origin-center"
-            style={{
-              transform: `rotate(${-bearing}deg)`,
-              transition: dragging ? "none" : "transform 150ms ease-out",
-            }}
-          >
-            <span className="absolute left-1/2 top-0 h-0 w-0 -translate-x-1/2 border-x-[7px] border-b-[19px] border-x-transparent border-b-[var(--accent)] drop-shadow-[0_0_8px_rgba(19,118,213,.45)]" />
-            <span className="absolute bottom-0 left-1/2 h-0 w-0 -translate-x-1/2 border-x-[4px] border-t-[10px] border-x-transparent border-t-[var(--control-text)]" />
-          </span>
-        </span>
+        <img
+          className="h-11 w-11 origin-center select-none"
+          src={northArrowCompassUrl}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          style={{
+            transform: `rotate(${-bearing}deg)`,
+            transition: dragging ? "none" : "transform 150ms ease-out",
+          }}
+        />
         <span className="text-[9px] font-black leading-none text-[var(--control-text)]">{displayBearing} deg</span>
         <span
           className="pointer-events-none absolute left-full top-1/2 z-40 ml-2 -translate-y-1/2 whitespace-nowrap rounded-[2px] bg-[#29323d] px-2 py-1 text-[11px] font-semibold leading-none text-[#f5f8fb] opacity-0 shadow-[0_6px_18px_rgba(0,0,0,.28)] transition-opacity duration-150 before:absolute before:right-full before:top-1/2 before:h-0 before:w-0 before:-translate-y-1/2 before:border-y-[5px] before:border-r-[5px] before:border-y-transparent before:border-r-[#29323d] group-hover:opacity-100 group-focus-visible:opacity-100"
@@ -6321,6 +6754,502 @@ function collectCoordinates(value: unknown, out: Array<[number, number]>): void 
     return;
   }
   value.forEach((item) => collectCoordinates(item, out));
+}
+
+function createInitialMapPdfSelectionFrame(overlayWidth: number, overlayHeight: number): MapPdfSelectionRect {
+  const edgePadding = Math.min(48, Math.max(16, Math.min(overlayWidth, overlayHeight) * 0.08));
+  const maxWidth = Math.max(1, overlayWidth - edgePadding * 2);
+  const maxHeight = Math.max(1, overlayHeight - edgePadding * 2);
+  const width = clampNumber(
+    Math.min(maxWidth * 0.72, maxHeight * 0.72 * MAP_PDF_FRAME_ASPECT_RATIO),
+    Math.min(maxWidth, 120),
+    maxWidth,
+  );
+  const height = width / MAP_PDF_FRAME_ASPECT_RATIO;
+
+  return {
+    left: (overlayWidth - width) / 2,
+    top: (overlayHeight - height) / 2,
+    width,
+    height,
+    overlayWidth,
+    overlayHeight,
+  };
+}
+
+function updateMapPdfSelectionFrameForDrag(
+  frame: MapPdfSelectionRect,
+  mode: MapPdfSelectionDragMode,
+  deltaX: number,
+  deltaY: number,
+): MapPdfSelectionRect {
+  if (mode === "move") {
+    return {
+      ...frame,
+      left: clampNumber(frame.left + deltaX, 0, Math.max(0, frame.overlayWidth - frame.width)),
+      top: clampNumber(frame.top + deltaY, 0, Math.max(0, frame.overlayHeight - frame.height)),
+    };
+  }
+
+  const right = frame.left + frame.width;
+  const bottom = frame.top + frame.height;
+  const resizingFromLeft = mode === "resize-nw" || mode === "resize-sw";
+  const resizingFromTop = mode === "resize-nw" || mode === "resize-ne";
+  const widthFromHorizontalDrag = resizingFromLeft ? frame.width - deltaX : frame.width + deltaX;
+  const heightFromVerticalDrag = resizingFromTop ? frame.height - deltaY : frame.height + deltaY;
+  const widthFromVerticalDrag = heightFromVerticalDrag * MAP_PDF_FRAME_ASPECT_RATIO;
+  const preferredWidth = Math.abs(deltaX) >= Math.abs(deltaY)
+    ? widthFromHorizontalDrag
+    : widthFromVerticalDrag;
+  const maxWidthFromX = resizingFromLeft ? right : frame.overlayWidth - frame.left;
+  const maxWidthFromY = resizingFromTop ? bottom * MAP_PDF_FRAME_ASPECT_RATIO : (frame.overlayHeight - frame.top) * MAP_PDF_FRAME_ASPECT_RATIO;
+  const maxWidth = Math.max(1, Math.min(maxWidthFromX, maxWidthFromY));
+  const minWidth = Math.min(maxWidth, 120);
+  const width = clampNumber(preferredWidth, minWidth, maxWidth);
+  const height = width / MAP_PDF_FRAME_ASPECT_RATIO;
+
+  return {
+    ...frame,
+    left: resizingFromLeft ? right - width : frame.left,
+    top: resizingFromTop ? bottom - height : frame.top,
+    width,
+    height,
+  };
+}
+
+type MapPdfImage = {
+  data: Uint8Array;
+  width: number;
+  height: number;
+};
+
+function waitForMapRender(map: MapLibreMap): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timeoutId = 0;
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
+      map.off("idle", finish);
+      window.requestAnimationFrame(() => resolve());
+    };
+
+    timeoutId = window.setTimeout(finish, 2200);
+    map.once("idle", finish);
+    map.triggerRepaint();
+    if (map.loaded()) {
+      window.requestAnimationFrame(() => window.requestAnimationFrame(finish));
+    }
+  });
+}
+
+async function mapCanvasToJpegImage(canvas: HTMLCanvasElement, selection: MapPdfSelectionRect): Promise<MapPdfImage> {
+  const scaleX = canvas.width / Math.max(1, selection.overlayWidth);
+  const scaleY = canvas.height / Math.max(1, selection.overlayHeight);
+  const sourceX = clampNumber(Math.round(selection.left * scaleX), 0, canvas.width - 1);
+  const sourceY = clampNumber(Math.round(selection.top * scaleY), 0, canvas.height - 1);
+  const sourceWidth = clampNumber(Math.round(selection.width * scaleX), 1, canvas.width - sourceX);
+  const sourceHeight = clampNumber(Math.round(selection.height * scaleY), 1, canvas.height - sourceY);
+  const exportCanvas = document.createElement("canvas");
+  exportCanvas.width = sourceWidth;
+  exportCanvas.height = sourceHeight;
+  const context = exportCanvas.getContext("2d");
+  if (!context) {
+    throw new Error("The browser could not prepare a map image for export.");
+  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+  context.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, sourceWidth, sourceHeight);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    exportCanvas.toBlob((nextBlob) => {
+      if (nextBlob) {
+        resolve(nextBlob);
+      } else {
+        reject(new Error("The browser could not encode the map image."));
+      }
+    }, "image/jpeg", 0.92);
+  });
+
+  return {
+    data: new Uint8Array(await blob.arrayBuffer()),
+    width: exportCanvas.width,
+    height: exportCanvas.height,
+  };
+}
+
+async function imageUrlToJpegImage(url: string, targetWidth: number): Promise<MapPdfImage> {
+  const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+    const nextImage = new Image();
+    nextImage.decoding = "async";
+    nextImage.onload = () => resolve(nextImage);
+    nextImage.onerror = () => reject(new Error("The north arrow image could not be loaded for the PDF."));
+    nextImage.src = url;
+  });
+  const sourceWidth = image.naturalWidth || targetWidth;
+  const sourceHeight = image.naturalHeight || targetWidth;
+  const targetHeight = Math.max(1, Math.round(targetWidth * (sourceHeight / Math.max(1, sourceWidth))));
+  const exportCanvas = document.createElement("canvas");
+  exportCanvas.width = targetWidth;
+  exportCanvas.height = targetHeight;
+  const context = exportCanvas.getContext("2d");
+  if (!context) {
+    throw new Error("The browser could not prepare the north arrow image for export.");
+  }
+  context.fillStyle = "#ffffff";
+  context.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
+  context.drawImage(image, 0, 0, exportCanvas.width, exportCanvas.height);
+
+  const blob = await new Promise<Blob>((resolve, reject) => {
+    exportCanvas.toBlob((nextBlob) => {
+      if (nextBlob) {
+        resolve(nextBlob);
+      } else {
+        reject(new Error("The browser could not encode the north arrow image."));
+      }
+    }, "image/jpeg", 0.94);
+  });
+
+  return {
+    data: new Uint8Array(await blob.arrayBuffer()),
+    width: exportCanvas.width,
+    height: exportCanvas.height,
+  };
+}
+
+function getMapPdfScaleInfo(map: MapLibreMap, selection: MapPdfSelectionRect): MapPdfScaleInfo {
+  const centerY = selection.top + selection.height / 2;
+  const westPoint = map.unproject([selection.left, centerY]);
+  const eastPoint = map.unproject([selection.left + selection.width, centerY]);
+  const groundWidthFeet = Math.max(
+    1,
+    distanceFeetBetween(westPoint.lng, westPoint.lat, eastPoint.lng, eastPoint.lat),
+  );
+  const scaleBarFeet = niceScaleBarFeet(groundWidthFeet * 0.22);
+
+  return {
+    groundWidthFeet,
+    scaleBarFeet,
+    scaleBarLabel: formatScaleDistance(scaleBarFeet),
+    scaleBarWidthRatio: clampNumber(scaleBarFeet / groundWidthFeet, 0.04, 0.45),
+  };
+}
+
+function createMapPdfBlob({
+  image,
+  northArrowImage,
+  details,
+  generatedAt,
+  mapBearing,
+  scaleInfo,
+}: {
+  image: MapPdfImage;
+  northArrowImage: MapPdfImage;
+  details: MapPdfExportDetails;
+  generatedAt: Date;
+  mapBearing: number;
+  scaleInfo: MapPdfScaleInfo;
+}) {
+  type PdfObject = Array<string | Uint8Array>;
+
+  const pageWidth = 792;
+  const pageHeight = 612;
+  const margin = 14;
+  const titleBlockWidth = 96;
+  const titleBlockGap = 8;
+  const mapFrameX = margin;
+  const mapFrameY = margin;
+  const mapFrameWidth = pageWidth - margin * 2 - titleBlockGap - titleBlockWidth;
+  const mapFrameHeight = pageHeight - margin * 2;
+  const imageScale = Math.min(mapFrameWidth / image.width, mapFrameHeight / image.height);
+  const imageWidth = image.width * imageScale;
+  const imageHeight = image.height * imageScale;
+  const imageX = mapFrameX + (mapFrameWidth - imageWidth) / 2;
+  const imageY = mapFrameY + (mapFrameHeight - imageHeight) / 2;
+  const rightBlockX = mapFrameX + mapFrameWidth + titleBlockGap;
+  const rightBlockY = mapFrameY;
+  const rightBlockTop = mapFrameY + mapFrameHeight;
+  const northArrowBoxHeight = 108;
+  const detailsBoxY = rightBlockY;
+  const detailsBoxHeight = mapFrameHeight - northArrowBoxHeight;
+  const scaleDenominator = Math.max(1, Math.round((scaleInfo.groundWidthFeet * 12) / Math.max(1, imageWidth / 72)));
+  const scaleText = `Scale 1:${scaleDenominator.toLocaleString("en-US")}`;
+  const generatedText = `Generated ${formatPdfTimestamp(generatedAt)}`;
+  const encoder = new TextEncoder();
+  const objects: PdfObject[] = [
+    ["<< /Type /Catalog /Pages 2 0 R >>"],
+    [""],
+    ["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"],
+    ["<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"],
+  ];
+  const imageObjectId = objects.length + 1;
+  objects.push([
+    `<< /Type /XObject /Subtype /Image /Width ${image.width} /Height ${image.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${image.data.length} >>\nstream\n`,
+    image.data,
+    "\nendstream",
+  ]);
+  const northArrowObjectId = objects.length + 1;
+  objects.push([
+    `<< /Type /XObject /Subtype /Image /Width ${northArrowImage.width} /Height ${northArrowImage.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${northArrowImage.data.length} >>\nstream\n`,
+    northArrowImage.data,
+    "\nendstream",
+  ]);
+
+  const contentParts: string[] = [];
+  const addText = (
+    value: string,
+    x: number,
+    y: number,
+    size: number,
+    font: "F1" | "F2" = "F1",
+    align: "left" | "center" = "left",
+  ) => {
+    const textX = align === "center" ? x - approximatePdfTextWidth(value, size) / 2 : x;
+    contentParts.push(`0 0 0 rg BT /${font} ${pdfNumber(size)} Tf ${pdfNumber(textX)} ${pdfNumber(y)} Td (${pdfEscape(value)}) Tj ET`);
+  };
+  const strokeRect = (x: number, y: number, width: number, height: number, stroke = "0 0 0 RG", lineWidth = 0.7) => {
+    contentParts.push(`${stroke} ${pdfNumber(lineWidth)} w ${pdfNumber(x)} ${pdfNumber(y)} ${pdfNumber(width)} ${pdfNumber(height)} re S`);
+  };
+  const fillRect = (x: number, y: number, width: number, height: number, fill = "1 1 1 rg") => {
+    contentParts.push(`${fill} ${pdfNumber(x)} ${pdfNumber(y)} ${pdfNumber(width)} ${pdfNumber(height)} re f`);
+  };
+
+  fillRect(0, 0, pageWidth, pageHeight, "1 1 1 rg");
+  fillRect(mapFrameX, mapFrameY, mapFrameWidth, mapFrameHeight, "0.98 0.98 0.98 rg");
+  contentParts.push(pdfImageCommand("ImMap", imageX, imageY, imageWidth, imageHeight));
+  strokeRect(mapFrameX, mapFrameY, mapFrameWidth, mapFrameHeight, "0 0 0 RG", 1);
+  strokeRect(imageX, imageY, imageWidth, imageHeight, "0.35 0.35 0.35 RG", 0.5);
+
+  const scaleBarWidth = clampNumber(
+    imageWidth * scaleInfo.scaleBarWidthRatio,
+    42,
+    Math.min(170, Math.max(42, imageWidth * 0.4)),
+  );
+  const scaleBarHeight = 7;
+  const scaleBarX = imageX + imageWidth - scaleBarWidth - 18;
+  const scaleBarY = imageY + 20;
+  fillRect(scaleBarX - 8, scaleBarY - 8, scaleBarWidth + 16, 32, "1 1 1 rg");
+  strokeRect(scaleBarX - 8, scaleBarY - 8, scaleBarWidth + 16, 32, "0 0 0 RG", 0.5);
+  const segmentWidth = scaleBarWidth / 4;
+  for (let index = 0; index < 4; index += 1) {
+    fillRect(scaleBarX + segmentWidth * index, scaleBarY, segmentWidth, scaleBarHeight, index % 2 === 0 ? "0 0 0 rg" : "1 1 1 rg");
+    strokeRect(scaleBarX + segmentWidth * index, scaleBarY, segmentWidth, scaleBarHeight, "0 0 0 RG", 0.4);
+  }
+  addText("0", scaleBarX, scaleBarY - 6, 5, "F1", "center");
+  addText(scaleInfo.scaleBarLabel, scaleBarX + scaleBarWidth, scaleBarY - 6, 5, "F1", "center");
+  addText(scaleText, scaleBarX + scaleBarWidth / 2, scaleBarY + 12, 6, "F2", "center");
+
+  strokeRect(rightBlockX, rightBlockY, titleBlockWidth, mapFrameHeight, "0 0 0 RG", 1);
+  strokeRect(rightBlockX, rightBlockTop - northArrowBoxHeight, titleBlockWidth, northArrowBoxHeight, "0 0 0 RG", 1);
+  const northArrowPadding = 8;
+  const northArrowMaxWidth = titleBlockWidth - northArrowPadding * 2;
+  const northArrowMaxHeight = northArrowBoxHeight - northArrowPadding * 2;
+  const northArrowScale = Math.min(northArrowMaxWidth / northArrowImage.width, northArrowMaxHeight / northArrowImage.height);
+  const northArrowWidth = northArrowImage.width * northArrowScale;
+  const northArrowHeight = northArrowImage.height * northArrowScale;
+  const northArrowX = rightBlockX + titleBlockWidth / 2 - northArrowWidth / 2;
+  const northArrowY = rightBlockTop - northArrowBoxHeight + northArrowBoxHeight / 2 - northArrowHeight / 2;
+  contentParts.push(pdfImageCommand("ImNorth", northArrowX, northArrowY, northArrowWidth, northArrowHeight, -mapBearing));
+
+  strokeRect(rightBlockX, detailsBoxY, titleBlockWidth, detailsBoxHeight, "0 0 0 RG", 1);
+  let detailY = rightBlockTop - northArrowBoxHeight - 20;
+  wrapPdfText(details.mapName || "Storm Water Asset Risk Map", 17).forEach((line, index) => {
+    addText(line, rightBlockX + titleBlockWidth / 2, detailY - index * 11, 8.5, "F2", "center");
+  });
+  detailY -= Math.max(2, wrapPdfText(details.mapName || "Storm Water Asset Risk Map", 17).length) * 11 + 8;
+  addText("Author", rightBlockX + 8, detailY, 6.5, "F2");
+  detailY -= 10;
+  wrapPdfText(details.author || "-", 18).slice(0, 3).forEach((line) => {
+    addText(line, rightBlockX + 8, detailY, 7, "F1");
+    detailY -= 9;
+  });
+  detailY -= 6;
+  addText("Map Scale", rightBlockX + 8, detailY, 6.5, "F2");
+  detailY -= 10;
+  addText(scaleText, rightBlockX + 8, detailY, 7.5, "F1");
+  detailY -= 10;
+  addText(`Scale Bar: ${scaleInfo.scaleBarLabel}`, rightBlockX + 8, detailY, 7, "F1");
+  detailY -= 16;
+  addText("Generated", rightBlockX + 8, detailY, 6.5, "F2");
+  detailY -= 10;
+  wrapPdfText(generatedText, 19).slice(0, 3).forEach((line) => {
+    addText(line, rightBlockX + 8, detailY, 6.5, "F1");
+    detailY -= 8;
+  });
+  detailY -= 8;
+  addText(`Rotation ${Math.round(normalizeBearingDegrees(mapBearing))} deg`, rightBlockX + 8, detailY, 6.5, "F1");
+
+  const content = contentParts.join("\n");
+  const contentObjectId = objects.length + 1;
+  objects.push([`<< /Length ${encoder.encode(content).length} >>\nstream\n${content}\nendstream`]);
+  const pageObjectId = objects.length + 1;
+  objects.push([
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << /ImMap ${imageObjectId} 0 R /ImNorth ${northArrowObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+  ]);
+  objects[1] = [`<< /Type /Pages /Kids [${pageObjectId} 0 R] /Count 1 >>`];
+
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  const appendChunk = (chunk: string | Uint8Array) => {
+    const bytes = typeof chunk === "string" ? encoder.encode(chunk) : chunk;
+    chunks.push(bytes);
+    byteLength += bytes.length;
+  };
+  const offsets = [0];
+  appendChunk("%PDF-1.4\n");
+  objects.forEach((object, index) => {
+    offsets.push(byteLength);
+    appendChunk(`${index + 1} 0 obj\n`);
+    object.forEach(appendChunk);
+    appendChunk("\nendobj\n");
+  });
+  const xrefOffset = byteLength;
+  appendChunk(`xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`);
+  for (let index = 1; index < offsets.length; index += 1) {
+    appendChunk(`${String(offsets[index]).padStart(10, "0")} 00000 n \n`);
+  }
+  appendChunk(`trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`);
+
+  return new Blob(
+    chunks.map((chunk) => chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer),
+    { type: "application/pdf" },
+  );
+}
+
+function distanceFeetBetween(lng1: number, lat1: number, lng2: number, lat2: number): number {
+  const earthRadiusFeet = 20925524.9;
+  const toRadians = (value: number) => (value * Math.PI) / 180;
+  const dLat = toRadians(lat2 - lat1);
+  const dLng = toRadians(lng2 - lng1);
+  const startLat = toRadians(lat1);
+  const endLat = toRadians(lat2);
+  const a = Math.sin(dLat / 2) ** 2 + Math.cos(startLat) * Math.cos(endLat) * Math.sin(dLng / 2) ** 2;
+  return earthRadiusFeet * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function niceScaleBarFeet(targetFeet: number): number {
+  if (!Number.isFinite(targetFeet) || targetFeet <= 0) {
+    return 100;
+  }
+  const magnitude = 10 ** Math.floor(Math.log10(targetFeet));
+  let best = magnitude;
+  [1, 2, 5, 10].forEach((multiplier) => {
+    const candidate = multiplier * magnitude;
+    if (candidate <= targetFeet) {
+      best = candidate;
+    }
+  });
+  return best;
+}
+
+function formatScaleDistance(feet: number): string {
+  if (feet >= 5280) {
+    const miles = feet / 5280;
+    const digits = miles >= 10 ? 0 : miles >= 1 ? 1 : 2;
+    return `${miles.toFixed(digits)} mi`;
+  }
+  if (feet >= 1) {
+    return `${Math.round(feet).toLocaleString("en-US")} ft`;
+  }
+  return `${feet.toFixed(1)} ft`;
+}
+
+function normalizeBearingDegrees(value: number): number {
+  return ((value % 360) + 360) % 360;
+}
+
+function pdfImageCommand(name: string, x: number, y: number, width: number, height: number, rotationDegrees = 0): string {
+  if (!rotationDegrees) {
+    return `q ${pdfNumber(width)} 0 0 ${pdfNumber(height)} ${pdfNumber(x)} ${pdfNumber(y)} cm /${name} Do Q`;
+  }
+  const angle = (rotationDegrees * Math.PI) / 180;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const a = width * cos;
+  const b = width * sin;
+  const c = -height * sin;
+  const d = height * cos;
+  const centerX = x + width / 2;
+  const centerY = y + height / 2;
+  const e = centerX - (a + c) / 2;
+  const f = centerY - (b + d) / 2;
+  return `q ${pdfNumber(a)} ${pdfNumber(b)} ${pdfNumber(c)} ${pdfNumber(d)} ${pdfNumber(e)} ${pdfNumber(f)} cm /${name} Do Q`;
+}
+
+function wrapPdfText(value: string, maxCharacters: number): string[] {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) {
+    return ["-"];
+  }
+  const lines: string[] = [];
+  let current = "";
+  words.forEach((word) => {
+    if (!current) {
+      current = word;
+      return;
+    }
+    if (`${current} ${word}`.length <= maxCharacters) {
+      current = `${current} ${word}`;
+      return;
+    }
+    lines.push(current);
+    current = word;
+  });
+  if (current) {
+    lines.push(current);
+  }
+  return lines;
+}
+
+function approximatePdfTextWidth(value: string, size: number): number {
+  return value.length * size * 0.48;
+}
+
+function fileSafeMapName(value: string): string {
+  const safeName = value.trim().replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
+  return safeName || "Storm_Water_Asset_Risk_Map";
+}
+
+function downloadBlob(blob: Blob, fileName: string): void {
+  const link = document.createElement("a");
+  const url = URL.createObjectURL(blob);
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function dateStamp(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+function formatPdfTimestamp(date: Date): string {
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZoneName: "short",
+  }).format(date);
+}
+
+function pdfNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function pdfEscape(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
 function ensureSearchHighlightLayers(map: MapLibreMap): void {
