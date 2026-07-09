@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASXKG5R",
+  "resource_slug": "critical_team_overview",
+  "type": "dashboard",
+  "name": "Critical Team Overview",
+  "url": "/dashboard_critical_team_overview",
+  "category": "Operations",
+  "description": "Cityworks Critical Asset Inspection work-order source and completion summary.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

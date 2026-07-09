@@ -84,6 +84,7 @@ type ResourcePreview = 'facility' | 'pipe' | 'structure' | 'map' | 'history' | '
 
 type PortalResource = {
   id: string
+  resourceId?: string
   title: string
   description: string
   href: string
@@ -94,6 +95,16 @@ type PortalResource = {
   darkThumbnail?: string
   meta?: string
   color?: string
+}
+
+type PortalResourceLaunchContext = {
+  portal_email: string
+  portal_employeeid: string
+  portal_first_name: string
+  portal_last_name: string
+  portal_team_name: string
+  portal_is_manager: string
+  portal_user_role: string
 }
 
 type HomePageProps = {
@@ -372,6 +383,7 @@ function darkThumbnailForCatalogItem(item: DashboardCatalogItem) {
 function catalogResource(item: DashboardCatalogItem): PortalResource {
   return {
     id: item.id,
+    resourceId: item.resource_id,
     title: item.title,
     description: item.description,
     href: item.path,
@@ -481,6 +493,7 @@ function managedResourceCard(resource: ManagedPortalResource, existingResources:
   if (existing) return existing
   return {
     id: resource.resource_key,
+    resourceId: resource.resource_id,
     title: resource.name,
     description: resource.description ?? resource.name,
     href: resource.url,
@@ -588,11 +601,38 @@ function ResourceTypeIcon({ type }: { type: ResourceType }) {
   return <BarChart3 size={18} aria-hidden="true" />
 }
 
-function resourcePopupUrl(resource: PortalResource) {
+function resourceLaunchContext(user: PortalUser | null): PortalResourceLaunchContext | null {
+  if (!user) return null
+
+  return {
+    portal_email: user.email,
+    portal_employeeid: user.employee_id,
+    portal_first_name: user.first_name,
+    portal_last_name: user.last_name,
+    portal_team_name: user.team_name ?? '',
+    portal_is_manager: user.manager_user_id === user.id ? '1' : '0',
+    portal_user_role: roleText(user.selected_role),
+  }
+}
+
+function appendPortalUserContext(url: URL, user: PortalUser | null) {
+  const context = resourceLaunchContext(user)
+  if (!context) return
+
+  Object.entries(context).forEach(([key, value]) => {
+    url.searchParams.set(key, value)
+  })
+}
+
+function resourcePopupUrl(resource: PortalResource, user: PortalUser | null) {
   try {
     const url = new URL(resource.href, window.location.origin)
     if (url.origin === window.location.origin) {
       url.searchParams.set('embed', '1')
+      if (resource.resourceId) {
+        url.searchParams.set('portal_resource_id', resource.resourceId)
+      }
+      appendPortalUserContext(url, user)
       return `${url.pathname}${url.search}${url.hash}`
     }
     return url.toString()
@@ -634,9 +674,11 @@ function ResourceCard({
 
 function ResourcePopup({
   resource,
+  user,
   onClose,
 }: {
   resource: PortalResource
+  user: PortalUser | null
   onClose: () => void
 }) {
   return (
@@ -651,7 +693,7 @@ function ResourcePopup({
         <button className="home-resource-modal-close" type="button" onClick={onClose} aria-label="Close resource popup">
           <X size={21} />
         </button>
-        <iframe src={resourcePopupUrl(resource)} title={resource.title} />
+        <iframe src={resourcePopupUrl(resource, user)} title={resource.title} />
       </section>
     </div>
   )
@@ -665,7 +707,7 @@ function accountDisplayName(user: PortalUser) {
 }
 
 function roleText(role: PortalRole) {
-  if (role === 'system_admin') return 'System admin'
+  if (role === 'system_admin') return 'System Admin'
   if (role === 'admin') return 'Admin'
   return 'User'
 }
@@ -831,6 +873,17 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     setDefaultFeaturedResourcesByCategory({})
     setDefaultConfiguredFeaturedCategories([])
     window.location.replace(PORTAL_LOGIN_ROUTE)
+  }
+
+  function handleOpenResource(resource: PortalResource) {
+    if (!storedManagementToken() || !portalUser) {
+      clearManagementToken()
+      setPopupResource(null)
+      window.location.replace(PORTAL_LOGIN_ROUTE)
+      return
+    }
+
+    setPopupResource(resource)
   }
 
   async function handlePortalRoleSwitch(role: PortalRole) {
@@ -1036,7 +1089,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
         {featuredResources.length ? (
           <div className="home-resource-grid">
             {featuredResources.map((resource) => (
-              <ResourceCard key={resource.id} resource={resource} theme={theme} onOpen={setPopupResource} />
+              <ResourceCard key={resource.id} resource={resource} theme={theme} onOpen={handleOpenResource} />
             ))}
           </div>
         ) : (
@@ -1086,7 +1139,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
 
           <div className="home-resource-grid">
             {filteredResources.map((resource) => (
-              <ResourceCard key={`all-${resource.id}`} resource={resource} theme={theme} onOpen={setPopupResource} />
+              <ResourceCard key={`all-${resource.id}`} resource={resource} theme={theme} onOpen={handleOpenResource} />
             ))}
           </div>
 
@@ -1105,7 +1158,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           ) : null}
         </section>
       </section>
-      {popupResource ? <ResourcePopup resource={popupResource} onClose={() => setPopupResource(null)} /> : null}
+      {popupResource ? <ResourcePopup resource={popupResource} user={portalUser} onClose={() => setPopupResource(null)} /> : null}
     </main>
   )
 }

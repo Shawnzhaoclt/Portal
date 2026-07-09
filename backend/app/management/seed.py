@@ -9,10 +9,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from backend.app.core.paths import PROJECT_ROOT
-from backend.app.dashboards.catalog import DASHBOARDS
 from backend.app.management.models import Resource, Team, User
+from backend.app.management.resource_ids import normalize_resource_id, resource_id_validation_error
 from backend.app.management.security import hash_password
 from backend.app.management.services import display_name, write_audit_log
+from backend.app.resources.metadata import load_resource_metadata
 
 
 def pto_org_csv_path() -> Path:
@@ -56,32 +57,42 @@ def _read_org_rows() -> list[dict[str, str]]:
 
 
 def seed_resources(db: Session) -> None:
-    for item in DASHBOARDS:
-        resource = db.scalar(select(Resource).where(Resource.resource_key == item["id"]))
+    def declared_id(resource_id: str | None, resource_type: str) -> str:
+        error = resource_id_validation_error(resource_id, resource_type)
+        if error:
+            raise ValueError(error)
+        return normalize_resource_id(resource_id)
+
+    def ensure_id_available(resource: Resource, resource_string_id: str) -> None:
+        conflict = db.scalar(select(Resource).where(Resource.resource_id == resource_string_id, Resource.id != resource.id))
+        if conflict is not None:
+            raise ValueError(f"Resource ID {resource_string_id} is already registered to {conflict.resource_key}.")
+
+    for item in load_resource_metadata():
+        resource_type = item["type"]
+        resource_string_id = declared_id(item.get("resource_id"), resource_type)
+        resource_slug = item["resource_slug"]
+        resource = db.scalar(select(Resource).where(Resource.resource_id == resource_string_id))
+        key_match = db.scalar(select(Resource).where(Resource.resource_key == resource_slug))
+        if resource is not None and key_match is not None and resource.id != key_match.id:
+            raise ValueError(f"Resource ID {resource_string_id} and slug {resource_slug} are already registered to different resources.")
+        resource = resource or key_match
         if resource is None:
-            resource = Resource(resource_key=item["id"])
+            resource = Resource(resource_key=resource_slug, resource_id=resource_string_id)
             db.add(resource)
-        resource.name = item["title"]
-        resource.resource_type = item.get("kind", "dashboard")
-        resource.url = item["path"]
+        elif resource.resource_id != resource_string_id:
+            ensure_id_available(resource, resource_string_id)
+            resource.resource_id = resource_string_id
+        resource.resource_key = resource_slug
+        resource.name = item["name"]
+        resource.resource_type = resource_type
+        resource.url = item["url"]
         resource.description = item.get("description")
         resource.category = item.get("category")
-        resource.icon = None
-        resource.is_active = 1
-        resource.is_public = 0
-
-    management_resource = db.scalar(select(Resource).where(Resource.resource_key == "admin_management"))
-    if management_resource is None:
-        management_resource = Resource(resource_key="admin_management")
-        db.add(management_resource)
-    management_resource.name = "Portal Management"
-    management_resource.resource_type = "admin"
-    management_resource.url = "/admin_management"
-    management_resource.description = "Manage Portal users, teams, resources, permissions, and personal featured items."
-    management_resource.category = "Administration"
-    management_resource.icon = "settings"
-    management_resource.is_public = 0
-    management_resource.is_active = 1
+        resource.icon = item.get("icon")
+        resource.is_active = 1 if item.get("is_active", True) else 0
+        resource.is_public = 1 if item.get("is_public", False) else 0
+        db.flush()
 
 
 def _team_manager_rows(rows: list[dict[str, str]]) -> dict[str, dict[str, str]]:

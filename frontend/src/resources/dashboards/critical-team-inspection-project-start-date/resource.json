@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASJ11R7",
+  "resource_slug": "critical_team_inspection_project_start_date",
+  "type": "dashboard",
+  "name": "Inspection Project Start Date",
+  "url": "/dashboard_critical_team_inspection_project_start_date",
+  "category": "Operations",
+  "description": "Count of inspection work orders by project start month and assigned submitter.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

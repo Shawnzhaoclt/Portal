@@ -1,0 +1,12 @@
+{
+  "resource_id": "RPT5W1C0",
+  "resource_slug": "proactive_team_cctv_review",
+  "type": "report",
+  "name": "Proactive Team CCTV Review",
+  "url": "/report_proactive_team_cctv_review",
+  "category": "Operations",
+  "description": "Search CCTV pipe records, choose inspections, and compile proactive team review reports with defects and media.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

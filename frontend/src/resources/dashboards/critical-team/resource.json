@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASRHMBK",
+  "resource_slug": "critical_team",
+  "type": "dashboard",
+  "name": "Critical Team Dashboard",
+  "url": "/dashboard_critical_team",
+  "category": "Operations",
+  "description": "Work order status, milestone trends, and critical team inspection details.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

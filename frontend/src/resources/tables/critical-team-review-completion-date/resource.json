@@ -1,0 +1,12 @@
+{
+  "resource_id": "TABO9VIW",
+  "resource_slug": "critical_team_review_completion_date",
+  "type": "tab",
+  "name": "Review Completion Date",
+  "url": "/tab_critical_team_review_completion_date",
+  "category": "Operations",
+  "description": "Review-complete cross-tab by reviewer and closed month.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

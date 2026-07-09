@@ -1,0 +1,13 @@
+{
+  "resource_id": "DAS80S1B",
+  "resource_slug": "dashboard_links",
+  "type": "dashboard",
+  "name": "Portal Dashboard Links",
+  "url": "/dashboard_links",
+  "category": "Portal",
+  "description": "Browse dashboard and map links available in the Portal.",
+  "icon": "layout-dashboard",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": false
+}

@@ -1,0 +1,12 @@
+{
+  "resource_id": "TABT6GCF",
+  "resource_slug": "critical_team_work_order_detail",
+  "type": "tab",
+  "name": "Work Order Detail",
+  "url": "/tab_critical_team_work_order_detail",
+  "category": "Operations",
+  "description": "Operational detail rows from the Cityworks Critical Asset Inspection source.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

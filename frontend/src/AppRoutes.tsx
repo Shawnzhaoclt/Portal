@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import DashboardLinksPage from './DashboardLinksPage'
 import HomePage from './HomePage'
-import AMTeamInspectionViewer from './dashboards/amteam/AMTeamInspectionViewer'
 import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
@@ -10,11 +9,10 @@ import GISDashboard from './dashboards/gis/GISDashboard'
 import ManagementPage from './management/ManagementPage'
 import PlanningPendingAifQaTable from './dashboards/planning/PlanningPendingAifQaTable'
 import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
-import { storedManagementToken } from './management/api'
+import { clearManagementToken, fetchMe, storedManagementToken } from './management/api'
 import {
   ADMIN_MANAGEMENT_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
-  AMTEAM_INSPECTION_VIEWER_ROUTE,
   CRITICAL_TEAM_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
@@ -43,11 +41,13 @@ function getRouteTheme(): AppTheme | null {
 }
 
 export default function AppRoutes() {
-  const [theme, setTheme] = useState<AppTheme>(() => getRouteTheme() ?? getInitialTheme())
   const path = window.location.pathname
   const params = new URLSearchParams(window.location.search)
   const embedMode = params.get('embed') === '1' || params.get('embedded') === '1'
   const isLoginRoute = path === PORTAL_LOGIN_ROUTE || path === '/management_login'
+  const requiresAuth = !isLoginRoute
+  const [theme, setTheme] = useState<AppTheme>(() => getRouteTheme() ?? getInitialTheme())
+  const [authReady, setAuthReady] = useState(!requiresAuth)
 
   useEffect(() => {
     applyAppTheme(theme)
@@ -58,11 +58,47 @@ export default function AppRoutes() {
     return () => document.documentElement.classList.remove('dashboard-embed-mode')
   }, [embedMode])
 
-  if (!isLoginRoute && !storedManagementToken()) {
+  useEffect(() => {
+    let cancelled = false
+
+    if (!requiresAuth) {
+      setAuthReady(true)
+      return
+    }
+
+    const token = storedManagementToken()
+    if (!token) {
+      setAuthReady(false)
+      setPageMeta('Portal Sign In')
+      window.location.replace(PORTAL_LOGIN_ROUTE)
+      return
+    }
+
+    setAuthReady(false)
+    fetchMe(token)
+      .then(() => {
+        if (!cancelled) setAuthReady(true)
+      })
+      .catch(() => {
+        if (cancelled) return
+        clearManagementToken()
+        setAuthReady(false)
+        setPageMeta('Portal Sign In')
+        window.location.replace(PORTAL_LOGIN_ROUTE)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [path, requiresAuth])
+
+  if (requiresAuth && !storedManagementToken()) {
     setPageMeta('Portal Sign In')
     window.location.replace(PORTAL_LOGIN_ROUTE)
     return null
   }
+
+  if (requiresAuth && !authReady) return null
 
   if (path === '/') {
     setPageMeta('Storm Water Asset Intelligence Portal')
@@ -78,11 +114,6 @@ export default function AppRoutes() {
   if (path === PROACTIVE_TEAM_CCTV_REVIEW_ROUTE) {
     setPageMeta('Proactive Team CCTV Review')
     return <ProactiveTeamCCTVReview />
-  }
-
-  if (path === AMTEAM_INSPECTION_VIEWER_ROUTE) {
-    setPageMeta('Proactive Team CCTV Review Report')
-    return <AMTeamInspectionViewer />
   }
 
   if (path === PLANNING_PENDING_AIF_QA_ROUTE) {

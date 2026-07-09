@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASSXUK2",
+  "resource_slug": "critical_team_report_completion_date_chart",
+  "type": "dashboard",
+  "name": "Report Completion Date Chart",
+  "url": "/dashboard_critical_team_report_completion_date_chart",
+  "category": "Operations",
+  "description": "Report completion date counts grouped by submitter.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

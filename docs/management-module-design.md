@@ -183,13 +183,14 @@ If no matching permission is found, deny access.
 Core tables:
 
 ```text
-users
-teams
-resources
-resource_permissions
-user_featured_resources
-password_reset_tokens
-audit_logs
+SYS_USERS
+SYS_TEAMS
+SYS_RESOURCES
+SYS_RESOURCE_PERMISSIONS
+SYS_USER_FEATURED_RESOURCES
+SYS_TEAM_FEATURED_RESOURCES
+SYS_PASSWORD_RESET_TOKENS
+SYS_AUDIT_LOGS
 ```
 
 Optional later tables:
@@ -272,10 +273,10 @@ Permission levels should use numeric values so the backend can easily select the
 40 = admin
 ```
 
-### teams
+### SYS_TEAMS
 
 ```sql
-CREATE TABLE teams (
+CREATE TABLE SYS_TEAMS (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
   description TEXT,
@@ -284,8 +285,8 @@ CREATE TABLE teams (
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (parent_team_id) REFERENCES teams(id) ON DELETE SET NULL,
-  FOREIGN KEY (manager_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (parent_team_id) REFERENCES SYS_TEAMS(id) ON DELETE SET NULL,
+  FOREIGN KEY (manager_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL,
   CHECK (parent_team_id IS NULL OR parent_team_id <> id)
 );
 ```
@@ -298,10 +299,10 @@ Notes:
 - The backend should prevent descendant cycles when changing `parent_team_id`.
 - The backend should normally require the manager to be an active user assigned to the same team.
 
-### users
+### SYS_USERS
 
 ```sql
-CREATE TABLE users (
+CREATE TABLE SYS_USERS (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
   first_name TEXT NOT NULL,
@@ -322,8 +323,8 @@ CREATE TABLE users (
   deleted_by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE SET NULL,
-  FOREIGN KEY (deleted_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (team_id) REFERENCES SYS_TEAMS(id) ON DELETE SET NULL,
+  FOREIGN KEY (deleted_by_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL,
   CHECK (is_system_admin = 0 OR is_active = 1),
   CHECK (is_system_admin = 0 OR deleted_at IS NULL)
 );
@@ -345,8 +346,8 @@ Notes:
 ### protected system admin trigger
 
 ```sql
-CREATE TRIGGER prevent_system_admin_delete
-BEFORE DELETE ON users
+CREATE TRIGGER prevent_sys_system_admin_delete
+BEFORE DELETE ON SYS_USERS
 WHEN OLD.is_system_admin = 1
 BEGIN
   SELECT RAISE(ABORT, 'system admin users cannot be deleted');
@@ -355,18 +356,22 @@ END;
 
 This trigger protects system admin users if a future maintenance script or admin API attempts a hard delete. Normal application delete actions should still use soft delete by setting `deleted_at`.
 
-### resources
+### SYS_RESOURCES
 
 ```sql
-CREATE TABLE resources (
+CREATE TABLE SYS_RESOURCES (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  resource_id TEXT NOT NULL UNIQUE CHECK (
+    resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'
+  ),
   resource_key TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   resource_type TEXT NOT NULL CHECK (
-    resource_type IN ('dashboard', 'map', 'tab', 'doc', 'admin', 'api')
+    resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api')
   ),
   url TEXT NOT NULL UNIQUE,
   description TEXT,
+  category TEXT,
   icon TEXT,
   is_public INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)),
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
@@ -377,27 +382,42 @@ CREATE TABLE resources (
 
 Notes:
 
+- `resource_id` is the official 8-character resource ID shown to admins and used for resource search. It is declared by the resource itself.
 - `resource_key` should be a stable identifier, such as `map_stm_risk`.
 - `url` is the route path, such as `/map_stm_risk`.
 - Public resources do not need explicit user or team permissions for view access.
 - Disabled resources should not appear in the portal catalog or featured items.
 
-### resource_permissions
+Resource ID format:
+
+- `DAS` plus five random uppercase letters or digits: dashboard resources, such as `DASRHMBK`.
+- `MAP` plus five random uppercase letters or digits: map resources, such as `MAP0B5FJ`.
+- `TAB` plus five random uppercase letters or digits: table resources, such as `TABT946I`.
+- `DOC` plus five random uppercase letters or digits: document resources.
+- `RPT` plus five random uppercase letters or digits: report resources, such as `RPT5W1C0`.
+- `DST` plus five random uppercase letters or digits: dataset resources.
+- `SEV` plus five random uppercase letters or digits: service resources.
+- `API` plus five random uppercase letters or digits: API resources.
+- `ADM` plus five random uppercase letters or digits: admin resources, such as `ADMBSHVR`.
+
+Each resource owns a separate `resource.json` metadata file under its resource subdirectory. Resource registration validates the declared ID. A resource cannot be registered when the ID is missing, uses the wrong prefix for its type, is not eight characters, or is already used by another resource. The slug-style `resource_key` remains separate so existing route, permission, featured-item, and discovery references stay stable.
+
+### SYS_RESOURCE_PERMISSIONS
 
 ```sql
-CREATE TABLE resource_permissions (
+CREATE TABLE SYS_RESOURCE_PERMISSIONS (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  resource_id INTEGER NOT NULL,
+  resource_id TEXT NOT NULL,
   user_id INTEGER,
   team_id INTEGER,
   permission_level INTEGER NOT NULL CHECK (permission_level IN (10, 20, 30, 40)),
   created_by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY (team_id) REFERENCES teams(id) ON DELETE CASCADE,
-  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL,
+  FOREIGN KEY (resource_id) REFERENCES SYS_RESOURCES(resource_id) ON DELETE CASCADE ON UPDATE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES SYS_USERS(id) ON DELETE CASCADE,
+  FOREIGN KEY (team_id) REFERENCES SYS_TEAMS(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL,
   CHECK (
     (user_id IS NOT NULL AND team_id IS NULL)
     OR
@@ -411,24 +431,28 @@ CREATE TABLE resource_permissions (
 Notes:
 
 - A permission row belongs to either one user or one team.
+- `resource_id` stores the public 8-character resource ID from `SYS_RESOURCES.resource_id`, not the internal primary key.
 - A permission row should not belong to both a user and a team.
 - A permission row should not have both `user_id` and `team_id` empty.
 - Team permissions are inherited through the team hierarchy.
 - Direct user permissions can be used for exceptions.
 
-### user_featured_resources
+### SYS_USER_FEATURED_RESOURCES
 
 ```sql
-CREATE TABLE user_featured_resources (
+CREATE TABLE SYS_USER_FEATURED_RESOURCES (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
-  resource_id INTEGER NOT NULL,
+  category TEXT NOT NULL DEFAULT 'all' CHECK (
+    category IN ('all', 'dashboard', 'map', 'tab', 'doc', 'report', 'dataset')
+  ),
+  resource_record_id INTEGER NOT NULL,
   sort_order INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY (resource_id) REFERENCES resources(id) ON DELETE CASCADE,
-  UNIQUE (user_id, resource_id)
+  FOREIGN KEY (user_id) REFERENCES SYS_USERS(id) ON DELETE CASCADE,
+  FOREIGN KEY (resource_record_id) REFERENCES SYS_RESOURCES(id) ON DELETE CASCADE,
+  UNIQUE (user_id, category, resource_record_id)
 );
 ```
 
@@ -438,11 +462,37 @@ Notes:
 - Users may only pin resources they can access.
 - If a user loses access to a resource, the backend should hide it from the featured list.
 - `sort_order` controls the display order on the Portal home page.
+- `category` allows one featured order per Portal category.
 
-### password_reset_tokens
+### SYS_TEAM_FEATURED_RESOURCES
 
 ```sql
-CREATE TABLE password_reset_tokens (
+CREATE TABLE SYS_TEAM_FEATURED_RESOURCES (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_id INTEGER NOT NULL,
+  category TEXT NOT NULL DEFAULT 'all' CHECK (
+    category IN ('all', 'dashboard', 'map', 'tab', 'doc', 'report', 'dataset')
+  ),
+  resource_record_id INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (team_id) REFERENCES SYS_TEAMS(id) ON DELETE CASCADE,
+  FOREIGN KEY (resource_record_id) REFERENCES SYS_RESOURCES(id) ON DELETE CASCADE,
+  UNIQUE (team_id, category, resource_record_id)
+);
+```
+
+Notes:
+
+- This table stores team default featured resources.
+- User featured resources override team defaults; if a user has no personal configuration, load the team default.
+- `category` allows admins to configure defaults per Portal category.
+
+### SYS_PASSWORD_RESET_TOKENS
+
+```sql
+CREATE TABLE SYS_PASSWORD_RESET_TOKENS (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
   token_hash TEXT NOT NULL UNIQUE,
@@ -450,8 +500,8 @@ CREATE TABLE password_reset_tokens (
   used_at TEXT,
   created_by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  FOREIGN KEY (created_by_user_id) REFERENCES users(id) ON DELETE SET NULL
+  FOREIGN KEY (user_id) REFERENCES SYS_USERS(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL
 );
 ```
 
@@ -462,10 +512,10 @@ Notes:
 - Admin password reset should set `must_change_password = 1`.
 - If the reset behavior is to restore the initial password, hash the employee ID again and require change on next login.
 
-### audit_logs
+### SYS_AUDIT_LOGS
 
 ```sql
-CREATE TABLE audit_logs (
+CREATE TABLE SYS_AUDIT_LOGS (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_user_id INTEGER,
   action TEXT NOT NULL,
@@ -475,7 +525,7 @@ CREATE TABLE audit_logs (
   ip_address TEXT,
   user_agent TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
+  FOREIGN KEY (actor_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL
 );
 ```
 
@@ -487,31 +537,38 @@ Notes:
 ### Recommended Indexes
 
 ```sql
-CREATE INDEX idx_users_team_id ON users(team_id);
-CREATE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_employee_id ON users(employee_id);
-CREATE INDEX idx_users_admin_active ON users(is_admin, is_active);
-CREATE INDEX idx_users_deleted_at ON users(deleted_at);
+CREATE INDEX idx_sys_users_team_id ON SYS_USERS(team_id);
+CREATE INDEX idx_sys_users_email ON SYS_USERS(email);
+CREATE INDEX idx_sys_users_employee_id ON SYS_USERS(employee_id);
+CREATE INDEX idx_sys_users_admin_active ON SYS_USERS(is_admin, is_active);
+CREATE INDEX idx_sys_users_deleted_at ON SYS_USERS(deleted_at);
 
-CREATE INDEX idx_teams_parent_team_id ON teams(parent_team_id);
-CREATE INDEX idx_teams_manager_user_id ON teams(manager_user_id);
+CREATE INDEX idx_sys_teams_parent_team_id ON SYS_TEAMS(parent_team_id);
+CREATE INDEX idx_sys_teams_manager_user_id ON SYS_TEAMS(manager_user_id);
 
-CREATE INDEX idx_resources_type_active ON resources(resource_type, is_active);
-CREATE INDEX idx_resources_public_active ON resources(is_public, is_active);
+CREATE INDEX idx_sys_resources_type_active ON SYS_RESOURCES(resource_type, is_active);
+CREATE INDEX idx_sys_resources_public_active ON SYS_RESOURCES(is_public, is_active);
 
-CREATE INDEX idx_resource_permissions_resource_id ON resource_permissions(resource_id);
-CREATE INDEX idx_resource_permissions_user_id ON resource_permissions(user_id);
-CREATE INDEX idx_resource_permissions_team_id ON resource_permissions(team_id);
+CREATE INDEX idx_sys_resource_permissions_resource_id ON SYS_RESOURCE_PERMISSIONS(resource_id);
+CREATE INDEX idx_sys_resource_permissions_user_id ON SYS_RESOURCE_PERMISSIONS(user_id);
+CREATE INDEX idx_sys_resource_permissions_team_id ON SYS_RESOURCE_PERMISSIONS(team_id);
 
-CREATE INDEX idx_user_featured_resources_user_order
-  ON user_featured_resources(user_id, sort_order);
+CREATE INDEX idx_sys_user_featured_resources_user_order
+  ON SYS_USER_FEATURED_RESOURCES(user_id, category, sort_order);
+CREATE INDEX idx_sys_user_featured_resources_resource_record_id
+  ON SYS_USER_FEATURED_RESOURCES(resource_record_id);
 
-CREATE INDEX idx_password_reset_tokens_user_id ON password_reset_tokens(user_id);
-CREATE INDEX idx_password_reset_tokens_expires_at ON password_reset_tokens(expires_at);
+CREATE INDEX idx_sys_team_featured_resources_team_order
+  ON SYS_TEAM_FEATURED_RESOURCES(team_id, category, sort_order);
+CREATE INDEX idx_sys_team_featured_resources_resource_record_id
+  ON SYS_TEAM_FEATURED_RESOURCES(resource_record_id);
 
-CREATE INDEX idx_audit_logs_actor_user_id ON audit_logs(actor_user_id);
-CREATE INDEX idx_audit_logs_target ON audit_logs(target_type, target_id);
-CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at);
+CREATE INDEX idx_sys_password_reset_tokens_user_id ON SYS_PASSWORD_RESET_TOKENS(user_id);
+CREATE INDEX idx_sys_password_reset_tokens_expires_at ON SYS_PASSWORD_RESET_TOKENS(expires_at);
+
+CREATE INDEX idx_sys_audit_logs_actor_user_id ON SYS_AUDIT_LOGS(actor_user_id);
+CREATE INDEX idx_sys_audit_logs_target ON SYS_AUDIT_LOGS(target_type, target_id);
+CREATE INDEX idx_sys_audit_logs_created_at ON SYS_AUDIT_LOGS(created_at);
 ```
 
 ### Backend Validation Rules

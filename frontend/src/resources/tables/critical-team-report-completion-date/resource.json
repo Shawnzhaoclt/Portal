@@ -1,0 +1,12 @@
+{
+  "resource_id": "TAB3SJ2X",
+  "resource_slug": "critical_team_report_completion_date",
+  "type": "tab",
+  "name": "Report Completion Date",
+  "url": "/tab_critical_team_report_completion_date",
+  "category": "Operations",
+  "description": "Report completion date cross-tab by submitter.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

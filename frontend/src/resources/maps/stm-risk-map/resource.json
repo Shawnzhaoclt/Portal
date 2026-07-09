@@ -1,0 +1,12 @@
+{
+  "resource_id": "MAP0B5FJ",
+  "resource_slug": "stm_risk_map",
+  "type": "map",
+  "name": "Storm Water Asset Risk Map",
+  "url": "/map_stm_risk",
+  "category": "Maps",
+  "description": "MapLibre PMTiles viewer for planning-team risk layers, asset search, inventory metrics, and risk summaries.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

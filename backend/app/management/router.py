@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from backend.app.management.database import get_db
 from backend.app.management.models import AuditLog, Resource, ResourcePermission, Team, TeamFeaturedResource, User, UserFeaturedResource
+from backend.app.management.resource_ids import normalize_resource_id, resource_id_validation_error
 from backend.app.management.schemas import (
     AdminStatusRequest,
     BulkPermissionsRequest,
@@ -34,6 +35,7 @@ from backend.app.management.services import (
     discover_resource_candidates,
     effective_resource_permission,
     find_login_user,
+    get_resource_by_public_id_or_404,
     get_resource_or_404,
     get_team_or_404,
     get_user_or_404,
@@ -73,6 +75,26 @@ def _commit(db: Session) -> None:
     except IntegrityError as error:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(error.orig)) from error
+
+
+def _resource_string_id_or_400(
+    db: Session,
+    resource_string_id: str | None,
+    resource_type: str,
+    exclude_resource_id: int | None = None,
+) -> str:
+    resource_string_id = normalize_resource_id(resource_string_id)
+    error = resource_id_validation_error(resource_string_id, resource_type)
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
+    stmt = select(Resource).where(Resource.resource_id == resource_string_id)
+    if exclude_resource_id is not None:
+        stmt = stmt.where(Resource.id != exclude_resource_id)
+    conflict = db.scalar(stmt)
+    if conflict is not None:
+        raise HTTPException(status_code=400, detail=f"Resource ID {resource_string_id} is already registered to {conflict.resource_key}.")
+    return resource_string_id
 
 
 def _username_from_email(email: str, employee_id: str) -> str:
@@ -324,7 +346,7 @@ def update_my_featured_resources(
                 UserFeaturedResource(
                     user_id=current_user.id,
                     category=category,
-                    resource_id=resources_by_id[resource_id].id,
+                    resource_record_id=resources_by_id[resource_id].id,
                     sort_order=index,
                 )
             )
@@ -584,7 +606,7 @@ def update_team_featured_resources(
                 TeamFeaturedResource(
                     team_id=team.id,
                     category=category,
-                    resource_id=resources_by_id[resource_id].id,
+                    resource_record_id=resources_by_id[resource_id].id,
                     sort_order=index,
                 )
             )
@@ -632,6 +654,7 @@ def create_resource(
     db: Session = Depends(get_db),
 ) -> dict:
     resource = Resource(
+        resource_id=_resource_string_id_or_400(db, payload.resource_id, payload.resource_type),
         resource_key=payload.resource_key.strip(),
         name=payload.name.strip(),
         resource_type=payload.resource_type,
@@ -674,10 +697,12 @@ def apply_resource_discovery(
 
         existing = db.get(Resource, candidate["existing_resource_id"]) if candidate.get("existing_resource_id") else None
         if action == "add":
-            if existing is not None or candidate["status"] in {"conflict", "stale", "inactive_stale"}:
+            if existing is not None or candidate["status"] in {"conflict", "invalid", "stale", "inactive_stale"}:
                 skipped.append({"resource_key": requested_action.resource_key, "action": action, "reason": "Resource cannot be added from this status."})
                 continue
+            resource_string_id = _resource_string_id_or_400(db, candidate.get("resource_id"), candidate["resource_type"])
             resource = Resource(
+                resource_id=resource_string_id,
                 resource_key=candidate["resource_key"],
                 name=candidate["name"],
                 resource_type=candidate["resource_type"],
@@ -701,11 +726,12 @@ def apply_resource_discovery(
             applied.append({"resource_key": existing.resource_key, "action": action})
             continue
 
-        if candidate["status"] in {"conflict", "stale", "inactive_stale"}:
+        if candidate["status"] in {"conflict", "invalid", "stale", "inactive_stale"}:
             skipped.append({"resource_key": requested_action.resource_key, "action": action, "reason": "Resource cannot be updated from this status."})
             continue
 
-        for field in ("resource_key", "name", "resource_type", "url", "description", "category", "icon"):
+        candidate["resource_id"] = _resource_string_id_or_400(db, candidate.get("resource_id"), candidate["resource_type"], existing.id)
+        for field in ("resource_id", "resource_key", "name", "resource_type", "url", "description", "category", "icon"):
             setattr(existing, field, candidate.get(field))
         existing.is_active = 1
         applied.append({"resource_key": candidate["resource_key"], "action": action})
@@ -735,6 +761,9 @@ def update_resource(
 ) -> dict:
     resource = get_resource_or_404(db, resource_id)
     updates = _request_data(payload)
+    if "resource_id" in updates or "resource_type" in updates:
+        resource_type = updates.get("resource_type", resource.resource_type)
+        updates["resource_id"] = _resource_string_id_or_400(db, updates.get("resource_id", resource.resource_id), resource_type, resource.id)
     for field, value in updates.items():
         if field in {"is_public", "is_active"} and value is not None:
             value = bool_int(value)
@@ -784,7 +813,7 @@ def _effective_team_permission(db: Session, team: Team, resource: Resource) -> d
     if ancestor_ids:
         direct_level = db.scalar(
             select(func.max(ResourcePermission.permission_level)).where(
-                ResourcePermission.resource_id == resource.id,
+                ResourcePermission.resource_id == resource.resource_id,
                 ResourcePermission.team_id == team.id,
             )
         )
@@ -796,7 +825,7 @@ def _effective_team_permission(db: Session, team: Team, resource: Resource) -> d
         if parent_ids:
             parent_level = db.scalar(
                 select(func.max(ResourcePermission.permission_level)).where(
-                    ResourcePermission.resource_id == resource.id,
+                    ResourcePermission.resource_id == resource.resource_id,
                     ResourcePermission.team_id.in_(parent_ids),
                 )
             )
@@ -833,7 +862,8 @@ def permission_matrix(
     if search.strip():
         term = f"%{search.strip()}%"
         stmt = stmt.where(
-            (Resource.name.ilike(term))
+            (Resource.resource_id.ilike(term))
+            | (Resource.name.ilike(term))
             | (Resource.url.ilike(term))
             | (Resource.resource_key.ilike(term))
             | (Resource.category.ilike(term))
@@ -841,7 +871,7 @@ def permission_matrix(
         )
 
     resources = db.scalars(stmt.order_by(Resource.resource_type, Resource.category, Resource.name)).all()
-    resource_ids = [resource.id for resource in resources]
+    resource_ids = [resource.resource_id for resource in resources]
     direct_permissions = {}
     if resource_ids:
         direct_permissions = {
@@ -856,7 +886,7 @@ def permission_matrix(
 
     rows = []
     for resource in resources:
-        direct = direct_permissions.get(resource.id)
+        direct = direct_permissions.get(resource.resource_id)
         if subject_type == "user":
             effective = effective_resource_permission(db, subject, resource)  # type: ignore[arg-type]
         else:
@@ -893,7 +923,7 @@ def update_permission_matrix(
     for assignment in payload.assignments:
         if assignment.permission_level is not None and assignment.permission_level not in {10, 20, 30, 40}:
             raise HTTPException(status_code=400, detail="Invalid permission level.")
-        get_resource_or_404(db, assignment.resource_id)
+        get_resource_by_public_id_or_404(db, assignment.resource_id)
 
     existing_permissions = {}
     if resource_ids:
@@ -965,7 +995,7 @@ def get_resource_permissions(
 ) -> dict:
     resource = get_resource_or_404(db, resource_id)
     permissions = db.scalars(
-        select(ResourcePermission).where(ResourcePermission.resource_id == resource.id).order_by(ResourcePermission.team_id, ResourcePermission.user_id)
+        select(ResourcePermission).where(ResourcePermission.resource_id == resource.resource_id).order_by(ResourcePermission.team_id, ResourcePermission.user_id)
     ).all()
     return {"resource": serialize_resource(resource), "permissions": [serialize_permission(db, item) for item in permissions]}
 
@@ -1006,7 +1036,7 @@ def replace_resource_permissions(
         seen.add(key)  # type: ignore[arg-type]
 
     existing_permissions = db.scalars(
-        select(ResourcePermission).where(ResourcePermission.resource_id == resource.id)
+        select(ResourcePermission).where(ResourcePermission.resource_id == resource.resource_id)
     ).all()
     existing_keys = {_permission_subject_key(permission) for permission in existing_permissions}
     incoming_keys = {_permission_subject_key(assignment) for assignment in payload.permissions}
@@ -1014,11 +1044,11 @@ def replace_resource_permissions(
     if removed_keys:
         require_system_admin(current_user)
 
-    db.execute(delete(ResourcePermission).where(ResourcePermission.resource_id == resource.id))
+    db.execute(delete(ResourcePermission).where(ResourcePermission.resource_id == resource.resource_id))
     for assignment in payload.permissions:
         db.add(
             ResourcePermission(
-                resource_id=resource.id,
+                resource_id=resource.resource_id,
                 user_id=assignment.user_id,
                 team_id=assignment.team_id,
                 permission_level=assignment.permission_level,
@@ -1047,7 +1077,7 @@ def delete_resource_permission(
     require_system_admin(current_user)
     resource = get_resource_or_404(db, resource_id)
     permission = db.get(ResourcePermission, permission_id)
-    if permission is None or permission.resource_id != resource.id:
+    if permission is None or permission.resource_id != resource.resource_id:
         raise HTTPException(status_code=404, detail="Permission was not found.")
     details = serialize_permission(db, permission)
     write_audit_log(db, current_user, "delete_resource_permission", "resource_permission", permission.id, details)

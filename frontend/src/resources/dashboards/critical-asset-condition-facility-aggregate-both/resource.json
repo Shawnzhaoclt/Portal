@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASWH4DO",
+  "resource_slug": "critical_asset_condition_facility_aggregate_both",
+  "type": "dashboard",
+  "name": "Condition Risk Facility Aggregate - Both",
+  "url": "/dashboard_critical_asset_condition_facility_aggregate_both",
+  "category": "Risk",
+  "description": "Condition risk summarized by facility across pipes and structures.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

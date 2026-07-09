@@ -1,0 +1,12 @@
+{
+  "resource_id": "DAS9O16A",
+  "resource_slug": "critical_team_inspection_completion_date_chart",
+  "type": "dashboard",
+  "name": "Inspection Completion Date Chart",
+  "url": "/dashboard_critical_team_inspection_completion_date_chart",
+  "category": "Operations",
+  "description": "Inspection completion date counts grouped by submitter.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

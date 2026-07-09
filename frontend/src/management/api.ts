@@ -40,6 +40,8 @@ export type PortalTeam = {
 
 export type PortalResource = {
   id: number
+  resource_id: string
+  resource_slug: string
   resource_key: string
   name: string
   resource_type: 'dashboard' | 'map' | 'tab' | 'doc' | 'report' | 'dataset' | 'service' | 'admin' | 'api'
@@ -80,7 +82,8 @@ export type PortalTeamFeaturedResourcesResponse = {
 
 export type ResourcePermission = {
   id: number
-  resource_id: number
+  resource_id: string
+  resource_name: string | null
   user_id: number | null
   user_name: string | null
   team_id: number | null
@@ -111,13 +114,15 @@ export type BulkPermissionMatrixResponse = {
 }
 
 export type BulkPermissionAssignment = {
-  resource_id: number
+  resource_id: string
   permission_level: number | null
 }
 
-export type ResourceDiscoveryStatus = 'new' | 'changed' | 'unchanged' | 'conflict' | 'stale' | 'inactive_stale'
+export type ResourceDiscoveryStatus = 'new' | 'changed' | 'unchanged' | 'conflict' | 'invalid' | 'stale' | 'inactive_stale'
 
 export type ResourceDiscoveryItem = {
+  resource_id: string | null
+  resource_slug: string
   resource_key: string
   existing_resource_key?: string
   existing_resource_id: number | null
@@ -242,9 +247,16 @@ async function requestJson<T>(path: string, options: RequestInit = {}, token = s
 
   const response = await fetch(path, { ...options, headers })
   const text = await response.text()
-  const payload = text ? JSON.parse(text) : {}
+  let payload: unknown = {}
+  if (text) {
+    try {
+      payload = JSON.parse(text)
+    } catch {
+      payload = text
+    }
+  }
   if (!response.ok) {
-    const detail = payload?.detail
+    const detail = payload && typeof payload === 'object' && 'detail' in payload ? payload.detail : payload
     const message = typeof detail === 'string' ? detail : JSON.stringify(detail ?? payload)
     throw new Error(message || `HTTP ${response.status}`)
   }
@@ -393,6 +405,7 @@ export function applyResourceDiscovery(actions: ResourceDiscoveryAction[]) {
 }
 
 export function createResource(payload: {
+  resource_id: string
   resource_key: string
   name: string
   resource_type: PortalResource['resource_type']

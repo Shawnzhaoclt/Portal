@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASVIE6O",
+  "resource_slug": "critical_team_inspection_completion_date_reviews",
+  "type": "dashboard",
+  "name": "Inspection Completion Date Reviews",
+  "url": "/dashboard_critical_team_inspection_completion_date_reviews",
+  "category": "Operations",
+  "description": "Ready-for-review and review-complete work orders by closed date and reviewer.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

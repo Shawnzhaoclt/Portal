@@ -1,0 +1,12 @@
+{
+  "resource_id": "TABLGP7J",
+  "resource_slug": "critical_asset_history_both",
+  "type": "tab",
+  "name": "History - Both",
+  "url": "/tab_critical_asset_history_both",
+  "category": "Risk",
+  "description": "Paged, sortable inspection history across pipes and structures.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

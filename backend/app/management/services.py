@@ -8,9 +8,10 @@ from fastapi import HTTPException
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from backend.app.dashboards.catalog import DASHBOARDS
 from backend.app.management.models import AuditLog, Resource, ResourcePermission, Team, User
+from backend.app.management.resource_ids import normalize_resource_id, resource_id_validation_error
 from backend.app.management.security import utc_now_text
+from backend.app.resources.metadata import load_resource_metadata
 
 PERMISSION_LABELS = {
     10: "view",
@@ -124,6 +125,16 @@ def get_resource_or_404(db: Session, resource_id: int) -> Resource:
     return resource
 
 
+def get_resource_by_public_id_or_404(db: Session, resource_id: str) -> Resource:
+    normalized = normalize_resource_id(resource_id)
+    if not normalized:
+        raise HTTPException(status_code=404, detail="Resource was not found.")
+    resource = db.scalar(select(Resource).where(Resource.resource_id == normalized))
+    if resource is None:
+        raise HTTPException(status_code=404, detail="Resource was not found.")
+    return resource
+
+
 def team_ancestor_ids(db: Session, team_id: int | None) -> list[int]:
     if team_id is None:
         return []
@@ -211,7 +222,7 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
             continue
         team_permission = db.scalar(
             select(func.max(ResourcePermission.permission_level)).where(
-                ResourcePermission.resource_id == resource.id,
+                ResourcePermission.resource_id == resource.resource_id,
                 ResourcePermission.team_id.in_(team_ids),
             )
         )
@@ -221,7 +232,7 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
 
     direct_permission = db.scalar(
         select(func.max(ResourcePermission.permission_level)).where(
-            ResourcePermission.resource_id == resource.id,
+            ResourcePermission.resource_id == resource.resource_id,
             ResourcePermission.user_id == user.id,
         )
     )
@@ -283,6 +294,8 @@ def serialize_user(db: Session, user: User) -> dict[str, Any]:
 def serialize_resource(resource: Resource, effective: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "id": resource.id,
+        "resource_id": resource.resource_id,
+        "resource_slug": resource.resource_key,
         "resource_key": resource.resource_key,
         "name": resource.name,
         "resource_type": resource.resource_type,
@@ -310,6 +323,7 @@ def _api_resource_name(path: str) -> str:
 
 def _discovered_resource(
     *,
+    resource_id: str | None,
     resource_key: str,
     name: str,
     resource_type: str,
@@ -320,6 +334,8 @@ def _discovered_resource(
     icon: str | None = None,
 ) -> dict[str, Any]:
     return {
+        "resource_id": normalize_resource_id(resource_id) or None,
+        "resource_slug": resource_key,
         "resource_key": resource_key,
         "name": name,
         "resource_type": resource_type,
@@ -334,39 +350,19 @@ def _discovered_resource(
 
 
 def _frontend_resource_candidates() -> list[dict[str, Any]]:
-    items = [
-        _discovered_resource(
-            resource_key="dashboard_links",
-            name="Portal Dashboard Links",
-            resource_type="dashboard",
-            url="/dashboard_links",
-            description="Browse dashboard and map links available in the Portal.",
-            category="Portal",
-            source="frontend_route",
-            icon="layout-dashboard",
-        ),
-        _discovered_resource(
-            resource_key="admin_management",
-            name="Portal Management",
-            resource_type="admin",
-            url="/admin_management",
-            description="Manage Portal users, teams, resources, permissions, and personal featured items.",
-            category="Administration",
-            source="frontend_route",
-            icon="settings",
-        ),
-    ]
-
-    for item in DASHBOARDS:
+    items = []
+    for item in load_resource_metadata():
         items.append(
             _discovered_resource(
-                resource_key=item["id"],
-                name=item["title"],
-                resource_type=item.get("kind", "dashboard"),
-                url=item["path"],
+                resource_id=item.get("resource_id"),
+                resource_key=item["resource_slug"],
+                name=item["name"],
+                resource_type=item["type"],
+                url=item["url"],
                 description=item.get("description"),
                 category=item.get("category"),
-                source="dashboard_catalog",
+                source=item.get("_metadata_path") or "resource_metadata",
+                icon=item.get("icon"),
             )
         )
     return items
@@ -426,6 +422,7 @@ def _api_resource_candidates(app_routes: list[Any], openapi_paths: dict[str, Any
         name = metadata.get("summary") or _api_resource_name(path)
         items.append(
             _discovered_resource(
+                resource_id=None,
                 resource_key=f"api_{_resource_key_slug(path)}",
                 name=name,
                 resource_type="api",
@@ -441,7 +438,7 @@ def _api_resource_candidates(app_routes: list[Any], openapi_paths: dict[str, Any
 
 def _resource_changes(resource: Resource, candidate: dict[str, Any]) -> dict[str, dict[str, Any]]:
     changes: dict[str, dict[str, Any]] = {}
-    for field in ("resource_key", "name", "resource_type", "url", "description", "category", "icon"):
+    for field in ("resource_id", "resource_key", "name", "resource_type", "url", "description", "category", "icon"):
         current_value = getattr(resource, field)
         candidate_value = candidate.get(field)
         if (current_value or None) != (candidate_value or None):
@@ -452,21 +449,55 @@ def _resource_changes(resource: Resource, candidate: dict[str, Any]) -> dict[str
 
 
 def discover_resource_candidates(db: Session, app_routes: list[Any], openapi_paths: dict[str, Any] | None = None) -> dict[str, Any]:
+    detected_candidates = [*_frontend_resource_candidates(), *_api_resource_candidates(app_routes, openapi_paths)]
+    id_counts: dict[str, int] = {}
+    for candidate in detected_candidates:
+        candidate["resource_id"] = normalize_resource_id(candidate.get("resource_id")) or None
+        if candidate["resource_id"]:
+            id_counts[candidate["resource_id"]] = id_counts.get(candidate["resource_id"], 0) + 1
+    duplicate_detected_ids = {resource_id for resource_id, count in id_counts.items() if count > 1}
+
     detected: dict[str, dict[str, Any]] = {}
-    for candidate in [*_frontend_resource_candidates(), *_api_resource_candidates(app_routes, openapi_paths)]:
+    for candidate in detected_candidates:
         detected[candidate["resource_key"]] = candidate
 
     resources = db.scalars(select(Resource).order_by(Resource.resource_type, Resource.name)).all()
+    existing_by_string_id = {resource.resource_id: resource for resource in resources}
     existing_by_key = {resource.resource_key: resource for resource in resources}
     existing_by_url = {resource.url: resource for resource in resources}
 
     items: list[dict[str, Any]] = []
     matched_existing_ids: set[int] = set()
     for candidate in sorted(detected.values(), key=lambda item: (item["resource_type"], item["name"], item["url"])):
-        existing = existing_by_key.get(candidate["resource_key"])
+        id_problem = resource_id_validation_error(candidate.get("resource_id"), candidate["resource_type"])
+        if candidate.get("resource_id") in duplicate_detected_ids:
+            id_problem = f"Resource ID {candidate['resource_id']} is declared by multiple resources."
+
+        id_match = existing_by_string_id.get(candidate["resource_id"]) if not id_problem else None
+        key_match = existing_by_key.get(candidate["resource_key"])
         url_match = existing_by_url.get(candidate["url"])
-        if existing is None and url_match is not None:
-            existing = url_match
+        matches = [match for match in (id_match, key_match, url_match) if match is not None]
+        existing = matches[0] if matches else None
+
+        if id_problem:
+            changes = {"resource_id": {"current": getattr(existing, "resource_id", None), "detected": candidate.get("resource_id"), "reason": id_problem}}
+            items.append({**candidate, "status": "invalid", "existing_resource_id": getattr(existing, "id", None), "existing_resource_key": getattr(existing, "resource_key", None), "changes": changes})
+            if existing is not None:
+                matched_existing_ids.add(existing.id)
+            continue
+
+        distinct_match_ids = {match.id for match in matches}
+        if len(distinct_match_ids) > 1:
+            changes = {
+                "resource_id": {"current": getattr(id_match, "resource_id", None), "detected": candidate.get("resource_id")},
+                "resource_key": {"current": getattr(key_match, "resource_key", None), "detected": candidate["resource_key"]},
+                "url": {"current": getattr(url_match, "url", None), "detected": candidate["url"]},
+            }
+            items.append({**candidate, "status": "conflict", "existing_resource_id": getattr(existing, "id", None), "existing_resource_key": getattr(existing, "resource_key", None), "changes": changes})
+            if existing is not None:
+                matched_existing_ids.add(existing.id)
+            continue
+
         if existing is None:
             items.append({**candidate, "status": "new", "existing_resource_id": None, "changes": {}})
             continue
@@ -474,9 +505,6 @@ def discover_resource_candidates(db: Session, app_routes: list[Any], openapi_pat
         matched_existing_ids.add(existing.id)
         changes = _resource_changes(existing, candidate)
         status = "changed" if changes else "unchanged"
-        if existing.resource_key != candidate["resource_key"]:
-            status = "conflict"
-            changes["resource_key"] = {"current": existing.resource_key, "detected": candidate["resource_key"]}
         items.append(
             {
                 **candidate,
@@ -510,11 +538,13 @@ def discover_resource_candidates(db: Session, app_routes: list[Any], openapi_pat
 
 
 def serialize_permission(db: Session, permission: ResourcePermission) -> dict[str, Any]:
+    resource = db.scalar(select(Resource).where(Resource.resource_id == permission.resource_id))
     user = db.get(User, permission.user_id) if permission.user_id else None
     team = db.get(Team, permission.team_id) if permission.team_id else None
     return {
         "id": permission.id,
         "resource_id": permission.resource_id,
+        "resource_name": resource.name if resource else None,
         "user_id": permission.user_id,
         "user_name": display_name(user),
         "team_id": permission.team_id,

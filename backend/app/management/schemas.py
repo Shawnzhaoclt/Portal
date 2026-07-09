@@ -65,6 +65,7 @@ class TeamUpdateRequest(BaseModel):
 
 
 class ResourceCreateRequest(BaseModel):
+    resource_id: str
     resource_key: str
     name: str
     resource_type: str
@@ -77,6 +78,7 @@ class ResourceCreateRequest(BaseModel):
 
 
 class ResourceUpdateRequest(BaseModel):
+    resource_id: str | None = None
     resource_key: str | None = None
     name: str | None = None
     resource_type: str | None = None
@@ -99,7 +101,7 @@ class ResourcePermissionsRequest(BaseModel):
 
 
 class BulkPermissionAssignment(BaseModel):
-    resource_id: int
+    resource_id: str
     permission_level: int | None = None
 
 

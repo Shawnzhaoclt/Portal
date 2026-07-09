@@ -1,0 +1,13 @@
+{
+  "resource_id": "ADMBSHVR",
+  "resource_slug": "admin_management",
+  "type": "admin",
+  "name": "Portal Management",
+  "url": "/admin_management",
+  "category": "Administration",
+  "description": "Manage Portal users, teams, resources, permissions, and personal featured items.",
+  "icon": "settings",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": false
+}

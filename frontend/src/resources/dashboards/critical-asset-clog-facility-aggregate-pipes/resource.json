@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASDSUFT",
+  "resource_slug": "critical_asset_clog_facility_aggregate_pipes",
+  "type": "dashboard",
+  "name": "Clog Risk Facility Aggregate - Pipes",
+  "url": "/dashboard_critical_asset_clog_facility_aggregate_pipes",
+  "category": "Risk",
+  "description": "Clog risk summarized by facility for pipe assets.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

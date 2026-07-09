@@ -1849,12 +1849,13 @@ function discoveryChangeSummary(item: ResourceDiscoveryItem) {
 function discoveryNoActionText(item: ResourceDiscoveryItem) {
   if (item.status === 'unchanged') return 'No action needed'
   if (item.status === 'inactive_stale') return 'Already disabled'
+  if (item.status === 'invalid') return 'Fix resource ID'
   if (item.status === 'conflict') return 'Review saved resource'
   return 'No action available'
 }
 
 function DiscoveryStatus({ item }: { item: ResourceDiscoveryItem }) {
-  const isWarning = item.status === 'conflict' || item.status === 'stale'
+  const isWarning = item.status === 'conflict' || item.status === 'invalid' || item.status === 'stale'
   return (
     <span className={`management-discovery-status ${item.status}`}>
       {isWarning ? <AlertTriangle size={13} /> : null}
@@ -1994,7 +1995,7 @@ function ResourcesPanel({
         if (resourceTypeFilter && item.resource_type !== resourceTypeFilter) return false
         if (discoveryStatusFilter && item.status !== discoveryStatusFilter) return false
         if (discoverySourceFilter && item.source !== discoverySourceFilter) return false
-        return matchesTextFilter([item.name, item.url, item.resource_key, item.category, item.description], resourceTextFilter)
+        return matchesTextFilter([item.resource_id, item.name, item.url, item.resource_key, item.category, item.description], resourceTextFilter)
       }),
     [discoveryItems, discoverySourceFilter, discoveryStatusFilter, resourceTextFilter, resourceTypeFilter],
   )
@@ -2006,7 +2007,7 @@ function ResourcesPanel({
         if (resourceActiveFilter === 'inactive' && resource.is_active) return false
         if (resourceActiveFilter === 'public' && !resource.is_public) return false
         if (resourceActiveFilter === 'private' && resource.is_public) return false
-        return matchesTextFilter([resource.name, resource.url, resource.resource_key, resource.category, resource.description], resourceTextFilter)
+        return matchesTextFilter([resource.resource_id, resource.name, resource.url, resource.resource_key, resource.category, resource.description], resourceTextFilter)
       }),
     [resourceActiveFilter, resourceTextFilter, resourceTypeFilter, resources],
   )
@@ -2075,7 +2076,7 @@ function ResourcesPanel({
         </div>
       </div>
       <div className="management-resource-filters">
-        <input value={resourceTextFilter} onChange={(event) => setResourceTextFilter(event.target.value)} placeholder="Filter name, URL, key, category" />
+        <input value={resourceTextFilter} onChange={(event) => setResourceTextFilter(event.target.value)} placeholder="Filter resource ID, name, URL, key, category" />
         <select value={resourceTypeFilter} onChange={(event) => setResourceTypeFilter(event.target.value)}>
           <option value="">All resource types</option>
           {RESOURCE_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -2115,6 +2116,7 @@ function ResourcesPanel({
               <thead>
                 <tr>
                   <th>Status</th>
+                  <th>Resource ID</th>
                   <th>Type</th>
                   <th>Name</th>
                   <th>URL</th>
@@ -2129,6 +2131,7 @@ function ResourcesPanel({
                   return (
                     <tr key={item.resource_key}>
                       <td><DiscoveryStatus item={item} /></td>
+                      <td>{item.resource_id ?? '-'}</td>
                       <td>{item.resource_type}</td>
                       <td>{item.name}</td>
                       <td><code>{item.url}</code></td>
@@ -2161,6 +2164,7 @@ function ResourcesPanel({
           <thead>
             <tr>
               <th>Name</th>
+              <th>Resource ID</th>
               <th>Type</th>
               <th>URL</th>
               <th>Public</th>
@@ -2172,6 +2176,7 @@ function ResourcesPanel({
             {filteredResources.map((resource) => (
               <tr key={resource.id}>
                 <td>{resource.name}</td>
+                <td><code>{resource.resource_id}</code></td>
                 <td>{resource.resource_type}</td>
                 <td><a href={resource.url}>{resource.url}</a></td>
                 <td><input checked={resource.is_public} onChange={(event) => onResourceFlagChange(resource.id, { is_public: event.target.checked })} type="checkbox" /></td>
@@ -2256,7 +2261,7 @@ function PermissionsPanel({
         .map((row) => {
           const draft = bulkDrafts[row.resource.id] ?? ''
           return {
-            resource_id: row.resource.id,
+            resource_id: row.resource.resource_id,
             permission_level: draft ? Number(draft) : null,
           }
         }),
@@ -2396,7 +2401,7 @@ function PermissionsPanel({
               subjects={bulkSubjects}
               value={bulkSubjectId}
             />
-            <input value={bulkSearch} onChange={(event) => setBulkSearch(event.target.value)} placeholder="Filter resource name, URL, key" />
+            <input value={bulkSearch} onChange={(event) => setBulkSearch(event.target.value)} placeholder="Filter resource ID, name, URL, key" />
             <select value={bulkResourceType} onChange={(event) => setBulkResourceType(event.target.value)}>
               <option value="">All types</option>
               {RESOURCE_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
@@ -2451,7 +2456,7 @@ function PermissionsPanel({
                     </td>
                     <td>
                       <strong>{row.resource.name}</strong>
-                      <small>{row.resource.url}</small>
+                      <small>{row.resource.resource_id} - {row.resource.url}</small>
                     </td>
                     <td>{row.resource.resource_type}</td>
                     <td>{row.resource.category ?? '-'}</td>

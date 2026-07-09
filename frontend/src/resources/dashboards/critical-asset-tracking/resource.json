@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASK8RAV",
+  "resource_slug": "critical_asset_tracking",
+  "type": "dashboard",
+  "name": "Critical Asset Tracking",
+  "url": "/dashboard_critical_asset_tracking",
+  "category": "Risk",
+  "description": "Risk assessment tables and facility aggregate views for tracked critical assets.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

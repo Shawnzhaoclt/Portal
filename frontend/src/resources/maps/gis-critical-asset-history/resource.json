@@ -1,0 +1,12 @@
+{
+  "resource_id": "MAPPB6VJ",
+  "resource_slug": "gis_critical_asset_history",
+  "type": "map",
+  "name": "Critical Asset History",
+  "url": "/map_critical_asset_history",
+  "category": "Maps",
+  "description": "Spatial view focused on assets with multiple inspections and risk changes over time.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

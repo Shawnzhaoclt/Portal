@@ -1,0 +1,12 @@
+{
+  "resource_id": "MAPIVBQ1",
+  "resource_slug": "gis_critical_asset_facility",
+  "type": "map",
+  "name": "Critical Asset Facility",
+  "url": "/map_critical_asset_facility",
+  "category": "Maps",
+  "description": "Spatial view of culvert facilities, pipes, structures, and current risk values.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

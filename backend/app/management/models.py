@@ -7,7 +7,7 @@ from backend.app.management.database import Base
 
 
 class Team(Base):
-    __tablename__ = "teams"
+    __tablename__ = "SYS_TEAMS"
     __table_args__ = (
         CheckConstraint("is_active IN (0, 1)", name="ck_teams_is_active"),
         CheckConstraint("parent_team_id IS NULL OR parent_team_id <> id", name="ck_teams_not_own_parent"),
@@ -16,8 +16,8 @@ class Team(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     description: Mapped[str | None] = mapped_column(Text)
-    parent_team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"))
-    manager_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    parent_team_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_TEAMS.id", ondelete="SET NULL"))
+    manager_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"))
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
@@ -26,7 +26,7 @@ class Team(Base):
 
 
 class User(Base):
-    __tablename__ = "users"
+    __tablename__ = "SYS_USERS"
     __table_args__ = (
         CheckConstraint("is_active IN (0, 1)", name="ck_users_is_active"),
         CheckConstraint("is_system_admin IN (0, 1)", name="ck_users_is_system_admin"),
@@ -42,7 +42,7 @@ class User(Base):
     last_name: Mapped[str] = mapped_column(String, nullable=False)
     email: Mapped[str] = mapped_column(String(collation="NOCASE"), nullable=False, unique=True, index=True)
     employee_id: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
-    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="SET NULL"), index=True)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_TEAMS.id", ondelete="SET NULL"), index=True)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     is_system_admin: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -53,7 +53,7 @@ class User(Base):
     last_login_at: Mapped[str | None] = mapped_column(String)
     password_changed_at: Mapped[str | None] = mapped_column(String)
     deleted_at: Mapped[str | None] = mapped_column(String, index=True)
-    deleted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    deleted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"))
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
@@ -61,14 +61,16 @@ class User(Base):
 
 
 class Resource(Base):
-    __tablename__ = "resources"
+    __tablename__ = "SYS_RESOURCES"
     __table_args__ = (
         CheckConstraint("resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api')", name="ck_resources_type"),
+        CheckConstraint("resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'", name="ck_resources_resource_id_format"),
         CheckConstraint("is_public IN (0, 1)", name="ck_resources_is_public"),
         CheckConstraint("is_active IN (0, 1)", name="ck_resources_is_active"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    resource_id: Mapped[str] = mapped_column(String(8), nullable=False, unique=True, index=True)
     resource_key: Mapped[str] = mapped_column(String, nullable=False, unique=True, index=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
     resource_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
@@ -83,7 +85,7 @@ class Resource(Base):
 
 
 class ResourcePermission(Base):
-    __tablename__ = "resource_permissions"
+    __tablename__ = "SYS_RESOURCE_PERMISSIONS"
     __table_args__ = (
         CheckConstraint(
             "(user_id IS NOT NULL AND team_id IS NULL) OR (user_id IS NULL AND team_id IS NOT NULL)",
@@ -95,11 +97,16 @@ class ResourcePermission(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
-    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    team_id: Mapped[int | None] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    resource_id: Mapped[str] = mapped_column(
+        String(8),
+        ForeignKey("SYS_RESOURCES.resource_id", ondelete="CASCADE", onupdate="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="CASCADE"), index=True)
+    team_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_TEAMS.id", ondelete="CASCADE"), index=True)
     permission_level: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"))
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 
@@ -109,19 +116,19 @@ class ResourcePermission(Base):
 
 
 class UserFeaturedResource(Base):
-    __tablename__ = "user_featured_resources"
+    __tablename__ = "SYS_USER_FEATURED_RESOURCES"
     __table_args__ = (
         CheckConstraint(
             "category IN ('all', 'dashboard', 'map', 'tab', 'doc', 'report', 'dataset')",
             name="ck_user_featured_resources_category",
         ),
-        UniqueConstraint("user_id", "category", "resource_id", name="uq_user_featured_resource_category"),
+        UniqueConstraint("user_id", "category", "resource_record_id", name="uq_user_featured_resource_category"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="CASCADE"), nullable=False, index=True)
     category: Mapped[str] = mapped_column(String, nullable=False, default="all", index=True)
-    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_record_id: Mapped[int] = mapped_column(ForeignKey("SYS_RESOURCES.id", ondelete="CASCADE"), nullable=False, index=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
@@ -130,19 +137,19 @@ class UserFeaturedResource(Base):
 
 
 class TeamFeaturedResource(Base):
-    __tablename__ = "team_featured_resources"
+    __tablename__ = "SYS_TEAM_FEATURED_RESOURCES"
     __table_args__ = (
         CheckConstraint(
             "category IN ('all', 'dashboard', 'map', 'tab', 'doc', 'report', 'dataset')",
             name="ck_team_featured_resources_category",
         ),
-        UniqueConstraint("team_id", "category", "resource_id", name="uq_team_featured_resource_category"),
+        UniqueConstraint("team_id", "category", "resource_record_id", name="uq_team_featured_resource_category"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), nullable=False, index=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("SYS_TEAMS.id", ondelete="CASCADE"), nullable=False, index=True)
     category: Mapped[str] = mapped_column(String, nullable=False, default="all", index=True)
-    resource_id: Mapped[int] = mapped_column(ForeignKey("resources.id", ondelete="CASCADE"), nullable=False, index=True)
+    resource_record_id: Mapped[int] = mapped_column(ForeignKey("SYS_RESOURCES.id", ondelete="CASCADE"), nullable=False, index=True)
     sort_order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
@@ -152,22 +159,22 @@ class TeamFeaturedResource(Base):
 
 
 class PasswordResetToken(Base):
-    __tablename__ = "password_reset_tokens"
+    __tablename__ = "SYS_PASSWORD_RESET_TOKENS"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="CASCADE"), nullable=False, index=True)
     token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     expires_at: Mapped[str] = mapped_column(String, nullable=False, index=True)
     used_at: Mapped[str | None] = mapped_column(String)
-    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"))
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
 
 
 class AuditLog(Base):
-    __tablename__ = "audit_logs"
+    __tablename__ = "SYS_AUDIT_LOGS"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), index=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"), index=True)
     action: Mapped[str] = mapped_column(String, nullable=False)
     target_type: Mapped[str] = mapped_column(String, nullable=False, index=True)
     target_id: Mapped[int | None] = mapped_column(Integer, index=True)

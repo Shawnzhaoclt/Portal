@@ -1,0 +1,12 @@
+{
+  "resource_id": "TABT946I",
+  "resource_slug": "planning_pending_aif_qa",
+  "type": "tab",
+  "name": "Planning Pending AIF QA/QC",
+  "url": "/tab_planning_pending_aif_qa",
+  "category": "Planning",
+  "description": "Pending Asset Inspection Form records for planning team QA/QC review.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}
