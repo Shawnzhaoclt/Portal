@@ -2735,7 +2735,8 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   const candidates = useMemo(() => pipeSearchCandidates(candidatePipes), [candidatePipes])
   const showCandidateList = candidateOpen && searchTerm.trim().length >= 2
   const selectedMediaMode = useMemo<MediaSourceMode>(() => mediaSourceMode(), [])
-  const hasVideoDefectLayout = Boolean(selectedInspection && observationStatus === 'ready' && inspectionMedia.videos.length && groupedObservations.length)
+  const canShowDefectTable = Boolean(selectedInspection && observationStatus === 'ready')
+  const hasVideoDefectLayout = Boolean(canShowDefectTable && inspectionMedia.videos.length)
   const videoDefectLayoutStyle = hasVideoDefectLayout
     ? ({ '--amteam-defect-table-pane-width': `${videoDefectTableWidth}px` } as CSSProperties)
     : undefined
@@ -3012,9 +3013,6 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
 
             {observationStatus === 'loading' ? <StatusMessage icon="loading" message="Loading defect observations." /> : null}
             {observationStatus === 'error' ? <StatusMessage icon="error" tone="error" message={errorMessage} /> : null}
-            {selectedInspection && observationStatus === 'ready' && observations.length === 0 ? (
-              <StatusMessage icon="empty" message="No graded defect observations found." />
-            ) : null}
 
             {hasVideoDefectLayout ? (
               <button
@@ -3046,7 +3044,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
               </button>
             ) : null}
 
-            {groupedObservations.length ? (
+            {canShowDefectTable ? (
               <section
                 className="amteam-observation-list amteam-defect-treelist"
                 role="tree"
@@ -3080,6 +3078,12 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                     {defectColumnResizer('snapshot', 'Snapshot')}
                   </span>
                 </div>
+                {groupedObservations.length === 0 ? (
+                  <div className="amteam-defect-empty-row" role="presentation">
+                    <AlertCircle size={24} aria-hidden="true" />
+                    <span>No graded defect observations found.</span>
+                  </div>
+                ) : null}
                 {groupedObservations.map((group, groupIndex) => {
                   const previousObservationCount = groupedObservations
                     .slice(0, groupIndex)
