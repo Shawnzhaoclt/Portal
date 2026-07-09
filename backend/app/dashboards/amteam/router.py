@@ -3,6 +3,7 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
+import struct
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ EXCLUDED_OBSERVATION_TEXT = ("Access", "Vermin", "Misc")
 SNAPSHOT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".wmv"}
 REPORT_EXTENSIONS = {".pdf"}
+MP4_CONTAINER_BOXES = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"}
 
 ColumnMap = dict[str, str]
 
@@ -271,6 +273,113 @@ def files_with_extensions(directory: Path | None, extensions: set[str]) -> list[
     )
 
 
+def read_uint32_be(file_obj: Any) -> int:
+    data = file_obj.read(4)
+    if len(data) != 4:
+        raise EOFError("Unexpected end of MP4 metadata.")
+    return struct.unpack(">I", data)[0]
+
+
+def read_uint64_be(file_obj: Any) -> int:
+    data = file_obj.read(8)
+    if len(data) != 8:
+        raise EOFError("Unexpected end of MP4 metadata.")
+    return struct.unpack(">Q", data)[0]
+
+
+def iter_mp4_boxes(file_obj: Any, start: int, end: int, path: tuple[bytes, ...] = ()):
+    file_obj.seek(start)
+    while file_obj.tell() + 8 <= end:
+        box_offset = file_obj.tell()
+        size_bytes = file_obj.read(4)
+        box_type = file_obj.read(4)
+        if len(size_bytes) != 4 or len(box_type) != 4:
+            break
+
+        box_size = struct.unpack(">I", size_bytes)[0]
+        header_size = 8
+        if box_size == 1:
+            try:
+                box_size = read_uint64_be(file_obj)
+            except EOFError:
+                break
+            header_size = 16
+        elif box_size == 0:
+            box_size = end - box_offset
+
+        if box_size < header_size or box_offset + box_size > end:
+            break
+
+        data_start = box_offset + header_size
+        data_end = box_offset + box_size
+        box_path = (*path, box_type)
+        yield box_offset, box_size, box_type, data_start, data_end, box_path
+
+        if box_type in MP4_CONTAINER_BOXES:
+            yield from iter_mp4_boxes(file_obj, data_start, data_end, box_path)
+
+        file_obj.seek(data_end)
+
+
+def mp4_video_metadata(path: Path) -> dict[str, Any]:
+    if path.suffix.lower() != ".mp4":
+        return {}
+
+    try:
+        file_size = path.stat().st_size
+        with path.open("rb") as file_obj:
+            boxes = list(iter_mp4_boxes(file_obj, 0, file_size))
+            tracks = [box for box in boxes if box[2] == b"trak"]
+            for track in tracks:
+                _offset, _size, _type, _start, _end, track_path = track
+                track_boxes = [box for box in boxes if box[5][:len(track_path)] == track_path]
+                handler: bytes | None = None
+                timescale: int | None = None
+                duration: int | None = None
+                sample_count = 0
+
+                for _box_offset, _box_size, box_type, data_start, _data_end, _box_path in track_boxes:
+                    if box_type == b"hdlr":
+                        file_obj.seek(data_start)
+                        file_obj.read(8)
+                        handler = file_obj.read(4)
+                    elif box_type == b"mdhd":
+                        file_obj.seek(data_start)
+                        version_data = file_obj.read(1)
+                        if not version_data:
+                            continue
+                        version = version_data[0]
+                        file_obj.read(3)
+                        if version == 1:
+                            file_obj.read(16)
+                            timescale = read_uint32_be(file_obj)
+                            duration = read_uint64_be(file_obj)
+                        else:
+                            file_obj.read(8)
+                            timescale = read_uint32_be(file_obj)
+                            duration = read_uint32_be(file_obj)
+                    elif box_type == b"stts":
+                        file_obj.seek(data_start)
+                        file_obj.read(4)
+                        entry_count = read_uint32_be(file_obj)
+                        for _entry_index in range(entry_count):
+                            sample_count += read_uint32_be(file_obj)
+                            file_obj.read(4)
+
+                if handler == b"vide" and timescale and duration:
+                    duration_seconds = duration / timescale
+                    fps = sample_count / duration_seconds if sample_count and duration_seconds > 0 else None
+                    return {
+                        "duration_seconds": duration_seconds,
+                        "frame_count": sample_count or None,
+                        "fps": fps,
+                    }
+    except (OSError, EOFError, struct.error):
+        return {}
+
+    return {}
+
+
 def media_url(path: Path) -> str:
     root = amteam_media_root().resolve()
     relative_path = path.resolve().relative_to(root).as_posix()
@@ -280,13 +389,16 @@ def media_url(path: Path) -> str:
 def media_asset(path: Path, kind: str) -> dict[str, Any]:
     media_type, _ = mimetypes.guess_type(path)
     root = amteam_media_root().resolve()
-    return {
+    asset = {
         "name": path.name,
         "kind": kind,
         "relative_path": path.resolve().relative_to(root).as_posix(),
         "url": media_url(path),
         "media_type": media_type,
     }
+    if kind == "video":
+        asset.update(mp4_video_metadata(path))
+    return asset
 
 
 def inspection_media_directory(us_mh: Any, ds_mh: Any, inspection_date: Any) -> tuple[Path | None, list[str], dict[str, Any]]:
@@ -432,6 +544,31 @@ def matching_snapshot_assets(
     return matches
 
 
+def dedupe_observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped_rows: list[dict[str, Any]] = []
+    rows_by_mlo_id: dict[str, dict[str, Any]] = {}
+
+    for row in rows:
+        mlo_id = str(row.get("mlo_id") or "").strip()
+        if not mlo_id:
+            deduped_rows.append(row)
+            continue
+
+        existing_row = rows_by_mlo_id.get(mlo_id)
+        if existing_row is None:
+            rows_by_mlo_id[mlo_id] = row
+            deduped_rows.append(row)
+            continue
+
+        for key in ("media_id", "full_path"):
+            existing_value = existing_row.get(key)
+            next_value = row.get(key)
+            if (existing_value is None or existing_value == "") and next_value not in (None, ""):
+                existing_row[key] = next_value
+
+    return deduped_rows
+
+
 def pipe_columns(lookup: dict[str, str]) -> dict[str, str | None]:
     return {
         "ml_id": resolve_column(lookup, ("ML_ID", "MLID"), "ML_ID"),
@@ -493,6 +630,8 @@ def observation_columns(lookup: dict[str, str]) -> dict[str, str | None]:
         "remarks": optional_column(lookup, ("Remarks",)),
         "clock_from": optional_column(lookup, ("Clock_From", "Clock From", "ClockFrom")),
         "clock_to": optional_column(lookup, ("Clock_To", "Clock To", "ClockTo")),
+        "vcr_time": optional_column(lookup, ("VCR_Time", "VCR Time", "VCRTime")),
+        "digital_time": optional_column(lookup, ("Digital_Time", "Digital Time", "DigitalTime")),
         "media_id": optional_column(lookup, ("Media_ID", "MediaID", "Media ID")),
         "full_path": optional_column(lookup, ("full_path", "Full_Path", "Full Path", "path")),
     }
@@ -821,6 +960,7 @@ def inspection_observations(
             """,
             [mli_id, *[f"%{pattern}%" for pattern in EXCLUDED_OBSERVATION_TEXT], limit],
         )
+        rows = dedupe_observation_rows(rows)
         for row in rows:
             matched_snapshots = matching_snapshot_assets(
                 row,

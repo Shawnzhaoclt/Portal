@@ -1,12 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, FormEvent } from 'react'
+import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react'
 import {
   AlertCircle,
   Camera,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
-  ClipboardList,
   Download,
   FileText,
   Loader2,
@@ -69,10 +68,27 @@ type ObservationDefectSelection = {
   defectComment: string
   noHighScoreConfirmed: boolean
 }
+type ObservationDefectRole = '' | 'major' | 'other'
 type ObservationCardEntry = {
   cardKey: string
   observation: AmTeamObservation
   observationNumber: number
+}
+type ObservationDetailsSelection = {
+  observation: AmTeamObservation
+}
+type PipeDetailsSelection = {
+  group: AmTeamPipeInspectionGroup
+  orderNumber: number
+}
+type PipeReviewOption = {
+  pipeId: string
+  label: string
+  disabled: boolean
+}
+type ReviewNotice = {
+  id: number
+  message: string
 }
 type PipeReviewInput = {
   cloggingPercent: string
@@ -90,6 +106,7 @@ type VideoSeekRequest = {
   videoPath: string
   timeSeconds: number
 }
+type DefectColumnKey = 'observation' | 'defect' | 'review' | 'extensive' | 'snapshot'
 type PipeObservationCacheEntry = {
   inspection: AmTeamInspection
   observations: AmTeamObservation[]
@@ -143,6 +160,25 @@ const DAY_IN_MS = 24 * 60 * 60 * 1000
 const PIPE_REVIEW_COMMENT_OPTIONS = ['Deposit', 'Rocks']
 const PIPE_REVIEW_PANEL_COMMENT_OPTIONS = ['Rocks', 'Deposit']
 const DEFAULT_MAJOR_DEFECT_AM_SCORE = '3'
+const VIDEO_DEFECT_MIN_WIDTH = 320
+const VIDEO_DEFECT_TABLE_DEFAULT_WIDTH = 650
+const VIDEO_DEFECT_TABLE_MIN_WIDTH = 520
+const VIDEO_DEFECT_SPLITTER_WIDTH = 12
+const DEFECT_COLUMN_KEYS: DefectColumnKey[] = ['observation', 'defect', 'review', 'extensive', 'snapshot']
+const DEFAULT_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
+  observation: 109,
+  defect: 300,
+  review: 120,
+  extensive: 75,
+  snapshot: 100,
+}
+const MIN_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
+  observation: 60,
+  defect: 200,
+  review: 120,
+  extensive: 50,
+  snapshot: 100,
+}
 const EMPTY_INSPECTION_MEDIA: AmTeamInspectionMedia = {
   media_root: '',
   pipe_folder: null,
@@ -283,6 +319,22 @@ function mediaViewUrl(url: string, mode: MediaSourceMode, mediaRoot: string) {
   return url
 }
 
+function fileNameFromMediaUrl(url: string) {
+  const relativePath = relativePathFromMediaApiUrl(url)
+  const pathText = relativePath || url
+  const cleanPath = pathText.split(/[?#]/)[0] ?? ''
+  const segments = cleanPath.split(/[\\/]/).filter(Boolean)
+  return decodeURIComponent(segments.at(-1) ?? 'Snapshot')
+}
+
+function snapshotDisplayName(url: string) {
+  const fileName = fileNameFromMediaUrl(url)
+  const withoutExtension = fileName.replace(/\.[^.]+$/, '')
+  const withoutAssetPrefix = withoutExtension.replace(/^(?:[PS]_?\d+_?)+/i, '').replace(/^_+/, '')
+  if (withoutAssetPrefix) return withoutAssetPrefix
+  return withoutExtension
+}
+
 function boundedIntegerInputValue(value: string, min: number, max: number) {
   const nextValue = value.trim()
   if (nextValue === '') return ''
@@ -297,8 +349,9 @@ function inspectionReviewDirection(direction: AmTeamCellValue | undefined) {
 function formatDistanceFeet(value: AmTeamCellValue | undefined) {
   const text = displayValue(value)
   if (text === '-') return text
-  if (/\b(ft|feet)\b/i.test(text)) return text
-  return `${text} feet`
+  if (/\bfeet\b/i.test(text)) return text.replace(/\bfeet\b/gi, 'ft')
+  if (/\bft\b/i.test(text)) return text
+  return `${text} ft`
 }
 
 function formatPercent(value: AmTeamCellValue | undefined) {
@@ -327,9 +380,25 @@ function formatMediaTime(seconds: number) {
   return `${minutes}:${remainingSeconds}`
 }
 
+function finiteNumberValue(value: AmTeamCellValue | undefined) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function numericValue(value: AmTeamCellValue | undefined) {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
+}
+
+function observationSeekSeconds(observation: AmTeamObservation, video: AmTeamMediaAsset | null | undefined) {
+  if (!video) return null
+  const seconds = finiteNumberValue(observation.digital_time)
+  return seconds !== null && seconds >= 0 ? seconds : null
+}
+
+function isInteractiveEventTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement
+    && Boolean(target.closest('button,input,select,textarea,a,label,[role="button"]'))
 }
 
 function observationDistanceGroups(observations: AmTeamObservation[]) {
@@ -1225,6 +1294,152 @@ function StatusMessage({
   )
 }
 
+function ObservationDetailsDialog({
+  selection,
+  onClose,
+}: {
+  selection: ObservationDetailsSelection | null
+  onClose: () => void
+}) {
+  if (!selection) return null
+
+  const { observation } = selection
+
+  return (
+    <div className="amteam-observation-detail-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="amteam-observation-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`MLO ${displayValue(observation.mlo_id)} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span>Observation details</span>
+            <strong>MLO ID {displayValue(observation.mlo_id)}</strong>
+          </div>
+          <button type="button" aria-label="Close observation details" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="amteam-observation-detail-dialog-body">
+          {fieldList([
+            ['MLO ID', observation.mlo_id],
+            ['Continuous', observation.continuous],
+            ['Joint', formatYesNo(observation.joint)],
+            ['Value percent', formatPercent(observation.value_percent)],
+            ['Remarks', observation.remarks],
+            ['Clock from', observation.clock_from],
+            ['Clock to', observation.clock_to],
+          ])}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function PipeDetailsDialog({
+  selection,
+  onClose,
+}: {
+  selection: PipeDetailsSelection | null
+  onClose: () => void
+}) {
+  if (!selection) return null
+
+  const { group, orderNumber } = selection
+
+  return (
+    <div className="amteam-observation-detail-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="amteam-observation-detail-dialog amteam-info-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Pipe ${String(orderNumber).padStart(2, '0')} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span>Pipe details</span>
+            <strong>{displayValue(group.ml_name)}</strong>
+          </div>
+          <button type="button" aria-label="Close pipe details" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="amteam-observation-detail-dialog-body">
+          {fieldList([
+            ['Pipe order', String(orderNumber).padStart(2, '0')],
+            ['ML ID', group.ml_id],
+            ['ML Name', group.ml_name],
+            ['Project', group.project_title],
+            ['Street', group.street],
+            ['US MH', group.us_mh],
+            ['DS MH', group.ds_mh],
+            ['Material', group.material],
+            ['Shape', group.pipe_shape],
+            ['Height', group.pipe_height],
+          ])}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function InspectionDetailsDialog({
+  inspection,
+  mediaMode,
+  mediaRoot,
+  reports,
+  onClose,
+}: {
+  inspection: AmTeamInspection | null
+  mediaMode: MediaSourceMode
+  mediaRoot: string
+  reports: AmTeamMediaAsset[]
+  onClose: () => void
+}) {
+  if (!inspection) return null
+
+  return (
+    <div className="amteam-observation-detail-backdrop" role="presentation" onClick={onClose}>
+      <div
+        className="amteam-observation-detail-dialog amteam-info-detail-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Inspection ${displayValue(inspection.mli_id)} details`}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span>Inspection details</span>
+            <strong>MLI ID {displayValue(inspection.mli_id)}</strong>
+          </div>
+          <button type="button" aria-label="Close inspection details" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="amteam-observation-detail-dialog-body">
+          <div className="amteam-info-dialog-action-row">
+            <ReportDownloadButton mediaMode={mediaMode} mediaRoot={mediaRoot} reports={reports} />
+          </div>
+          {fieldList([
+            ['MLI ID', inspection.mli_id],
+            ['Date', compactDate(inspection.inspection_date)],
+            ['Operator', inspection.operator],
+            ['Reason', inspection.reason_of_inspection],
+            ['Direction', inspection.inspection_direction],
+            ['Length', inspection.inspection_length],
+            ['Status', inspection.inspection_status],
+            ['Current', inspection.current_status],
+          ])}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function SnapshotImageBox({
   emptyMessage,
   imageUrls,
@@ -1232,8 +1447,6 @@ function SnapshotImageBox({
   mediaRoot,
   readOnly = false,
   selectedUrl,
-  showCounter = true,
-  title = 'Snapshots',
   onSelectedUrlChange,
 }: {
   emptyMessage?: string
@@ -1242,8 +1455,6 @@ function SnapshotImageBox({
   mediaRoot: string
   readOnly?: boolean
   selectedUrl?: string
-  showCounter?: boolean
-  title?: string
   onSelectedUrlChange?: (url: string) => void
 }) {
   const [failedUrls, setFailedUrls] = useState<string[]>([])
@@ -1254,8 +1465,9 @@ function SnapshotImageBox({
   const visibleUrls = viewUrls.filter((imageUrl) => !failedUrls.includes(imageUrl))
   const currentSelectedUrl = selectedUrl ?? internalSelectedUrl
   const selectedImageUrl = currentSelectedUrl && visibleUrls.includes(currentSelectedUrl) ? currentSelectedUrl : visibleUrls[0]
-  const selectedIndex = Math.max(0, visibleUrls.indexOf(selectedImageUrl))
-  const canNavigate = visibleUrls.length > 1
+  const selectedDisplayName = selectedImageUrl ? snapshotDisplayName(selectedImageUrl) : ''
+  const selectedSnapshotIndex = selectedImageUrl ? visibleUrls.indexOf(selectedImageUrl) + 1 : 0
+  const snapshotCountLabel = `${selectedSnapshotIndex}/${visibleUrls.length}`
 
   useEffect(() => {
     setFailedUrls([])
@@ -1267,20 +1479,7 @@ function SnapshotImageBox({
     if (!emptyMessage) return null
 
     return (
-      <figure className="amteam-observation-image empty">
-        <figcaption>
-          <div className="amteam-observation-image-title static">
-            <span>
-              <Camera size={14} aria-hidden="true" />
-              {title}
-            </span>
-            {showCounter ? <strong>0</strong> : null}
-          </div>
-        </figcaption>
-        <div className="amteam-observation-image-frame">
-          <div className="amteam-observation-image-empty">{emptyMessage}</div>
-        </div>
-      </figure>
+      <span className="amteam-snapshot-link empty">{emptyMessage}</span>
     )
   }
 
@@ -1289,76 +1488,20 @@ function SnapshotImageBox({
     onSelectedUrlChange?.(imageUrl)
   }
 
-  const selectRelativeSnapshot = (offset: number) => {
-    if (!canNavigate) return
-    const nextIndex = (selectedIndex + offset + visibleUrls.length) % visibleUrls.length
-    updateSelectedUrl(visibleUrls[nextIndex])
-  }
-
   return (
-    <figure className="amteam-observation-image">
-      <figcaption>
-        {readOnly ? (
-          <div className="amteam-observation-image-title static">
-            <span>
-              <Camera size={14} aria-hidden="true" />
-              {title}
-            </span>
-            {showCounter ? (
-              <strong>
-                {selectedIndex + 1} / {visibleUrls.length.toLocaleString()}
-              </strong>
-            ) : null}
-          </div>
-        ) : (
-          <button
-            type="button"
-            className="amteam-observation-image-title"
-            onClick={() => setIsPickerOpen(true)}
-          >
-            <span>
-              <Camera size={14} aria-hidden="true" />
-              {title}
-            </span>
-            {showCounter ? (
-              <strong>
-                {selectedIndex + 1} / {visibleUrls.length.toLocaleString()}
-              </strong>
-            ) : null}
-          </button>
-        )}
-      </figcaption>
-      <div className="amteam-observation-image-frame">
-        <img
-          alt=""
-          key={selectedImageUrl}
-          loading="lazy"
-          src={selectedImageUrl}
-          onError={() => setFailedUrls((current) => (
-            current.includes(selectedImageUrl) ? current : [...current, selectedImageUrl]
-          ))}
-        />
-        {canNavigate && !readOnly ? (
-          <>
-            <button
-              type="button"
-              className="amteam-observation-image-nav previous"
-              aria-label="Previous snapshot"
-              onClick={() => selectRelativeSnapshot(-1)}
-            >
-              <ChevronLeft size={20} aria-hidden="true" />
-            </button>
-            <button
-              type="button"
-              className="amteam-observation-image-nav next"
-              aria-label="Next snapshot"
-              onClick={() => selectRelativeSnapshot(1)}
-            >
-              <ChevronRight size={20} aria-hidden="true" />
-            </button>
-          </>
-        ) : null}
-      </div>
+    <div className="amteam-snapshot-selector">
+      <button
+        type="button"
+        className="amteam-snapshot-link"
+        disabled={readOnly}
+        title={`${selectedDisplayName} (${snapshotCountLabel})`}
+        onClick={() => setIsPickerOpen(true)}
+      >
+        <span>{selectedDisplayName || 'Select snapshot'}</span>
+        <span className="amteam-snapshot-count" title="Current snapshot / total snapshots">
+          ({snapshotCountLabel})
+        </span>
+      </button>
 
       {isPickerOpen && !readOnly ? (
         <div className="amteam-snapshot-picker-backdrop" role="presentation" onClick={() => setIsPickerOpen(false)}>
@@ -1385,7 +1528,8 @@ function SnapshotImageBox({
                   type="button"
                   key={imageUrl}
                   className={imageUrl === selectedImageUrl ? 'selected' : ''}
-                  aria-label={`Snapshot ${index + 1}`}
+                  aria-label={`Snapshot ${index + 1}: ${snapshotDisplayName(imageUrl)}`}
+                  title={snapshotDisplayName(imageUrl)}
                   onClick={() => {
                     updateSelectedUrl(imageUrl)
                     setIsPickerOpen(false)
@@ -1405,7 +1549,7 @@ function SnapshotImageBox({
           </div>
         </div>
       ) : null}
-    </figure>
+    </div>
   )
 }
 
@@ -1431,99 +1575,6 @@ function ObservationImage({
       selectedUrl={selectedUrl}
       onSelectedUrlChange={onSelectedUrlChange}
     />
-  )
-}
-
-function MajorDefectPreviewCard({
-  entry,
-  otherEntries,
-  selection,
-  mediaMode,
-  mediaRoot,
-  selectedUrl,
-  onAmScoreChange,
-  onDefectCommentChange,
-  onSelectedUrlChange,
-}: {
-  entry?: ObservationCardEntry
-  otherEntries: ObservationCardEntry[]
-  selection: ObservationDefectSelection
-  mediaMode: MediaSourceMode
-  mediaRoot: string
-  selectedUrl?: string
-  onAmScoreChange: (value: string) => void
-  onDefectCommentChange: (value: string) => void
-  onSelectedUrlChange: (url: string) => void
-}) {
-  const observation = entry?.observation
-  const hasMajorDefect = Boolean(observation)
-  const imageUrls = observation?.image_urls?.length ? observation.image_urls : observation?.image_url ? [observation.image_url] : []
-
-  return (
-    <article className="amteam-observation amteam-major-preview-card">
-      <div className="amteam-major-preview-content">
-        <label className="amteam-preview-control amteam-preview-score-control">
-          <span>AM Score</span>
-          <input
-            type="number"
-            min="3"
-            max="5"
-            step="1"
-            inputMode="numeric"
-            disabled={!hasMajorDefect}
-            value={hasMajorDefect ? selection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE : ''}
-            onChange={(event) => onAmScoreChange(event.currentTarget.value)}
-          />
-        </label>
-
-        <label className="amteam-preview-control">
-          <span>Defect comment</span>
-          <select
-            disabled={!hasMajorDefect}
-            value={hasMajorDefect ? selection.defectComment : ''}
-            onChange={(event) => onDefectCommentChange(event.currentTarget.value)}
-          >
-            <option value="">Select comment</option>
-            {PIPE_REVIEW_COMMENT_OPTIONS.map((option) => (
-              <option key={option} value={option}>
-                {option}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        {observation || otherEntries.length ? (
-          <div className="amteam-preview-defect-list">
-            {observation ? (
-              <section className="amteam-preview-defect-block major">
-                <span>Major defect</span>
-                <strong>{displayValue(observation.code)}</strong>
-                <p>{displayValue(observation.observation_text)}</p>
-              </section>
-            ) : null}
-
-            {otherEntries.map((otherEntry) => (
-              <section className="amteam-preview-defect-block other" key={otherEntry.cardKey}>
-                <span>Other defect</span>
-                <strong>{displayValue(otherEntry.observation.code)}</strong>
-                <p>{displayValue(otherEntry.observation.observation_text)}</p>
-              </section>
-            ))}
-          </div>
-        ) : null}
-      </div>
-
-      <SnapshotImageBox
-        emptyMessage={hasMajorDefect ? 'No snapshot image found for this Major defect.' : 'Select a Major defect to preview snapshots.'}
-        imageUrls={imageUrls}
-        mediaMode={mediaMode}
-        mediaRoot={mediaRoot}
-        readOnly
-        selectedUrl={selectedUrl}
-        showCounter={false}
-        onSelectedUrlChange={onSelectedUrlChange}
-      />
-    </article>
   )
 }
 
@@ -1824,28 +1875,44 @@ function InspectionVideoPlayer({
 
 function PipeDefectReviewPanel({
   inspection,
+  pipeOptions,
+  selectedPipeId,
   gradeThreePlusCount,
   reviewInput,
   currentVideoFrame,
   pipePositionLabel,
+  hasPreviousPipe,
   hasNextPipe,
-  reviewValidationMessage,
   onReviewInputChange,
   onCaptureCloggingFrame,
   onJumpToCloggingFrame,
+  onPreviousPipe,
+  onSelectPipe,
+  onShowPipeInfo,
   onNextPipe,
+  onGenerateReport,
+  canDownloadExport,
+  onDownloadExport,
 }: {
   inspection: AmTeamInspection
+  pipeOptions: PipeReviewOption[]
+  selectedPipeId: string
   gradeThreePlusCount: number
   reviewInput: PipeReviewInput
   currentVideoFrame: ActiveVideoFrame | null
   pipePositionLabel: string
+  hasPreviousPipe: boolean
   hasNextPipe: boolean
-  reviewValidationMessage: string
   onReviewInputChange: (input: Partial<PipeReviewInput>) => void
   onCaptureCloggingFrame: () => void
   onJumpToCloggingFrame: () => void
+  onPreviousPipe: () => void
+  onSelectPipe: (pipeId: string) => void
+  onShowPipeInfo: () => void
   onNextPipe: () => void
+  onGenerateReport: () => void
+  canDownloadExport: boolean
+  onDownloadExport: () => void
 }) {
   const updateCloggingPercent = (value: string) => {
     const nextValue = boundedIntegerInputValue(value, 0, 100)
@@ -1862,83 +1929,127 @@ function PipeDefectReviewPanel({
     : currentVideoFrame
       ? 'Frame required'
       : 'No video available'
+  const inspectionDirectionLabel = inspectionReviewDirection(inspection.inspection_direction)
+  const assetDirectionLabel = `[${displayValue(inspection.ml_name)}] - ${inspectionDirectionLabel}`
 
   return (
     <section className="amteam-review-panel">
-      <header>
-        <span>Pipe Defect Review</span>
-        <strong>{inspectionReviewDirection(inspection.inspection_direction)}</strong>
-      </header>
-
-      <div className="amteam-review-body">
-        <div className="amteam-review-grid">
-          <label className="amteam-review-field amteam-clogging-percent-field">
-            <span>Clogging</span>
-            <div className="amteam-review-number">
-              <input
-                type="number"
-                min="0"
-                max="100"
-                step="1"
-                inputMode="numeric"
-                value={reviewInput.cloggingPercent}
-                onChange={(event) => updateCloggingPercent(event.currentTarget.value)}
-              />
-              <em>%</em>
-              <input
-                aria-label="Clogging comment"
-                className="amteam-clogging-comment-input"
-                list="amteam-clogging-comment-options"
-                value={reviewInput.comments}
-                disabled={!hasClogging}
-                placeholder="Select or enter"
-                onChange={(event) => onReviewInputChange({ comments: event.currentTarget.value })}
-              />
-              <datalist id="amteam-clogging-comment-options">
-                {PIPE_REVIEW_PANEL_COMMENT_OPTIONS.map((option) => (
-                  <option value={option} key={option} />
-                ))}
-              </datalist>
-            </div>
-          </label>
-
-          {hasClogging ? (
-            <div className={`amteam-clogging-frame ${hasCloggingSnapshot ? 'captured' : 'needs-capture'}`}>
-              <button
-                type="button"
-                className="amteam-clogging-frame-jump"
-                disabled={!hasCloggingSnapshot}
-                title={hasCloggingSnapshot ? 'Go to this video frame' : undefined}
-                onClick={onJumpToCloggingFrame}
-              >
-                <span>Clogging frame</span>
-                <strong>{cloggingSnapshotLabel}</strong>
-              </button>
-              <button
-                type="button"
-                className="amteam-clogging-frame-capture"
-                disabled={!currentVideoFrame}
-                onClick={onCaptureCloggingFrame}
-              >
-                <Camera size={15} />
-                Capture current frame
-              </button>
-            </div>
-          ) : null}
-
-          <label className="amteam-review-field amteam-review-count-field">
-            <span>Defects scored 3+</span>
-            <input type="number" min="0" value={gradeThreePlusCount} readOnly aria-label="Defects scored 3 plus" />
-          </label>
+      <header className="amteam-review-panel-title">
+        <div className="amteam-review-pipe-title" title={assetDirectionLabel}>
+          <select
+            className="amteam-review-pipe-select"
+            aria-label="Select pipe"
+            value={selectedPipeId}
+            onChange={(event) => onSelectPipe(event.currentTarget.value)}
+          >
+            {pipeOptions.map((option) => (
+              <option key={option.pipeId} value={option.pipeId} disabled={option.disabled}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="amteam-review-pipe-info-button"
+            title="Show pipe details"
+            aria-label="Show pipe details"
+            disabled={!selectedPipeId}
+            onClick={onShowPipeInfo}
+          >
+            <FileText size={14} aria-hidden="true" />
+          </button>
+          <strong className="amteam-review-asset-direction">- {inspectionDirectionLabel}</strong>
         </div>
+        <span className="amteam-review-address" title={displayValue(inspection.street)}>{displayValue(inspection.street)}</span>
+      </header>
+      <div className="amteam-review-row">
+        <label className="amteam-review-field amteam-review-count-field">
+          <span>Defects scored 3+</span>
+          <input type="number" min="0" value={gradeThreePlusCount} readOnly aria-label="Defects scored 3 plus" />
+        </label>
+
+        <label className="amteam-review-field amteam-clogging-percent-field">
+          <span>Clogging</span>
+          <div className="amteam-review-number">
+            <input
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              inputMode="numeric"
+              value={reviewInput.cloggingPercent}
+              onChange={(event) => updateCloggingPercent(event.currentTarget.value)}
+            />
+            <em>%</em>
+            <input
+              aria-label="Clogging comment"
+              className="amteam-clogging-comment-input"
+              list="amteam-clogging-comment-options"
+              value={reviewInput.comments}
+              disabled={!hasClogging}
+              placeholder="Select or enter"
+              onChange={(event) => onReviewInputChange({ comments: event.currentTarget.value })}
+            />
+            <datalist id="amteam-clogging-comment-options">
+              {PIPE_REVIEW_PANEL_COMMENT_OPTIONS.map((option) => (
+                <option value={option} key={option} />
+              ))}
+            </datalist>
+          </div>
+        </label>
+
+        {hasClogging ? (
+          <div className={`amteam-clogging-frame ${hasCloggingSnapshot ? 'captured' : 'needs-capture'}`}>
+            <button
+              type="button"
+              className="amteam-clogging-frame-jump"
+              disabled={!hasCloggingSnapshot}
+              title={hasCloggingSnapshot ? 'Go to this video frame' : undefined}
+              onClick={onJumpToCloggingFrame}
+            >
+              <span>Clogging frame</span>
+              <strong>{cloggingSnapshotLabel}</strong>
+            </button>
+            <button
+              type="button"
+              className="amteam-clogging-frame-capture"
+              disabled={!currentVideoFrame}
+              onClick={onCaptureCloggingFrame}
+            >
+              <Camera size={15} />
+              Capture
+            </button>
+          </div>
+        ) : null}
+
         <nav className="amteam-review-nav" aria-label="Pipe review navigation">
+          <button
+            type="button"
+            className="secondary"
+            disabled={!hasPreviousPipe}
+            onClick={onPreviousPipe}
+          >
+            <ChevronLeft size={15} aria-hidden="true" />
+            Previous
+          </button>
           <span>{pipePositionLabel}</span>
-          <button type="button" onClick={onNextPipe}>
-            {hasNextPipe ? 'Next pipe' : 'Generate report'}
+          <button type="button" disabled={!hasNextPipe} onClick={onNextPipe}>
+            Next
             <ChevronRight size={15} aria-hidden="true" />
           </button>
+          <button type="button" className="report" onClick={onGenerateReport}>
+            Generate report
+          </button>
+          <button
+            type="button"
+            className="download-export"
+            disabled={!canDownloadExport}
+            onClick={onDownloadExport}
+          >
+            <Download size={15} aria-hidden="true" />
+            Download
+          </button>
         </nav>
-        {reviewValidationMessage ? <p className="amteam-review-validation-message">{reviewValidationMessage}</p> : null}
       </div>
     </section>
   )
@@ -1948,66 +2059,44 @@ function InspectionDateSelect({
   options,
   selectedDateKey,
   onSelectDate,
+  canShowInspectionInfo,
+  onShowInspectionInfo,
 }: {
   options: InspectionDateOption[]
   selectedDateKey: string
   onSelectDate: (dateKey: string) => void
+  canShowInspectionInfo: boolean
+  onShowInspectionInfo: () => void
 }) {
   return (
-    <label className="amteam-inspection-date-select">
+    <div className="amteam-inspection-date-select">
       <span>Inspection date</span>
-      <select
-        value={selectedDateKey}
-        onChange={(event) => onSelectDate(event.target.value)}
-      >
-        {options.map((option) => {
-          return (
-            <option key={option.key} value={option.key}>
-              {option.label}
-            </option>
-          )
-        })}
-      </select>
-    </label>
-  )
-}
-
-function PipeInspectionGroupCard({
-  group,
-  index,
-  isLocked,
-  isReviewed,
-  selectedPipeId,
-  onSelectPipe,
-}: {
-  group: AmTeamPipeInspectionGroup
-  index: number
-  isLocked: boolean
-  isReviewed: boolean
-  selectedPipeId: string
-  onSelectPipe: (group: AmTeamPipeInspectionGroup) => void
-}) {
-  const pipeId = recordId(group.ml_id)
-  const isSelectedPipe = selectedPipeId === pipeId
-  const cardClasses = [
-    'amteam-pipe-card',
-    isSelectedPipe ? 'selected' : '',
-    isReviewed ? 'reviewed' : '',
-    isLocked ? 'locked' : '',
-  ].filter(Boolean).join(' ')
-  const statusLabel = isSelectedPipe ? 'Current' : isReviewed ? 'Reviewed' : isLocked ? 'Locked' : 'Ready'
-
-  return (
-    <article className={cardClasses}>
-      <button className="amteam-pipe-summary" type="button" disabled={isLocked} onClick={() => onSelectPipe(group)}>
-        <span className="amteam-pipe-nav-index">{String(index + 1).padStart(2, '0')}</span>
-        <span className="amteam-pipe-nav-copy">
-          <strong>{displayValue(group.ml_name)}</strong>
-          <small>{assetIdInfo(group)}</small>
-        </span>
-        <span className="amteam-pipe-nav-status">{statusLabel}</span>
-      </button>
-    </article>
+      <div className="amteam-inspection-date-row">
+        <select
+          aria-label="Inspection date"
+          value={selectedDateKey}
+          onChange={(event) => onSelectDate(event.target.value)}
+        >
+          {options.map((option) => {
+            return (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            )
+          })}
+        </select>
+        <Button
+          type="button"
+          size="icon"
+          title={canShowInspectionInfo ? 'Show inspection details' : 'Select an inspection first'}
+          aria-label="Show inspection details"
+          disabled={!canShowInspectionInfo}
+          onClick={onShowInspectionInfo}
+        >
+          <FileText size={16} />
+        </Button>
+      </div>
+    </div>
   )
 }
 
@@ -2037,20 +2126,9 @@ function pipeSearchCandidates(pipes: AmTeamPipe[]): SearchCandidate[] {
   return candidates.slice(0, 10)
 }
 
-type AMTeamInspectionViewerProps = {
-  pageEyebrow?: string
-  pageTitle?: string
-  pageDescription?: string
-  documentLabel?: string
-}
+type AMTeamInspectionViewerProps = Record<string, never>
 
-export default function AMTeamInspectionViewer({
-  pageEyebrow = 'Proactive Team CCTV',
-  pageTitle = 'CCTV Review Report Workspace',
-  pageDescription = 'Compile pipe inspection details, observation defects, media, and reports for proactive review.',
-  documentLabel = 'CCTV Review Report',
-}: AMTeamInspectionViewerProps = {}) {
-  const summaryStackRef = useRef<HTMLDivElement | null>(null)
+export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps = {}) {
   const [searchTerm, setSearchTerm] = useState('')
   const [lastQuery, setLastQuery] = useState('')
   const [candidatePipes, setCandidatePipes] = useState<AmTeamPipe[]>([])
@@ -2063,21 +2141,42 @@ export default function AMTeamInspectionViewer({
   const [candidateStatus, setCandidateStatus] = useState<LoadStatus>('idle')
   const [candidateMessage, setCandidateMessage] = useState('')
   const [candidateOpen, setCandidateOpen] = useState(false)
+  const [isReviewNavigationCollapsed, setReviewNavigationCollapsed] = useState(false)
   const [pipeStatus, setPipeStatus] = useState<LoadStatus>('idle')
   const [observationStatus, setObservationStatus] = useState<LoadStatus>('idle')
   const [errorMessage, setErrorMessage] = useState('')
-  const [summaryStackHeight, setSummaryStackHeight] = useState(0)
   const [observationDefectSelections, setObservationDefectSelections] = useState<Record<string, ObservationDefectSelection>>({})
   const [pipeReviewInputs, setPipeReviewInputs] = useState<Record<string, PipeReviewInput>>({})
   const [pipeObservationCache, setPipeObservationCache] = useState<Record<string, PipeObservationCacheEntry>>({})
   const [reviewedPipeIds, setReviewedPipeIds] = useState<Record<string, boolean>>({})
   const [distanceGroupValidationFailures, setDistanceGroupValidationFailures] = useState<Record<string, boolean>>({})
-  const [reviewValidationMessage, setReviewValidationMessage] = useState('')
+  const [reviewNotice, setReviewNotice] = useState<ReviewNotice | null>(null)
+  const [generatedReviewReport, setGeneratedReviewReport] = useState<ReviewReportFile | null>(null)
   const [collapsedDistanceGroups, setCollapsedDistanceGroups] = useState<Record<string, boolean>>({})
   const [snapshotSelections, setSnapshotSelections] = useState<Record<string, string>>({})
   const [extensiveDefectSelections, setExtensiveDefectSelections] = useState<Record<string, boolean>>({})
   const [activeVideoFrame, setActiveVideoFrame] = useState<ActiveVideoFrame | null>(null)
   const [videoSeekRequest, setVideoSeekRequest] = useState<VideoSeekRequest | null>(null)
+  const [selectedObservationDetails, setSelectedObservationDetails] = useState<ObservationDetailsSelection | null>(null)
+  const [selectedPipeDetails, setSelectedPipeDetails] = useState<PipeDetailsSelection | null>(null)
+  const [isInspectionDetailsOpen, setInspectionDetailsOpen] = useState(false)
+  const [videoDefectTableWidth, setVideoDefectTableWidth] = useState(VIDEO_DEFECT_TABLE_DEFAULT_WIDTH)
+  const [defectColumnWidths, setDefectColumnWidths] = useState<Record<DefectColumnKey, number>>(DEFAULT_DEFECT_COLUMN_WIDTHS)
+  const documentRef = useRef<HTMLDivElement | null>(null)
+  const reviewNoticeIdRef = useRef(0)
+
+  function showReviewNotice(message: string) {
+    reviewNoticeIdRef.current += 1
+    setReviewNotice({ id: reviewNoticeIdRef.current, message })
+  }
+
+  function clearReviewNotice() {
+    setReviewNotice(null)
+  }
+
+  function clearGeneratedReviewReport() {
+    setGeneratedReviewReport(null)
+  }
 
   function clearInspectionReport() {
     setPipeGroups([])
@@ -2091,15 +2190,27 @@ export default function AMTeamInspectionViewer({
     setPipeObservationCache({})
     setReviewedPipeIds({})
     setDistanceGroupValidationFailures({})
-    setReviewValidationMessage('')
+    clearReviewNotice()
+    clearGeneratedReviewReport()
     setCollapsedDistanceGroups({})
     setSnapshotSelections({})
     setExtensiveDefectSelections({})
     setActiveVideoFrame(null)
     setVideoSeekRequest(null)
+    setSelectedObservationDetails(null)
+    setSelectedPipeDetails(null)
+    setInspectionDetailsOpen(false)
     setPipeStatus('idle')
     setObservationStatus('idle')
   }
+
+  useEffect(() => {
+    if (!reviewNotice) return undefined
+    const timeoutId = window.setTimeout(() => {
+      setReviewNotice((currentNotice) => currentNotice?.id === reviewNotice.id ? null : currentNotice)
+    }, 3000)
+    return () => window.clearTimeout(timeoutId)
+  }, [reviewNotice])
 
   function toggleDistanceGroup(groupKey: string) {
     setCollapsedDistanceGroups((currentGroups) => ({
@@ -2117,13 +2228,53 @@ export default function AMTeamInspectionViewer({
     })
   }
 
-  function toggleMajorDefect(groupKey: string, cardKey: string) {
-    setReviewValidationMessage('')
+  function updateObservationDefectRole(groupKey: string, cardKey: string, role: ObservationDefectRole) {
+    clearReviewNotice()
+    clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
     const pipeId = pipeIdFromScopedKey(groupKey)
     const scopedCardKey = pipeScopedKey(pipeId, cardKey)
+
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
+
+      if (role === 'major') {
+        if (currentGroupSelection.majorKey === cardKey) return currentSelections
+
+        const previousMajorKey = currentGroupSelection.majorKey
+        setExtensiveDefectSelections((currentExtensiveSelections) => {
+          if (!previousMajorKey) return currentExtensiveSelections
+          const nextExtensiveSelections = { ...currentExtensiveSelections }
+          delete nextExtensiveSelections[pipeScopedKey(pipeId, previousMajorKey)]
+          return nextExtensiveSelections
+        })
+
+        return {
+          ...currentSelections,
+          [groupKey]: {
+            majorKey: cardKey,
+            otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
+            amScore: currentGroupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE,
+            defectComment: currentGroupSelection.defectComment || PIPE_REVIEW_COMMENT_OPTIONS[0],
+            noHighScoreConfirmed: false,
+          },
+        }
+      }
+
+      if (role === 'other') {
+        if (!currentGroupSelection.majorKey || currentGroupSelection.majorKey === cardKey) return currentSelections
+        if (currentGroupSelection.otherKeys.includes(cardKey)) return currentSelections
+
+        return {
+          ...currentSelections,
+          [groupKey]: {
+            ...currentGroupSelection,
+            otherKeys: [...currentGroupSelection.otherKeys, cardKey],
+            noHighScoreConfirmed: false,
+          },
+        }
+      }
+
       if (currentGroupSelection.majorKey === cardKey) {
         setExtensiveDefectSelections((currentExtensiveSelections) => {
           const nextExtensiveSelections = { ...currentExtensiveSelections }
@@ -2137,51 +2288,24 @@ export default function AMTeamInspectionViewer({
         }
       }
 
-      setExtensiveDefectSelections((currentExtensiveSelections) => {
-        if (!currentExtensiveSelections[scopedCardKey]) return currentExtensiveSelections
-        const nextExtensiveSelections = { ...currentExtensiveSelections }
-        delete nextExtensiveSelections[scopedCardKey]
-        return nextExtensiveSelections
-      })
-      return {
-        ...currentSelections,
-        [groupKey]: {
-          majorKey: cardKey,
-          otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
-          amScore: DEFAULT_MAJOR_DEFECT_AM_SCORE,
-          defectComment: currentGroupSelection.defectComment || PIPE_REVIEW_COMMENT_OPTIONS[0],
-          noHighScoreConfirmed: false,
-        },
-      }
-    })
-  }
-
-  function toggleOtherDefect(groupKey: string, cardKey: string) {
-    const pipeId = pipeIdFromScopedKey(groupKey)
-    const scopedCardKey = pipeScopedKey(pipeId, cardKey)
-    setObservationDefectSelections((currentSelections) => {
-      const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
-      if (!currentGroupSelection.majorKey) return currentSelections
-      if (currentGroupSelection.majorKey === cardKey) return currentSelections
-
-      const isSelected = currentGroupSelection.otherKeys.includes(cardKey)
-      if (isSelected) {
+      if (currentGroupSelection.otherKeys.includes(cardKey)) {
         setExtensiveDefectSelections((currentExtensiveSelections) => {
           if (!currentExtensiveSelections[scopedCardKey]) return currentExtensiveSelections
           const nextExtensiveSelections = { ...currentExtensiveSelections }
           delete nextExtensiveSelections[scopedCardKey]
           return nextExtensiveSelections
         })
+
+        return {
+          ...currentSelections,
+          [groupKey]: {
+            ...currentGroupSelection,
+            otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
+          },
+        }
       }
-      return {
-        ...currentSelections,
-        [groupKey]: {
-          ...currentGroupSelection,
-          otherKeys: isSelected
-            ? currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey)
-            : [...currentGroupSelection.otherKeys, cardKey],
-        },
-      }
+
+      return currentSelections
     })
   }
 
@@ -2189,7 +2313,8 @@ export default function AMTeamInspectionViewer({
     const nextValue = boundedIntegerInputValue(value, 3, 5)
     if (nextValue === null) return
 
-    setReviewValidationMessage('')
+    clearReviewNotice()
+    clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
@@ -2207,6 +2332,7 @@ export default function AMTeamInspectionViewer({
   }
 
   function updateDistanceGroupDefectComment(groupKey: string, value: string) {
+    clearGeneratedReviewReport()
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
       if (!currentGroupSelection.majorKey) return currentSelections
@@ -2222,6 +2348,7 @@ export default function AMTeamInspectionViewer({
   }
 
   function updateObservationSnapshotSelection(cardKey: string, imageUrl: string) {
+    clearGeneratedReviewReport()
     setSnapshotSelections((currentSelections) => ({
       ...currentSelections,
       [cardKey]: imageUrl,
@@ -2230,6 +2357,7 @@ export default function AMTeamInspectionViewer({
 
   function updatePipeReviewInput(pipeId: string, input: Partial<PipeReviewInput>) {
     if (!pipeId) return
+    clearGeneratedReviewReport()
     setPipeReviewInputs((currentInputs) => ({
       ...currentInputs,
       [pipeId]: {
@@ -2245,7 +2373,7 @@ export default function AMTeamInspectionViewer({
       cloggingSnapshotTimeSeconds: Number(activeVideoFrame.timeSeconds.toFixed(2)),
       cloggingSnapshotVideoPath: activeVideoFrame.videoPath,
     })
-    setReviewValidationMessage('')
+    clearReviewNotice()
   }
 
   function jumpToCloggingFrame() {
@@ -2259,7 +2387,26 @@ export default function AMTeamInspectionViewer({
     })
   }
 
+  function selectedVideoForObservationJump() {
+    const currentVideo = activeVideoFrame
+      ? inspectionMedia.videos.find((video) => video.relative_path === activeVideoFrame.videoPath)
+      : null
+    return currentVideo ?? inspectionMedia.videos[0] ?? null
+  }
+
+  function jumpToObservationFrame(observation: AmTeamObservation) {
+    const video = selectedVideoForObservationJump()
+    const seekSeconds = observationSeekSeconds(observation, video)
+    if (!video || seekSeconds === null) return
+    setVideoSeekRequest({
+      id: Date.now(),
+      videoPath: video.relative_path,
+      timeSeconds: seekSeconds,
+    })
+  }
+
   function toggleObservationExtensive(cardKey: string) {
+    clearGeneratedReviewReport()
     setExtensiveDefectSelections((currentSelections) => ({
       ...currentSelections,
       [cardKey]: !currentSelections[cardKey],
@@ -2267,7 +2414,8 @@ export default function AMTeamInspectionViewer({
   }
 
   function toggleDistanceGroupNoHighScoreConfirmation(groupKey: string) {
-    setReviewValidationMessage('')
+    clearReviewNotice()
+    clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
     const pipeId = pipeIdFromScopedKey(groupKey)
     const currentSelection = observationDefectSelections[groupKey] ?? emptyObservationDefectSelection()
@@ -2300,21 +2448,44 @@ export default function AMTeamInspectionViewer({
   }
 
   function selectPipeDefault(group: AmTeamPipeInspectionGroup) {
+    setSelectedObservationDetails(null)
     setSelectedPipeId(recordId(group.ml_id))
     setSelectedInspection(inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0] ?? null)
   }
 
-  async function selectNextPipe() {
+  function selectPipeById(pipeId: string) {
+    const group = visiblePipeGroups.find((pipeGroup) => recordId(pipeGroup.ml_id) === pipeId)
+    if (!group) return
+    setDistanceGroupValidationFailures({})
+    clearReviewNotice()
+    selectPipeDefault(group)
+  }
+
+  function showSelectedPipeInfo() {
+    const group = visiblePipeGroups.find((pipeGroup) => recordId(pipeGroup.ml_id) === selectedPipeId)
+    if (!group || selectedPipeIndex < 0) return
+    setSelectedPipeDetails({ group, orderNumber: selectedPipeIndex + 1 })
+  }
+
+  function selectPreviousPipe() {
     const currentIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
-    if (currentIndex < 0) return
+    if (currentIndex <= 0) return
+    setDistanceGroupValidationFailures({})
+    clearReviewNotice()
+    selectPipeDefault(visiblePipeGroups[currentIndex - 1])
+  }
+
+  function validateAndMarkCurrentPipeReviewed(blockedActionLabel = 'moving to the next pipe') {
+    const currentIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
+    if (currentIndex < 0) return null
     const currentPipeReviewInput = pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()
     if (pipeReviewHasClogging(currentPipeReviewInput) && !pipeReviewHasCloggingSnapshot(currentPipeReviewInput)) {
-      setReviewValidationMessage(
+      showReviewNotice(
         inspectionMedia.videos.length
-          ? 'Capture the clogging video frame before moving to the next pipe.'
+          ? `Capture the clogging video frame before ${blockedActionLabel}.`
           : 'Clogging percent is greater than 0, but no inspection video is available for the required frame.',
       )
-      return
+      return null
     }
     const missingConfirmationGroups = groupedObservations.filter((group) => {
       const groupSelection = observationDefectSelections[pipeScopedKey(selectedPipeId, group.key)] ?? emptyObservationDefectSelection()
@@ -2327,49 +2498,72 @@ export default function AMTeamInspectionViewer({
         ...currentGroups,
         ...Object.fromEntries(missingConfirmationGroups.map((group) => [pipeScopedKey(selectedPipeId, group.key), false])),
       }))
-      setReviewValidationMessage(
+      showReviewNotice(
         `Confirm no AM score greater or equal to 3 for ${missingConfirmationGroups.length.toLocaleString()} distance ${
           missingConfirmationGroups.length === 1 ? 'group' : 'groups'
-        } before moving to the next pipe.`,
+        } before ${blockedActionLabel}.`,
       )
-      return
+      return null
     }
 
     setDistanceGroupValidationFailures({})
-    setReviewValidationMessage('')
+    clearReviewNotice()
     const nextReviewedPipeIds = selectedPipeId ? { ...reviewedPipeIds, [selectedPipeId]: true } : reviewedPipeIds
     setReviewedPipeIds(nextReviewedPipeIds)
-    const nextGroup = visiblePipeGroups[currentIndex + 1]
-    if (!nextGroup) {
-      const unvalidatedPipeCount = visiblePipeGroups.filter((group) => !nextReviewedPipeIds[recordId(group.ml_id)]).length
-      if (unvalidatedPipeCount > 0) {
-        setReviewValidationMessage(
-          `Validate ${unvalidatedPipeCount.toLocaleString()} remaining ${unvalidatedPipeCount === 1 ? 'pipe' : 'pipes'} before generating the report.`,
-        )
-        return
-      }
-      if (!selectedInspection) return
-      try {
-        await saveReviewReportFile(await buildReviewReportFile({
-          visiblePipeGroups,
-          selectedInspectionDateKey,
-          pipeObservationCache,
-          pipeReviewInputs,
-          observationDefectSelections,
-          snapshotSelections,
-          extensiveDefectSelections,
-          mediaMode: selectedMediaMode,
-        }))
-      } catch (error) {
-        if (error instanceof DOMException && error.name === 'AbortError') return
-        setReviewValidationMessage(error instanceof Error ? error.message : 'Unable to generate report.')
-      }
-      return
-    }
+    return { currentIndex, reviewedPipeIds: nextReviewedPipeIds }
+  }
+
+  function selectNextPipe() {
+    const validation = validateAndMarkCurrentPipeReviewed()
+    if (!validation) return
+    const nextGroup = visiblePipeGroups[validation.currentIndex + 1]
+    if (!nextGroup) return
     selectPipeDefault(nextGroup)
   }
 
+  async function generateReviewReport() {
+    const validation = validateAndMarkCurrentPipeReviewed('generating the report')
+    if (!validation) return
+    const unvalidatedPipeCount = visiblePipeGroups.filter((group) => !validation.reviewedPipeIds[recordId(group.ml_id)]).length
+    if (unvalidatedPipeCount > 0) {
+      showReviewNotice(
+        `Validate ${unvalidatedPipeCount.toLocaleString()} remaining ${unvalidatedPipeCount === 1 ? 'pipe' : 'pipes'} before generating the report.`,
+      )
+      return
+    }
+    if (!selectedInspection) return
+    try {
+      const report = await buildReviewReportFile({
+        visiblePipeGroups,
+        selectedInspectionDateKey,
+        pipeObservationCache,
+        pipeReviewInputs,
+        observationDefectSelections,
+        snapshotSelections,
+        extensiveDefectSelections,
+        mediaMode: selectedMediaMode,
+      })
+      setGeneratedReviewReport(report)
+      await saveReviewReportFile(report)
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to generate report.')
+    }
+  }
+
+  async function downloadGeneratedReviewExport() {
+    if (!generatedReviewReport) return
+    try {
+      await saveReviewReportFile(generatedReviewReport)
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.')
+    }
+  }
+
   function selectInspectionDate(dateKey: string) {
+    setSelectedObservationDetails(null)
+    clearGeneratedReviewReport()
     setSelectedInspectionDateKey(dateKey)
     const visibleGroups = sortPipeGroupsByMli(filterPipeGroupsByDate(pipeGroups, dateKey), dateKey)
     const nextGroup = visibleGroups.find((group) => recordId(group.ml_id) === selectedPipeId) ?? visibleGroups[0]
@@ -2470,7 +2664,7 @@ export default function AMTeamInspectionViewer({
     setObservations([])
     setInspectionMedia(EMPTY_INSPECTION_MEDIA)
     setDistanceGroupValidationFailures({})
-    setReviewValidationMessage('')
+    clearReviewNotice()
     setCollapsedDistanceGroups({})
     setErrorMessage('')
 
@@ -2502,37 +2696,6 @@ export default function AMTeamInspectionViewer({
     }
   }, [selectedInspection])
 
-  useEffect(() => {
-    const node = summaryStackRef.current
-    if (!node) {
-      setSummaryStackHeight(0)
-      return undefined
-    }
-
-    const updateHeight = () => {
-      setSummaryStackHeight(Math.ceil(node.getBoundingClientRect().height))
-    }
-
-    updateHeight()
-    window.addEventListener('resize', updateHeight)
-
-    if (typeof ResizeObserver === 'undefined') {
-      return () => window.removeEventListener('resize', updateHeight)
-    }
-
-    const observer = new ResizeObserver(updateHeight)
-    observer.observe(node)
-
-    return () => {
-      observer.disconnect()
-      window.removeEventListener('resize', updateHeight)
-    }
-  }, [selectedInspection, observationStatus, inspectionMedia.videos.length])
-
-  const defectCountLabel = useMemo(() => {
-    if (observationStatus !== 'ready') return '-'
-    return observations.length.toLocaleString()
-  }, [observationStatus, observations.length])
   const inspectionDateOptions = useMemo(
     () => inspectionDateOptionsFromGroups(pipeGroups),
     [pipeGroups],
@@ -2542,229 +2705,293 @@ export default function AMTeamInspectionViewer({
     [pipeGroups, selectedInspectionDateKey],
   )
   const selectedPipeIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
+  const hasPreviousPipe = selectedPipeIndex > 0
   const hasNextPipe = selectedPipeIndex >= 0 && selectedPipeIndex < visiblePipeGroups.length - 1
   const pipePositionLabel = selectedPipeIndex >= 0
     ? `Pipe ${selectedPipeIndex + 1} of ${visiblePipeGroups.length}`
     : 'No pipe selected'
+  const pipeReviewOptions = useMemo<PipeReviewOption[]>(() => {
+    let hasUnreviewedPreviousPipe = false
+    return visiblePipeGroups.map((group) => {
+      const pipeId = recordId(group.ml_id)
+      const spanLabel = assetIdInfo(group)
+      const label = spanLabel === '-' ? `[${displayValue(group.ml_name)}]` : `[${displayValue(group.ml_name)}] ${spanLabel}`
+      const option = {
+        pipeId,
+        label,
+        disabled: pipeId !== selectedPipeId && hasUnreviewedPreviousPipe,
+      }
+      if (!reviewedPipeIds[pipeId]) {
+        hasUnreviewedPreviousPipe = true
+      }
+      return option
+    })
+  }, [reviewedPipeIds, selectedPipeId, visiblePipeGroups])
   const groupedObservations = useMemo(() => observationDistanceGroups(observations), [observations])
   const gradeThreePlusCount = useMemo(
     () => pipeGradeThreePlusCount(selectedPipeId, groupedObservations, observationDefectSelections),
     [groupedObservations, observationDefectSelections, selectedPipeId],
   )
-  const totalInspectionCount = useMemo(
-    () => visiblePipeGroups.reduce((sum, group) => {
-      if (!selectedInspectionDateKey) return sum + group.inspections.length
-      const selectedDateKeys = new Set(inspectionDateKeysFromOption(selectedInspectionDateKey))
-      return sum + group.inspections.filter((inspection) => selectedDateKeys.has(inspectionDateKey(inspection.inspection_date))).length
-    }, 0),
-    [selectedInspectionDateKey, visiblePipeGroups],
-  )
   const candidates = useMemo(() => pipeSearchCandidates(candidatePipes), [candidatePipes])
   const showCandidateList = candidateOpen && searchTerm.trim().length >= 2
   const selectedMediaMode = useMemo<MediaSourceMode>(() => mediaSourceMode(), [])
-  const summaryGridStyle = useMemo(() => {
-    if (observationStatus !== 'ready' || inspectionMedia.videos.length === 0 || summaryStackHeight <= 0) return undefined
-    return { '--amteam-summary-height': `${summaryStackHeight}px` } as CSSProperties
-  }, [inspectionMedia.videos.length, observationStatus, summaryStackHeight])
+  const hasVideoDefectLayout = Boolean(selectedInspection && observationStatus === 'ready' && inspectionMedia.videos.length && groupedObservations.length)
+  const videoDefectLayoutStyle = hasVideoDefectLayout
+    ? ({ '--amteam-defect-table-pane-width': `${videoDefectTableWidth}px` } as CSSProperties)
+    : undefined
+  const defectColumnTemplate = useMemo(
+    () => DEFECT_COLUMN_KEYS
+      .map((key) => `minmax(${MIN_DEFECT_COLUMN_WIDTHS[key]}px, ${defectColumnWidths[key]}fr)`)
+      .join(' '),
+    [defectColumnWidths],
+  )
+  const defectTreelistStyle = { '--amteam-defect-columns': defectColumnTemplate } as CSSProperties
+  const maxVideoDefectTableWidth = () => {
+    const documentWidth = documentRef.current?.getBoundingClientRect().width ?? (VIDEO_DEFECT_MIN_WIDTH + VIDEO_DEFECT_TABLE_DEFAULT_WIDTH + VIDEO_DEFECT_SPLITTER_WIDTH)
+    return Math.max(
+      VIDEO_DEFECT_TABLE_MIN_WIDTH,
+      documentWidth - VIDEO_DEFECT_MIN_WIDTH - VIDEO_DEFECT_SPLITTER_WIDTH,
+    )
+  }
+  const boundedVideoDefectTableWidth = (value: number) => Math.min(Math.max(value, VIDEO_DEFECT_TABLE_MIN_WIDTH), maxVideoDefectTableWidth())
+  const startVideoDefectResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (!documentRef.current) return
+    event.preventDefault()
+    const documentRight = documentRef.current.getBoundingClientRect().right
+    setVideoDefectTableWidth(boundedVideoDefectTableWidth(documentRight - event.clientX - VIDEO_DEFECT_SPLITTER_WIDTH))
+
+    const moveResize = (moveEvent: PointerEvent) => {
+      setVideoDefectTableWidth(boundedVideoDefectTableWidth(documentRight - moveEvent.clientX - VIDEO_DEFECT_SPLITTER_WIDTH))
+    }
+    const stopResize = () => {
+      window.removeEventListener('pointermove', moveResize)
+      window.removeEventListener('pointerup', stopResize)
+      window.removeEventListener('pointercancel', stopResize)
+    }
+
+    window.addEventListener('pointermove', moveResize)
+    window.addEventListener('pointerup', stopResize)
+    window.addEventListener('pointercancel', stopResize)
+  }
+  const adjustVideoDefectWidth = (delta: number) => {
+    setVideoDefectTableWidth((currentWidth) => boundedVideoDefectTableWidth(currentWidth + delta))
+  }
+  const boundedDefectColumnWidth = (key: DefectColumnKey, value: number) => Math.max(MIN_DEFECT_COLUMN_WIDTHS[key], Math.round(value))
+  const setDefectColumnWidth = (key: DefectColumnKey, value: number) => {
+    setDefectColumnWidths((currentWidths) => ({
+      ...currentWidths,
+      [key]: boundedDefectColumnWidth(key, value),
+    }))
+  }
+  const adjustDefectColumnWidth = (key: DefectColumnKey, delta: number) => {
+    setDefectColumnWidths((currentWidths) => ({
+      ...currentWidths,
+      [key]: boundedDefectColumnWidth(key, currentWidths[key] + delta),
+    }))
+  }
+  const startDefectColumnResize = (event: ReactPointerEvent<HTMLButtonElement>, key: DefectColumnKey) => {
+    event.preventDefault()
+    event.stopPropagation()
+    const startX = event.clientX
+    const startWidth = defectColumnWidths[key]
+
+    const moveResize = (moveEvent: PointerEvent) => {
+      setDefectColumnWidth(key, startWidth + moveEvent.clientX - startX)
+    }
+    const stopResize = () => {
+      window.removeEventListener('pointermove', moveResize)
+      window.removeEventListener('pointerup', stopResize)
+      window.removeEventListener('pointercancel', stopResize)
+    }
+
+    window.addEventListener('pointermove', moveResize)
+    window.addEventListener('pointerup', stopResize)
+    window.addEventListener('pointercancel', stopResize)
+  }
+  const defectColumnResizer = (key: DefectColumnKey, label: string) => (
+    <button
+      type="button"
+      className="amteam-defect-column-resizer"
+      aria-label={`Resize ${label} column`}
+      onPointerDown={(event) => startDefectColumnResize(event, key)}
+      onKeyDown={(event) => {
+        if (event.key === 'ArrowLeft') {
+          event.preventDefault()
+          adjustDefectColumnWidth(key, -12)
+        }
+        if (event.key === 'ArrowRight') {
+          event.preventDefault()
+          adjustDefectColumnWidth(key, 12)
+        }
+        if (event.key === 'Home') {
+          event.preventDefault()
+          setDefectColumnWidth(key, MIN_DEFECT_COLUMN_WIDTHS[key])
+        }
+      }}
+    >
+      <span aria-hidden="true" />
+    </button>
+  )
+  const toggleReviewNavigation = () => {
+    setReviewNavigationCollapsed((current) => {
+      if (!current) setCandidateOpen(false)
+      return !current
+    })
+  }
 
   return (
     <main className="amteam-page">
-      <header className="amteam-header">
-        <div className="amteam-title-copy">
-          <span>{pageEyebrow}</span>
-          <h1>{pageTitle}</h1>
-          <p>{pageDescription}</p>
-        </div>
-      </header>
+      <section className={`amteam-workspace ${isReviewNavigationCollapsed ? 'navigation-collapsed' : ''}`}>
+        <aside className={`amteam-sidebar ${isReviewNavigationCollapsed ? 'collapsed' : ''}`}>
+          <section className="amteam-navigation-panel" aria-label="Review navigation">
+            <header className="amteam-navigation-panel-header">
+              {!isReviewNavigationCollapsed ? (
+                <div>
+                  <span>Review navigation</span>
+                </div>
+              ) : null}
+              <button
+                type="button"
+                aria-expanded={!isReviewNavigationCollapsed}
+                aria-label={isReviewNavigationCollapsed ? 'Expand review navigation' : 'Collapse review navigation'}
+                title={isReviewNavigationCollapsed ? 'Expand review navigation' : 'Collapse review navigation'}
+                onClick={toggleReviewNavigation}
+              >
+                {isReviewNavigationCollapsed ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+              </button>
+            </header>
 
-      <section className="amteam-workspace">
-        <aside className="amteam-sidebar">
-          <form className="amteam-search" onSubmit={handleSearch}>
-            <label htmlFor="amteam-search-input">Search</label>
-            <div className="amteam-search-row">
-              <Search size={18} />
-              <Input
-                id="amteam-search-input"
-                type="search"
-                value={searchTerm}
-                placeholder="Address or project title"
-                onBlur={() => window.setTimeout(() => setCandidateOpen(false), 120)}
-                onChange={(event) => {
-                  setSearchTerm(event.target.value)
-                  setCandidateOpen(true)
-                }}
-                onFocus={() => setCandidateOpen(true)}
-              />
-              <Button type="submit" size="icon" title="Search">
-                <Search size={17} />
-              </Button>
-            </div>
-          </form>
-
-          {showCandidateList ? (
-            <div className="amteam-candidate-list">
-              {candidateStatus === 'loading' ? (
-                <div className="amteam-candidate-note">
-                  <Loader2 size={16} className="spin" />
-                  <span>Finding candidates</span>
-                </div>
-              ) : null}
-              {candidateStatus === 'error' ? (
-                <div className="amteam-candidate-note error">
-                  <AlertCircle size={16} />
-                  <span>{candidateMessage}</span>
-                </div>
-              ) : null}
-              {candidateStatus === 'ready' && candidates.length === 0 ? (
-                <div className="amteam-candidate-note">
-                  <AlertCircle size={16} />
-                  <span>No candidate titles or addresses found</span>
-                </div>
-              ) : null}
-              {candidates.map((candidate) => (
-                <button
-                  key={candidate.key}
-                  type="button"
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => chooseCandidate(candidate)}
-                >
-                  <span>{candidate.kind === 'ProjectTitle' ? 'Project' : 'Address'}</span>
-                  <div>
-                    <strong>{candidate.value}</strong>
-                    {candidate.detail ? <small>{candidate.detail}</small> : null}
+            {!isReviewNavigationCollapsed ? (
+              <div className="amteam-navigation-panel-body">
+                <form className="amteam-search" onSubmit={handleSearch}>
+                  <label htmlFor="amteam-search-input">Search</label>
+                  <div className="amteam-search-row">
+                    <Search size={18} />
+                    <Input
+                      id="amteam-search-input"
+                      type="search"
+                      value={searchTerm}
+                      placeholder="Address or project title"
+                      onBlur={() => window.setTimeout(() => setCandidateOpen(false), 120)}
+                      onChange={(event) => {
+                        setSearchTerm(event.target.value)
+                        setCandidateOpen(true)
+                      }}
+                      onFocus={() => setCandidateOpen(true)}
+                    />
+                    <Button type="submit" size="icon" title="Search">
+                      <Search size={17} />
+                    </Button>
                   </div>
-                </button>
-              ))}
-            </div>
-          ) : null}
+                </form>
 
-          {inspectionDateOptions.length > 0 ? (
-            <section className="amteam-inspection-filter">
-              <InspectionDateSelect
-                options={inspectionDateOptions}
-                selectedDateKey={selectedInspectionDateKey}
-                onSelectDate={selectInspectionDate}
-              />
-            </section>
-          ) : null}
+                {showCandidateList ? (
+                  <div className="amteam-candidate-list">
+                    {candidateStatus === 'loading' ? (
+                      <div className="amteam-candidate-note">
+                        <Loader2 size={16} className="spin" />
+                        <span>Finding candidates</span>
+                      </div>
+                    ) : null}
+                    {candidateStatus === 'error' ? (
+                      <div className="amteam-candidate-note error">
+                        <AlertCircle size={16} />
+                        <span>{candidateMessage}</span>
+                      </div>
+                    ) : null}
+                    {candidateStatus === 'ready' && candidates.length === 0 ? (
+                      <div className="amteam-candidate-note">
+                        <AlertCircle size={16} />
+                        <span>No candidate titles or addresses found</span>
+                      </div>
+                    ) : null}
+                    {candidates.map((candidate) => (
+                      <button
+                        key={candidate.key}
+                        type="button"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => chooseCandidate(candidate)}
+                      >
+                        <span>{candidate.kind === 'ProjectTitle' ? 'Project' : 'Address'}</span>
+                        <div>
+                          <strong>{candidate.value}</strong>
+                          {candidate.detail ? <small>{candidate.detail}</small> : null}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
 
-          <section className="amteam-panel">
-            <div className="amteam-panel-heading">
-              <ClipboardList size={18} />
-              <h2>Pipes</h2>
-              <span>{visiblePipeGroups.length.toLocaleString()}</span>
-            </div>
+                {pipeStatus === 'idle' ? <StatusMessage icon="empty" message="Enter a project title or address." /> : null}
+                {pipeStatus === 'loading' ? <StatusMessage icon="loading" message="Loading pipes and inspections." /> : null}
+                {pipeStatus === 'error' ? <StatusMessage icon="error" tone="error" message={errorMessage} /> : null}
+                {pipeStatus === 'ready' && visiblePipeGroups.length === 0 ? (
+                  <StatusMessage icon="empty" message={`No exact pipe matches found for ${lastQuery}.`} />
+                ) : null}
 
-            {pipeStatus === 'idle' ? <StatusMessage icon="empty" message="Enter a project title or address." /> : null}
-            {pipeStatus === 'loading' ? <StatusMessage icon="loading" message="Loading pipes and inspections." /> : null}
-            {pipeStatus === 'error' ? <StatusMessage icon="error" tone="error" message={errorMessage} /> : null}
-            {pipeStatus === 'ready' && visiblePipeGroups.length === 0 ? (
-              <StatusMessage icon="empty" message={`No exact pipe matches found for ${lastQuery}.`} />
-            ) : null}
-            {pipeStatus === 'ready' && visiblePipeGroups.length > 0 ? (
-              <div className="amteam-panel-meta">
-                {totalInspectionCount.toLocaleString()} inspections across {visiblePipeGroups.length.toLocaleString()}{' '}
-                {visiblePipeGroups.length === 1 ? 'pipe' : 'pipes'}
+                {inspectionDateOptions.length > 0 ? (
+                  <section className="amteam-inspection-filter">
+                    <InspectionDateSelect
+                      options={inspectionDateOptions}
+                      selectedDateKey={selectedInspectionDateKey}
+                      onSelectDate={selectInspectionDate}
+                      canShowInspectionInfo={Boolean(selectedInspection)}
+                      onShowInspectionInfo={() => setInspectionDetailsOpen(true)}
+                    />
+                  </section>
+                ) : null}
               </div>
-            ) : null}
-
-            <div className="amteam-pipe-list">
-              {visiblePipeGroups.map((group, index) => {
-                const pipeId = recordId(group.ml_id)
-                const isReviewed = Boolean(reviewedPipeIds[pipeId])
-                const isLocked = visiblePipeGroups
-                  .slice(0, index)
-                  .some((previousGroup) => !reviewedPipeIds[recordId(previousGroup.ml_id)])
-
-                return (
-                  <PipeInspectionGroupCard
-                    key={pipeId || `${recordId(group.project_title)}-${index}`}
-                    group={group}
-                    index={index}
-                    isLocked={isLocked}
-                    isReviewed={isReviewed}
-                    selectedPipeId={selectedPipeId}
-                    onSelectPipe={selectPipeDefault}
-                  />
-                )
-              })}
-            </div>
+            ) : (
+              <button
+                type="button"
+                className="amteam-navigation-panel-rail"
+                aria-label="Expand review navigation"
+                onClick={toggleReviewNavigation}
+              >
+                <Search size={17} />
+                <span>Search</span>
+                <strong>{visiblePipeGroups.length.toLocaleString()}</strong>
+              </button>
+            )}
           </section>
         </aside>
 
         <section className="amteam-document-shell">
-          <div className="amteam-document">
-            <div className="amteam-document-title">
-              <div>
-                <span>{documentLabel}</span>
-                <h2>{selectedInspection ? displayValue(selectedInspection.street) : 'No inspection selected'}</h2>
-              </div>
-              <div className="amteam-document-stat">
-                <strong>{defectCountLabel}</strong>
-                <span>Graded defects</span>
-              </div>
-            </div>
-
+          <div
+            className={[
+              'amteam-document',
+              hasVideoDefectLayout ? 'with-video-defect-row' : '',
+            ].filter(Boolean).join(' ')}
+            ref={documentRef}
+            style={videoDefectLayoutStyle}
+          >
             {selectedInspection ? (
               <section
                 className={`amteam-summary-grid ${observationStatus === 'ready' && inspectionMedia.videos.length ? 'with-video' : ''}`}
-                style={summaryGridStyle}
               >
-                <div className="amteam-summary-stack" ref={summaryStackRef}>
-                  {observationStatus === 'ready' ? (
-                    <PipeDefectReviewPanel
-                      inspection={selectedInspection}
-                      gradeThreePlusCount={gradeThreePlusCount}
-                      reviewInput={pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()}
-                      currentVideoFrame={activeVideoFrame}
-                      pipePositionLabel={pipePositionLabel}
-                      hasNextPipe={hasNextPipe}
-                      reviewValidationMessage={reviewValidationMessage}
-                      onReviewInputChange={(input) => updatePipeReviewInput(selectedPipeId, input)}
-                      onCaptureCloggingFrame={captureCloggingFrame}
-                      onJumpToCloggingFrame={jumpToCloggingFrame}
-                      onNextPipe={selectNextPipe}
-                    />
-                  ) : null}
-
-                  <div className="amteam-summary-card">
-                    <div className="amteam-summary-card-header">
-                      <h3>Pipe</h3>
-                    </div>
-                    {fieldList([
-                      ['ML ID', selectedInspection.ml_id],
-                      ['ML Name', selectedInspection.ml_name],
-                      ['Project', selectedInspection.project_title],
-                      ['Street', selectedInspection.street],
-                      ['US MH', selectedInspection.us_mh],
-                      ['DS MH', selectedInspection.ds_mh],
-                      ['Material', selectedInspection.material],
-                      ['Shape', selectedInspection.pipe_shape],
-                      ['Height', selectedInspection.pipe_height],
-                    ])}
-                  </div>
-
-                  <div className="amteam-summary-card">
-                    <div className="amteam-summary-card-header">
-                      <h3>Inspection</h3>
-                      <ReportDownloadButton
-                        mediaMode={selectedMediaMode}
-                        mediaRoot={inspectionMedia.media_root}
-                        reports={inspectionMedia.reports}
-                      />
-                    </div>
-                    {fieldList([
-                      ['MLI ID', selectedInspection.mli_id],
-                      ['Date', compactDate(selectedInspection.inspection_date)],
-                      ['Operator', selectedInspection.operator],
-                      ['Reason', selectedInspection.reason_of_inspection],
-                      ['Direction', selectedInspection.inspection_direction],
-                      ['Length', selectedInspection.inspection_length],
-                      ['Status', selectedInspection.inspection_status],
-                      ['Current', selectedInspection.current_status],
-                    ])}
-                  </div>
-                </div>
+                {observationStatus === 'ready' ? (
+                  <PipeDefectReviewPanel
+                    inspection={selectedInspection}
+                    pipeOptions={pipeReviewOptions}
+                    selectedPipeId={selectedPipeId}
+                    gradeThreePlusCount={gradeThreePlusCount}
+                    reviewInput={pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()}
+                    currentVideoFrame={activeVideoFrame}
+                    pipePositionLabel={pipePositionLabel}
+                    hasPreviousPipe={hasPreviousPipe}
+                    hasNextPipe={hasNextPipe}
+                    onReviewInputChange={(input) => updatePipeReviewInput(selectedPipeId, input)}
+                    onCaptureCloggingFrame={captureCloggingFrame}
+                    onJumpToCloggingFrame={jumpToCloggingFrame}
+                    onPreviousPipe={selectPreviousPipe}
+                    onSelectPipe={selectPipeById}
+                    onShowPipeInfo={showSelectedPipeInfo}
+                    onNextPipe={selectNextPipe}
+                    onGenerateReport={generateReviewReport}
+                    canDownloadExport={Boolean(generatedReviewReport)}
+                    onDownloadExport={downloadGeneratedReviewExport}
+                  />
+                ) : null}
 
                 {observationStatus === 'ready' ? (
                   <InspectionVideoPlayer
@@ -2789,8 +3016,70 @@ export default function AMTeamInspectionViewer({
               <StatusMessage icon="empty" message="No graded defect observations found." />
             ) : null}
 
+            {hasVideoDefectLayout ? (
+              <button
+                type="button"
+                className="amteam-video-defect-splitter"
+                aria-label="Resize inspection video and defect table"
+                aria-orientation="vertical"
+                onPointerDown={startVideoDefectResize}
+                onKeyDown={(event) => {
+                  if (event.key === 'ArrowLeft') {
+                    event.preventDefault()
+                    adjustVideoDefectWidth(24)
+                  }
+                  if (event.key === 'ArrowRight') {
+                    event.preventDefault()
+                    adjustVideoDefectWidth(-24)
+                  }
+                  if (event.key === 'Home') {
+                    event.preventDefault()
+                    setVideoDefectTableWidth(VIDEO_DEFECT_TABLE_MIN_WIDTH)
+                  }
+                  if (event.key === 'End') {
+                    event.preventDefault()
+                    setVideoDefectTableWidth(maxVideoDefectTableWidth())
+                  }
+                }}
+              >
+                <span aria-hidden="true" />
+              </button>
+            ) : null}
+
             {groupedObservations.length ? (
-              <section className="amteam-observation-list">
+              <section
+                className="amteam-observation-list amteam-defect-treelist"
+                role="tree"
+                aria-label="Defect observations by distance"
+                style={defectTreelistStyle}
+              >
+                <div className="amteam-defect-treelist-header" role="presentation">
+                  <span className="amteam-defect-header-cell observation">
+                    <span className="amteam-defect-header-full">Observation</span>
+                    <span className="amteam-defect-header-abbr">Obs.</span>
+                    {defectColumnResizer('observation', 'Observation')}
+                  </span>
+                  <span className="amteam-defect-header-cell defect">
+                    <span className="amteam-defect-header-full">Defect</span>
+                    <span className="amteam-defect-header-abbr">Def.</span>
+                    {defectColumnResizer('defect', 'Defect')}
+                  </span>
+                  <span className="amteam-defect-header-cell review">
+                    <span className="amteam-defect-header-full">Review</span>
+                    <span className="amteam-defect-header-abbr">Rev.</span>
+                    {defectColumnResizer('review', 'Review')}
+                  </span>
+                  <span className="amteam-defect-header-cell extensive">
+                    <span className="amteam-defect-header-full">Extensive</span>
+                    <span className="amteam-defect-header-abbr">Ext.</span>
+                    {defectColumnResizer('extensive', 'Extensive')}
+                  </span>
+                  <span className="amteam-defect-header-cell snapshot">
+                    <span className="amteam-defect-header-full">Snapshot</span>
+                    <span className="amteam-defect-header-abbr">Snap.</span>
+                    {defectColumnResizer('snapshot', 'Snapshot')}
+                  </span>
+                </div>
                 {groupedObservations.map((group, groupIndex) => {
                   const previousObservationCount = groupedObservations
                     .slice(0, groupIndex)
@@ -2804,8 +3093,6 @@ export default function AMTeamInspectionViewer({
                     observationNumber: previousObservationCount + index + 1,
                   }))
                   const majorObservationEntry = observationEntries.find((entry) => entry.cardKey === groupSelection.majorKey)
-                  const otherObservationEntries = observationEntries.filter((entry) => groupSelection.otherKeys.includes(entry.cardKey))
-                  const distanceGroupAmScore = groupSelection.majorKey ? groupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE : ''
                   const hasDistanceGroupHighAmScore = distanceGroupHasHighAmScore(groupSelection)
                   const isNoHighScoreConfirmed = groupSelection.noHighScoreConfirmed
                   const hasDistanceGroupValidationFailure = Boolean(distanceGroupValidationFailures[scopedGroupKey])
@@ -2816,143 +3103,204 @@ export default function AMTeamInspectionViewer({
                   ].filter(Boolean).join(' ')
 
                   return (
-                    <section
-                      className={[
-                        'amteam-observation-distance-group',
-                        isGroupCollapsed ? 'collapsed' : '',
-                        hasDistanceGroupValidationFailure ? 'needs-review' : '',
-                      ].filter(Boolean).join(' ')}
-                      key={group.key}
-                    >
-                      <header>
-                        <button
-                          type="button"
-                          className="amteam-observation-distance-toggle"
-                          aria-expanded={!isGroupCollapsed}
-                          onClick={() => toggleDistanceGroup(scopedGroupKey)}
-                        >
-                          {isGroupCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
-                          <span>Distance</span>
-                          <strong>{group.label}</strong>
-                          {distanceGroupAmScore ? (
-                            <span className="amteam-distance-score-badge">AM Score {distanceGroupAmScore}</span>
-                          ) : null}
-                        </button>
-                        <div className="amteam-observation-distance-actions">
+                    <div className="amteam-defect-treelist-branch" key={group.key}>
+                      <div
+                        className={[
+                          'amteam-defect-row',
+                          'amteam-defect-distance-row',
+                          isGroupCollapsed ? 'collapsed' : '',
+                          hasDistanceGroupValidationFailure ? 'needs-review' : '',
+                        ].filter(Boolean).join(' ')}
+                        role="treeitem"
+                        aria-expanded={!isGroupCollapsed}
+                      >
+                        <div className="amteam-defect-cell amteam-defect-tree-cell">
                           <button
                             type="button"
-                            className={distanceConfirmClasses}
-                            disabled={hasDistanceGroupHighAmScore}
-                            onClick={() => toggleDistanceGroupNoHighScoreConfirmation(scopedGroupKey)}
+                            className="amteam-defect-tree-toggle"
+                            aria-expanded={!isGroupCollapsed}
+                            onClick={() => toggleDistanceGroup(scopedGroupKey)}
                           >
-                            {hasDistanceGroupHighAmScore
-                              ? 'AM score greater or equal to 3 selected'
-                              : isNoHighScoreConfirmed
-                                ? 'No AM score greater or equal to 3 confirmed'
-                                : 'Confirm no AM score greater or equal to 3'}
+                            {isGroupCollapsed ? <ChevronRight size={15} /> : <ChevronDown size={15} />}
+                            <strong>{group.label}</strong>
                           </button>
-                          <small>
-                            {group.observations.length.toLocaleString()} {group.observations.length === 1 ? 'observation' : 'observations'}
-                          </small>
                         </div>
-                      </header>
+
+                        <div className="amteam-defect-cell amteam-defect-distance-defect-cell">
+                          <div className="amteam-defect-review-controls">
+                            <label className="amteam-tree-review-control amteam-tree-am-score-control">
+                              <span>AM Score</span>
+                              <input
+                                type="number"
+                                min="3"
+                                max="5"
+                                step="1"
+                                inputMode="numeric"
+                                disabled={!majorObservationEntry}
+                                value={majorObservationEntry ? groupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE : ''}
+                                onChange={(event) => updateDistanceGroupAmScore(scopedGroupKey, event.currentTarget.value)}
+                              />
+                            </label>
+                            <label className="amteam-tree-review-control">
+                              <input
+                                aria-label="Defect comment"
+                                list="amteam-defect-comment-options"
+                                disabled={!majorObservationEntry}
+                                placeholder="Select or enter"
+                                value={majorObservationEntry ? groupSelection.defectComment : ''}
+                                onChange={(event) => updateDistanceGroupDefectComment(scopedGroupKey, event.currentTarget.value)}
+                              />
+                            </label>
+                          </div>
+                        </div>
+
+                        <div className="amteam-defect-cell amteam-defect-distance-review-cell">
+                          <div className="amteam-distance-review-status">
+                            <button
+                              type="button"
+                              className={distanceConfirmClasses}
+                              disabled={hasDistanceGroupHighAmScore}
+                              title={
+                                hasDistanceGroupHighAmScore
+                                  ? 'AM score greater or equal to 3 selected'
+                                  : isNoHighScoreConfirmed
+                                    ? 'No AM score greater or equal to 3 confirmed'
+                                    : 'Confirm no AM score greater or equal to 3'
+                              }
+                              onClick={() => toggleDistanceGroupNoHighScoreConfirmation(scopedGroupKey)}
+                            >
+                              {hasDistanceGroupHighAmScore
+                                ? 'Scored 3+'
+                                : isNoHighScoreConfirmed
+                                  ? 'Confirmed'
+                                  : 'Confirm none'}
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="amteam-defect-cell amteam-defect-distance-extensive-cell" aria-hidden="true" />
+
+                        <div className="amteam-defect-cell amteam-defect-distance-snapshot-cell">
+                          {majorObservationEntry ? (
+                            <ObservationImage
+                              mediaMode={selectedMediaMode}
+                              mediaRoot={inspectionMedia.media_root}
+                              observation={majorObservationEntry.observation}
+                              selectedUrl={snapshotSelections[pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey)]}
+                              onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey), imageUrl)}
+                            />
+                          ) : (
+                            <span>Select major</span>
+                          )}
+                        </div>
+                      </div>
 
                       {!isGroupCollapsed ? (
-                        <div className="amteam-observation-distance-cards">
-                          <MajorDefectPreviewCard
-                            entry={majorObservationEntry}
-                            otherEntries={otherObservationEntries}
-                            selection={groupSelection}
-                            mediaMode={selectedMediaMode}
-                            mediaRoot={inspectionMedia.media_root}
-                            selectedUrl={majorObservationEntry ? snapshotSelections[pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey)] : undefined}
-                            onAmScoreChange={(value) => updateDistanceGroupAmScore(scopedGroupKey, value)}
-                            onDefectCommentChange={(value) => updateDistanceGroupDefectComment(scopedGroupKey, value)}
-                            onSelectedUrlChange={(imageUrl) => {
-                              if (majorObservationEntry) updateObservationSnapshotSelection(pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey), imageUrl)
-                            }}
-                          />
-                        {observationEntries.map(({ observation, cardKey, observationNumber }) => {
-                          const scopedCardKey = pipeScopedKey(selectedPipeId, cardKey)
-                          const groupHasMajorDefect = Boolean(groupSelection.majorKey)
-                          const isMajorDefect = groupSelection.majorKey === cardKey
-                          const isOtherDefect = groupSelection.otherKeys.includes(cardKey)
-                          const canMarkExtensive = isMajorDefect || isOtherDefect
-                          const isExtensiveDefect = canMarkExtensive && Boolean(extensiveDefectSelections[scopedCardKey])
-                          const cardClasses = [
-                            'amteam-observation',
-                            isMajorDefect ? 'major-defect' : '',
-                            isOtherDefect ? 'other-defect' : '',
-                            isExtensiveDefect ? 'extensive-defect' : '',
-                          ].filter(Boolean).join(' ')
+                        <div className="amteam-defect-child-rows" role="group">
+                          {observationEntries.map(({ observation, cardKey, observationNumber }) => {
+                            const scopedCardKey = pipeScopedKey(selectedPipeId, cardKey)
+                            const groupHasMajorDefect = Boolean(groupSelection.majorKey)
+                            const isMajorDefect = groupSelection.majorKey === cardKey
+                            const isOtherDefect = groupSelection.otherKeys.includes(cardKey)
+                            const defectRole: ObservationDefectRole = isMajorDefect ? 'major' : isOtherDefect ? 'other' : ''
+                            const canMarkExtensive = isMajorDefect || isOtherDefect
+                            const isExtensiveDefect = canMarkExtensive && Boolean(extensiveDefectSelections[scopedCardKey])
+                            const observationSeekVideo = selectedVideoForObservationJump()
+                            const observationSeekTime = observationSeekSeconds(observation, observationSeekVideo)
+                            const canJumpToObservationFrame = observationSeekTime !== null
+                            const rowClasses = [
+                              'amteam-defect-row',
+                              'amteam-defect-observation-row',
+                              canJumpToObservationFrame ? 'has-video-frame' : '',
+                              isMajorDefect ? 'major-defect' : '',
+                              isOtherDefect ? 'other-defect' : '',
+                              isExtensiveDefect ? 'extensive-defect' : '',
+                            ].filter(Boolean).join(' ')
 
-                          return (
-                            <article className={cardClasses} key={cardKey}>
-                              <header>
-                                <div>
-                                  <span>Observation {observationNumber}</span>
-                                  <h3>{displayValue(observation.code)}</h3>
+                            return (
+                              <article
+                                className={rowClasses}
+                                key={cardKey}
+                                role="treeitem"
+                                tabIndex={canJumpToObservationFrame ? 0 : undefined}
+                                title={canJumpToObservationFrame ? `Jump video to ${formatMediaTime(observationSeekTime ?? 0)}` : undefined}
+                                onClick={(event) => {
+                                  if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
+                                  jumpToObservationFrame(observation)
+                                }}
+                                onKeyDown={(event) => {
+                                  if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
+                                  if (event.key === 'Enter' || event.key === ' ') {
+                                    event.preventDefault()
+                                    jumpToObservationFrame(observation)
+                                  }
+                                }}
+                              >
+                                <div className="amteam-defect-cell amteam-defect-tree-cell child">
+                                  <button
+                                    type="button"
+                                    className="amteam-defect-mlo-button"
+                                    title="Show observation details"
+                                    onClick={() => setSelectedObservationDetails({ observation })}
+                                  >
+                                    {displayValue(observation.mlo_id)}
+                                  </button>
                                 </div>
-                                <div className="amteam-observation-header-actions">
-                                  <strong>Grade {displayValue(observation.grade)}</strong>
-                                  <div className="amteam-observation-defect-controls" aria-label={`Observation ${observationNumber} defect role`}>
-                                    <label className={isMajorDefect ? 'selected' : ''}>
-                                      <input
-                                        type="checkbox"
-                                        checked={isMajorDefect}
-                                        onChange={() => toggleMajorDefect(scopedGroupKey, cardKey)}
-                                      />
-                                      <span>Major</span>
-                                    </label>
-                                    <label className={isOtherDefect ? 'selected' : !groupHasMajorDefect || isMajorDefect ? 'disabled' : ''}>
-                                      <input
-                                        type="checkbox"
-                                        checked={isOtherDefect}
-                                        disabled={!groupHasMajorDefect || isMajorDefect}
-                                        onChange={() => toggleOtherDefect(scopedGroupKey, cardKey)}
-                                      />
-                                      <span>Other</span>
-                                    </label>
-                                    <label className={isExtensiveDefect ? 'selected' : 'disabled'}>
-                                      <input
-                                        type="checkbox"
-                                        checked={isExtensiveDefect}
-                                        disabled={!canMarkExtensive}
-                                        onChange={() => toggleObservationExtensive(scopedCardKey)}
-                                      />
-                                      <span>Extensive</span>
-                                    </label>
-                                  </div>
-                                </div>
-                              </header>
 
-                              <div className="amteam-observation-body">
-                                <div className="amteam-observation-copy">
-                                  {fieldList([
-                                    ['MLO ID', observation.mlo_id],
-                                    ['Continuous', observation.continuous],
-                                    ['Joint', formatYesNo(observation.joint)],
-                                    ['Value percent', formatPercent(observation.value_percent)],
-                                    ['Remarks', observation.remarks],
-                                    ['Clock from', observation.clock_from],
-                                    ['Clock to', observation.clock_to],
-                                  ])}
-                                  <p>{displayValue(observation.observation_text)}</p>
+                                <div
+                                  className="amteam-defect-cell amteam-defect-observation-text-cell"
+                                  title={displayValue(observation.observation_text)}
+                                >
+                                  <strong>{displayValue(observation.code)} (Grade {displayValue(observation.grade)})</strong>
                                 </div>
-                                <ObservationImage
-                                  mediaMode={selectedMediaMode}
-                                  mediaRoot={inspectionMedia.media_root}
-                                  observation={observation}
-                                  selectedUrl={snapshotSelections[scopedCardKey]}
-                                  onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
-                                />
-                              </div>
-                            </article>
-                          )
-                        })}
+
+                                <div className="amteam-defect-cell amteam-defect-observation-review-cell">
+                                  <label className="amteam-observation-role-control">
+                                    <select
+                                      value={defectRole}
+                                      aria-label={`Observation ${observationNumber} defect role`}
+                                      onChange={(event) => updateObservationDefectRole(
+                                        scopedGroupKey,
+                                        cardKey,
+                                        event.currentTarget.value as ObservationDefectRole,
+                                      )}
+                                    >
+                                      <option value="">None</option>
+                                      <option value="major">Major Defect</option>
+                                      <option value="other" disabled={!groupHasMajorDefect || isMajorDefect}>Other Defect</option>
+                                    </select>
+                                  </label>
+                                </div>
+
+                                <div className="amteam-defect-cell amteam-defect-observation-extensive-cell">
+                                  <label
+                                    className={isExtensiveDefect ? 'selected' : !canMarkExtensive ? 'disabled' : ''}
+                                    aria-label={`Observation ${observationNumber} extensive defect`}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isExtensiveDefect}
+                                      disabled={!canMarkExtensive}
+                                      onChange={() => toggleObservationExtensive(scopedCardKey)}
+                                    />
+                                  </label>
+                                </div>
+
+                                <div className="amteam-defect-cell amteam-defect-observation-snapshot-cell">
+                                  <ObservationImage
+                                    mediaMode={selectedMediaMode}
+                                    mediaRoot={inspectionMedia.media_root}
+                                    observation={observation}
+                                    selectedUrl={snapshotSelections[scopedCardKey]}
+                                    onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
+                                  />
+                                </div>
+                              </article>
+                            )
+                          })}
                         </div>
                       ) : null}
-                    </section>
+                    </div>
                   )
                 })}
               </section>
@@ -2960,6 +3308,31 @@ export default function AMTeamInspectionViewer({
           </div>
         </section>
       </section>
+      {reviewNotice ? (
+        <div className="amteam-review-notice" role="alert" aria-live="assertive">
+          {reviewNotice.message}
+        </div>
+      ) : null}
+      <ObservationDetailsDialog
+        selection={selectedObservationDetails}
+        onClose={() => setSelectedObservationDetails(null)}
+      />
+      <PipeDetailsDialog
+        selection={selectedPipeDetails}
+        onClose={() => setSelectedPipeDetails(null)}
+      />
+      <InspectionDetailsDialog
+        inspection={isInspectionDetailsOpen ? selectedInspection : null}
+        mediaMode={selectedMediaMode}
+        mediaRoot={inspectionMedia.media_root}
+        reports={inspectionMedia.reports}
+        onClose={() => setInspectionDetailsOpen(false)}
+      />
+      <datalist id="amteam-defect-comment-options">
+        {PIPE_REVIEW_COMMENT_OPTIONS.map((option) => (
+          <option key={option} value={option} />
+        ))}
+      </datalist>
     </main>
   )
 }

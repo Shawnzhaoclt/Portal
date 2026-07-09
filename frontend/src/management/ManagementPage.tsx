@@ -796,7 +796,7 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
                 Tip: username is your work email address, and the default password is your employee ID.
               </div>
               <label>
-                <span>Username, email, or employee ID</span>
+                <span>Email</span>
                 <input value={loginValue} onChange={(event) => setLoginValue(event.target.value)} autoComplete="username" />
               </label>
               <label>

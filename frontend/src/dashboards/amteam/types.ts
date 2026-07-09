@@ -6,6 +6,9 @@ export type AmTeamMediaAsset = {
   relative_path: string
   url: string
   media_type: string | null
+  duration_seconds?: number | null
+  frame_count?: number | null
+  fps?: number | null
 }
 
 export type AmTeamInspectionMedia = {
@@ -64,6 +67,8 @@ export type AmTeamObservation = {
   remarks: AmTeamCellValue
   clock_from: AmTeamCellValue
   clock_to: AmTeamCellValue
+  vcr_time: AmTeamCellValue
+  digital_time: AmTeamCellValue
   media_id: AmTeamCellValue
   full_path: AmTeamCellValue
   image_url: string | null
