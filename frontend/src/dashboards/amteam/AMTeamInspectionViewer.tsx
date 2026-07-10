@@ -22,6 +22,13 @@ import {
   fetchAmTeamPipeGroups,
   fetchAmTeamPipes,
 } from './api'
+import {
+  fetchCctvReviewReportDetail,
+  saveCctvReviewReport,
+  type CctvReviewReport,
+  type CctvReviewReportSavePayload,
+  type CctvReviewSavedPipe,
+} from '../../management/api'
 import type {
   AmTeamCellValue,
   AmTeamInspection,
@@ -43,6 +50,11 @@ type SearchCandidate = {
 type MediaSourceMode = 'api' | 'p-drive'
 type ElectronAwareWindow = Window & {
   electronAPI?: unknown
+  desktopAPI?: unknown
+  __TAURI_INTERNALS__?: unknown
+  chrome?: {
+    webview?: unknown
+  }
   process?: {
     type?: string
     versions?: {
@@ -96,6 +108,13 @@ type PipeReviewInput = {
   cloggingSnapshotTimeSeconds: number | null
   cloggingSnapshotVideoPath: string
 }
+type CctvReviewSaveContext = {
+  reportKey: string
+  reportName: string
+  bindingType: CctvReviewReport['binding_type']
+  bindingText: string
+  inspectionDateText: string
+}
 type ActiveVideoFrame = {
   videoPath: string
   videoName: string
@@ -111,6 +130,16 @@ type PipeObservationCacheEntry = {
   inspection: AmTeamInspection
   observations: AmTeamObservation[]
   media: AmTeamInspectionMedia
+}
+type SavedCctvReviewState = {
+  selectedInspectionDateKey: string
+  pipeGroups: AmTeamPipeInspectionGroup[]
+  visiblePipeGroups: AmTeamPipeInspectionGroup[]
+  pipeObservationCache: Record<string, PipeObservationCacheEntry>
+  pipeReviewInputs: Record<string, PipeReviewInput>
+  observationDefectSelections: Record<string, ObservationDefectSelection>
+  snapshotSelections: Record<string, string>
+  extensiveDefectSelections: Record<string, boolean>
 }
 type ReportImage = {
   data: Uint8Array
@@ -260,11 +289,19 @@ function recordId(value: AmTeamCellValue | undefined) {
 function isElectronClient() {
   if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
   const electronWindow = window as ElectronAwareWindow
+  const launchParameters = new URLSearchParams(window.location.search)
+  const declaredDesktopClient = launchParameters.get('client')?.trim().toLowerCase() === 'desktop'
+    || launchParameters.get('desktop') === '1'
+    || launchParameters.get('media_source')?.trim().toLowerCase() === 'p-drive'
   return Boolean(
     navigator.userAgent.toLowerCase().includes(' electron/')
       || electronWindow.process?.versions?.electron
       || electronWindow.process?.type === 'renderer'
-      || electronWindow.electronAPI,
+      || electronWindow.electronAPI
+      || electronWindow.desktopAPI
+      || electronWindow.chrome?.webview
+      || electronWindow.__TAURI_INTERNALS__
+      || declaredDesktopClient,
   )
 }
 
@@ -325,6 +362,22 @@ function fileNameFromMediaUrl(url: string) {
   const cleanPath = pathText.split(/[?#]/)[0] ?? ''
   const segments = cleanPath.split(/[\\/]/).filter(Boolean)
   return decodeURIComponent(segments.at(-1) ?? 'Snapshot')
+}
+
+function selectedSnapshotFileName(
+  observation: AmTeamObservation,
+  scopedCardKey: string,
+  snapshotSelections: Record<string, string>,
+  mediaMode: MediaSourceMode,
+  mediaRoot: string,
+) {
+  const selectedUrl = snapshotSelections[scopedCardKey]
+  const imageUrls = observationImageUrls(observation)
+  const defaultUrl = imageUrls[0]
+    ? mediaViewUrl(imageUrls[0], mediaMode, mediaRoot)
+    : ''
+  const effectiveUrl = selectedUrl || defaultUrl
+  return effectiveUrl ? fileNameFromMediaUrl(effectiveUrl) : null
 }
 
 function snapshotDisplayName(url: string) {
@@ -437,6 +490,21 @@ function observationCardKey(observation: AmTeamObservation, index: number) {
     recordId(observation.full_path),
     String(index),
   ].join('|')
+}
+
+function observationImageUrls(observation: AmTeamObservation | undefined) {
+  if (!observation) return []
+  return observation.image_urls?.length ? observation.image_urls : observation.image_url ? [observation.image_url] : []
+}
+
+function observationsByRenderedCardKey(observations: AmTeamObservation[]) {
+  const keyedObservations = new Map<string, AmTeamObservation>()
+  for (const distanceGroup of observationDistanceGroups(observations)) {
+    distanceGroup.observations.forEach((observation, index) => {
+      keyedObservations.set(observationCardKey(observation, index), observation)
+    })
+  }
+  return keyedObservations
 }
 
 function inspectionDateKey(value: AmTeamCellValue | undefined) {
@@ -611,8 +679,16 @@ function blobToImage(blob: Blob) {
   })
 }
 
-async function blobToReportImage(blob: Blob): Promise<ReportImage> {
-  const image = await blobToImage(blob)
+function directUrlToImage(imageUrl: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image()
+    image.onload = () => resolve(image)
+    image.onerror = () => reject(new Error('Snapshot image could not be loaded from the P drive.'))
+    image.src = imageUrl
+  })
+}
+
+async function imageToReportImage(image: HTMLImageElement): Promise<ReportImage> {
   const canvas = document.createElement('canvas')
   canvas.width = image.naturalWidth || image.width
   canvas.height = image.naturalHeight || image.height
@@ -635,9 +711,16 @@ async function blobToReportImage(blob: Blob): Promise<ReportImage> {
   }
 }
 
+async function blobToReportImage(blob: Blob): Promise<ReportImage> {
+  return imageToReportImage(await blobToImage(blob))
+}
+
 async function fetchReportImage(imageUrl: string): Promise<ReportImage | null> {
   if (!imageUrl) return null
   try {
+    if (imageUrl.toLowerCase().startsWith('file:')) {
+      return await imageToReportImage(await directUrlToImage(imageUrl))
+    }
     const response = await fetch(imageUrl)
     if (!response.ok) return null
     return await blobToReportImage(await response.blob())
@@ -1029,6 +1112,16 @@ function createReviewReportBlob(report: ReviewReportFile, format: ReviewReportFo
   return format === 'pdf' ? createPdfReportBlob(report) : createDocxReportBlob(report)
 }
 
+function downloadReviewReportFile(report: ReviewReportFile, format: ReviewReportFormat = 'docx') {
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(createReviewReportBlob(report, format))
+  link.download = reportFileName(report.suggestedBaseName, format)
+  document.body.appendChild(link)
+  link.click()
+  URL.revokeObjectURL(link.href)
+  link.remove()
+}
+
 async function saveReviewReportFile(report: ReviewReportFile) {
   const pickerWindow = window as SaveFilePickerWindow
   const suggestedName = reportFileName(report.suggestedBaseName, 'docx')
@@ -1063,13 +1156,8 @@ async function saveReviewReportFile(report: ReviewReportFile) {
   if (!fallbackName) return
   const format = reportFormatFromFileName(fallbackName)
   const downloadName = fallbackName.toLowerCase().endsWith(`.${format}`) ? fallbackName : reportFileName(fallbackName, format)
-  const link = document.createElement('a')
-  link.href = URL.createObjectURL(createReviewReportBlob(report, format))
-  link.download = downloadName
-  document.body.appendChild(link)
-  link.click()
-  URL.revokeObjectURL(link.href)
-  link.remove()
+  const directDownloadReport = { ...report, suggestedBaseName: downloadName.replace(/\.[^.]+$/, '') }
+  downloadReviewReportFile(directDownloadReport, format)
 }
 
 function pipeGradeThreePlusCount(
@@ -1086,6 +1174,36 @@ function pipeGradeThreePlusCount(
 function observationReportText(observation: AmTeamObservation, isExtensive: boolean) {
   const text = displayValue(observation.observation_text)
   return isExtensive && text !== '-' ? `${text} (Extensive)` : text
+}
+
+function sortedPipeGroupsForReport(
+  pipeGroups: AmTeamPipeInspectionGroup[],
+  selectedInspectionDateKey: string,
+  pipeObservationCache: Record<string, PipeObservationCacheEntry>,
+  pipeReviewInputs: Record<string, PipeReviewInput>,
+  observationDefectSelections: Record<string, ObservationDefectSelection>,
+) {
+  return [...pipeGroups].sort((leftGroup, rightGroup) => {
+    const reportSortInfo = (group: AmTeamPipeInspectionGroup) => {
+      const pipeId = recordId(group.ml_id)
+      const cachedPipe = pipeObservationCache[pipeId]
+      const inspection = cachedPipe?.inspection ?? inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0]
+      const groupedObservations = observationDistanceGroups(cachedPipe?.observations ?? [])
+      const defectsScoredCount = pipeGradeThreePlusCount(pipeId, groupedObservations, observationDefectSelections)
+      const cloggingPercent = cloggingPercentNumber(pipeReviewInputs[pipeId] ?? emptyPipeReviewInput())
+      const assetId = reportAssetId(inspection).toLowerCase()
+      const category = defectsScoredCount > 0 ? 0 : cloggingPercent > 0 ? 1 : 2
+      return { assetId, category, defectsScoredCount }
+    }
+
+    const left = reportSortInfo(leftGroup)
+    const right = reportSortInfo(rightGroup)
+    if (left.category !== right.category) return left.category - right.category
+    if (left.category === 0 && left.defectsScoredCount !== right.defectsScoredCount) {
+      return right.defectsScoredCount - left.defectsScoredCount
+    }
+    return left.assetId.localeCompare(right.assetId, undefined, { numeric: true, sensitivity: 'base' })
+  })
 }
 
 async function buildReviewReportFile({
@@ -1127,7 +1245,15 @@ async function buildReviewReportFile({
   addParagraph(`Generated: ${new Date().toLocaleString()}`)
   addParagraph('')
 
-  for (const group of visiblePipeGroups) {
+  const reportPipeGroups = sortedPipeGroupsForReport(
+    visiblePipeGroups,
+    selectedInspectionDateKey,
+    pipeObservationCache,
+    pipeReviewInputs,
+    observationDefectSelections,
+  )
+
+  for (const group of reportPipeGroups) {
     const pipeId = recordId(group.ml_id)
     const cachedPipe = pipeObservationCache[pipeId]
     const inspection = cachedPipe?.inspection ?? inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0]
@@ -1184,9 +1310,10 @@ async function buildReviewReportFile({
       defectNumber += 1
       const scopedMajorCardKey = pipeScopedKey(pipeId, majorEntry.cardKey)
       const selectedSnapshotUrl = snapshotSelections[scopedMajorCardKey]
+      const majorImageUrls = observationImageUrls(majorEntry.observation)
       const majorImageUrl = selectedSnapshotUrl
-        || (majorEntry.observation.image_urls[0]
-          ? mediaViewUrl(majorEntry.observation.image_urls[0], mediaMode, cachedPipe?.media.media_root ?? '')
+        || (majorImageUrls[0]
+          ? mediaViewUrl(majorImageUrls[0], mediaMode, cachedPipe?.media.media_root ?? '')
           : '')
       const majorImage = await fetchReportImage(majorImageUrl)
       const otherEntries = observationEntries.filter((entry) => selection.otherKeys.includes(entry.cardKey))
@@ -1213,6 +1340,149 @@ async function buildReviewReportFile({
     suggestedBaseName: reportFileBaseNameFromAddress(firstInspection?.street),
     elements,
   }
+}
+
+function dateTokenToInspectionKey(token: string) {
+  const match = token.match(/^(\d{2})(\d{2})(\d{4})$/)
+  if (!match) return ''
+  const [, month, day, year] = match
+  return `${year}-${month}-${day}`
+}
+
+function inspectionOptionKeyFromReportDateText(value: string) {
+  return (value.match(/\d{8}/g) ?? [])
+    .map(dateTokenToInspectionKey)
+    .filter(Boolean)
+    .join('|')
+}
+
+function selectedSnapshotUrlFromFileName(
+  observation: AmTeamObservation | undefined,
+  fileName: string | null,
+  mode: MediaSourceMode,
+  mediaRoot: string,
+) {
+  if (!observation || !fileName) return ''
+  const normalizedFileName = fileName.toLowerCase()
+  const matchedImageUrl = observationImageUrls(observation).find((imageUrl) => (
+    fileNameFromMediaUrl(mediaViewUrl(imageUrl, mode, mediaRoot)).toLowerCase() === normalizedFileName
+  ))
+  return matchedImageUrl ? mediaViewUrl(matchedImageUrl, mode, mediaRoot) : ''
+}
+
+function savedPipeReviewInput(savedPipe: CctvReviewSavedPipe, media: AmTeamInspectionMedia): PipeReviewInput {
+  return {
+    cloggingPercent: String(savedPipe.clogging_percent ?? 0),
+    comments: savedPipe.clogging_comment ?? '',
+    cloggingSnapshotTimeSeconds: savedPipe.clogging_frame_seconds,
+    cloggingSnapshotVideoPath: savedPipe.clogging_frame_seconds === null ? '' : media.videos[0]?.relative_path ?? '',
+  }
+}
+
+async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<SavedCctvReviewState> {
+  const detail = await fetchCctvReviewReportDetail(report.id)
+  if (!detail.pipes.length) {
+    throw new Error('This report does not have saved pipe review data.')
+  }
+
+  const mediaMode = mediaSourceMode()
+  const selectedInspectionDateKey = inspectionOptionKeyFromReportDateText(report.inspection_date_text)
+  const pipeGroupsResponse = await fetchAmTeamPipeGroups(
+    report.binding_text,
+    report.binding_type === 'project_title' ? 'ProjectTitle' : 'Address',
+  )
+  const pipeGroupsById = new Map(pipeGroupsResponse.rows.map((group) => [recordId(group.ml_id), group]))
+  const visiblePipeGroups: AmTeamPipeInspectionGroup[] = []
+  const pipeObservationCache: Record<string, PipeObservationCacheEntry> = {}
+  const pipeReviewInputs: Record<string, PipeReviewInput> = {}
+  const observationDefectSelections: Record<string, ObservationDefectSelection> = {}
+  const snapshotSelections: Record<string, string> = {}
+  const extensiveDefectSelections: Record<string, boolean> = {}
+
+  for (const savedPipe of detail.pipes) {
+    const pipeId = recordId(savedPipe.ml_id)
+    const group = pipeGroupsById.get(pipeId)
+    if (!group) continue
+
+    const observationResponse = await fetchAmTeamObservations(savedPipe.mli_id)
+    const inspection = group.inspections.find((candidate) => recordId(candidate.mli_id) === savedPipe.mli_id)
+      ?? inspectionForDate(group, selectedInspectionDateKey)
+      ?? group.inspections[0]
+    if (!inspection) continue
+
+    visiblePipeGroups.push(group)
+    pipeObservationCache[pipeId] = {
+      inspection,
+      observations: observationResponse.rows,
+      media: observationResponse.media,
+    }
+    pipeReviewInputs[pipeId] = savedPipeReviewInput(savedPipe, observationResponse.media)
+
+    const observationsByCardKey = observationsByRenderedCardKey(observationResponse.rows)
+
+    for (const savedDistanceGroup of savedPipe.distance_groups) {
+      const groupSelection = emptyObservationDefectSelection()
+      groupSelection.amScore = savedDistanceGroup.am_score === null ? '' : String(savedDistanceGroup.am_score)
+      groupSelection.defectComment = savedDistanceGroup.defect_comment ?? ''
+      groupSelection.noHighScoreConfirmed = savedDistanceGroup.no_am_score_ge_3_confirmed
+
+      for (const savedObservation of savedDistanceGroup.observations) {
+        const scopedCardKey = pipeScopedKey(pipeId, savedObservation.source_observation_key)
+        if (savedObservation.defect_role === 'major') {
+          groupSelection.majorKey = savedObservation.source_observation_key
+        } else if (savedObservation.defect_role === 'other') {
+          groupSelection.otherKeys.push(savedObservation.source_observation_key)
+        }
+
+        if (savedObservation.defect_role !== 'none') {
+          extensiveDefectSelections[scopedCardKey] = savedObservation.is_extensive
+        }
+
+        const selectedSnapshotUrl = selectedSnapshotUrlFromFileName(
+          observationsByCardKey.get(savedObservation.source_observation_key),
+          savedObservation.selected_picture_file_name,
+          mediaMode,
+          observationResponse.media.media_root,
+        )
+        if (selectedSnapshotUrl) {
+          snapshotSelections[scopedCardKey] = selectedSnapshotUrl
+        }
+      }
+
+      observationDefectSelections[pipeScopedKey(pipeId, savedDistanceGroup.distance_key)] = groupSelection
+    }
+  }
+
+  if (!visiblePipeGroups.length) {
+    throw new Error('The saved report pipes could not be matched to current inspection data.')
+  }
+
+  return {
+    selectedInspectionDateKey,
+    pipeGroups: visiblePipeGroups,
+    visiblePipeGroups,
+    pipeObservationCache,
+    pipeReviewInputs,
+    observationDefectSelections,
+    snapshotSelections,
+    extensiveDefectSelections,
+  }
+}
+
+export async function downloadSavedCctvReviewReport(report: CctvReviewReport) {
+  const savedState = await loadSavedCctvReviewState(report)
+  const mediaMode = mediaSourceMode()
+  const reportFile = await buildReviewReportFile({
+    visiblePipeGroups: savedState.visiblePipeGroups,
+    selectedInspectionDateKey: savedState.selectedInspectionDateKey,
+    pipeObservationCache: savedState.pipeObservationCache,
+    pipeReviewInputs: savedState.pipeReviewInputs,
+    observationDefectSelections: savedState.observationDefectSelections,
+    snapshotSelections: savedState.snapshotSelections,
+    extensiveDefectSelections: savedState.extensiveDefectSelections,
+    mediaMode,
+  })
+  downloadReviewReportFile(reportFile, 'docx')
 }
 
 function inspectionDateOptionsFromGroups(groups: AmTeamPipeInspectionGroup[]) {
@@ -1290,6 +1560,21 @@ function StatusMessage({
     <div className={`amteam-status-message ${tone}`}>
       {icon === 'loading' ? <Loader2 size={20} className="spin" /> : <AlertCircle size={20} />}
       <span>{message}</span>
+    </div>
+  )
+}
+
+function ReportProgressOverlay({ message }: { message: string }) {
+  return (
+    <div className="amteam-report-progress-overlay" role="status" aria-live="polite" aria-label={message}>
+      <div className="amteam-report-progress-panel">
+        <Loader2 size={30} className="spin" aria-hidden="true" />
+        <strong>Generating report</strong>
+        <span>{message}</span>
+        <div className="amteam-report-progress-bar" aria-hidden="true">
+          <i />
+        </div>
+      </div>
     </div>
   )
 }
@@ -1557,21 +1842,24 @@ function ObservationImage({
   mediaMode,
   mediaRoot,
   observation,
+  readOnly = false,
   selectedUrl,
   onSelectedUrlChange,
 }: {
   mediaMode: MediaSourceMode
   mediaRoot: string
   observation: AmTeamObservation
+  readOnly?: boolean
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
 }) {
-  const imageUrls = observation.image_urls?.length ? observation.image_urls : observation.image_url ? [observation.image_url] : []
+  const imageUrls = observationImageUrls(observation)
   return (
     <SnapshotImageBox
       imageUrls={imageUrls}
       mediaMode={mediaMode}
       mediaRoot={mediaRoot}
+      readOnly={readOnly}
       selectedUrl={selectedUrl}
       onSelectedUrlChange={onSelectedUrlChange}
     />
@@ -1893,6 +2181,7 @@ function PipeDefectReviewPanel({
   onGenerateReport,
   canDownloadExport,
   onDownloadExport,
+  readOnly = false,
 }: {
   inspection: AmTeamInspection
   pipeOptions: PipeReviewOption[]
@@ -1913,6 +2202,7 @@ function PipeDefectReviewPanel({
   onGenerateReport: () => void
   canDownloadExport: boolean
   onDownloadExport: () => void
+  readOnly?: boolean
 }) {
   const updateCloggingPercent = (value: string) => {
     const nextValue = boundedIntegerInputValue(value, 0, 100)
@@ -1977,6 +2267,7 @@ function PipeDefectReviewPanel({
               max="100"
               step="1"
               inputMode="numeric"
+              disabled={readOnly}
               value={reviewInput.cloggingPercent}
               onChange={(event) => updateCloggingPercent(event.currentTarget.value)}
             />
@@ -1986,7 +2277,7 @@ function PipeDefectReviewPanel({
               className="amteam-clogging-comment-input"
               list="amteam-clogging-comment-options"
               value={reviewInput.comments}
-              disabled={!hasClogging}
+              disabled={readOnly || !hasClogging}
               placeholder="Select or enter"
               onChange={(event) => onReviewInputChange({ comments: event.currentTarget.value })}
             />
@@ -2013,7 +2304,7 @@ function PipeDefectReviewPanel({
             <button
               type="button"
               className="amteam-clogging-frame-capture"
-              disabled={!currentVideoFrame}
+              disabled={readOnly || !currentVideoFrame}
               onClick={onCaptureCloggingFrame}
             >
               <Camera size={15} />
@@ -2037,9 +2328,11 @@ function PipeDefectReviewPanel({
             Next
             <ChevronRight size={15} aria-hidden="true" />
           </button>
-          <button type="button" className="report" onClick={onGenerateReport}>
-            Generate report
-          </button>
+          {!readOnly ? (
+            <button type="button" className="report" onClick={onGenerateReport}>
+              Generate report
+            </button>
+          ) : null}
           <button
             type="button"
             className="download-export"
@@ -2126,10 +2419,28 @@ function pipeSearchCandidates(pipes: AmTeamPipe[]): SearchCandidate[] {
   return candidates.slice(0, 10)
 }
 
-type AMTeamInspectionViewerProps = Record<string, never>
+type AMTeamInspectionViewerProps = {
+  initialSearchTerm?: string
+  initialSearchKind?: SearchCandidate['kind']
+  initialInspectionDateKey?: string
+  hideReviewNavigation?: boolean
+  savedReport?: CctvReviewReport
+  readOnly?: boolean
+  reportSaveContext?: CctvReviewSaveContext
+  onReportSaved?: (report: CctvReviewReport) => void
+}
 
-export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps = {}) {
-  const [searchTerm, setSearchTerm] = useState('')
+export default function AMTeamInspectionViewer({
+  initialSearchTerm = '',
+  initialSearchKind,
+  initialInspectionDateKey = '',
+  hideReviewNavigation = false,
+  savedReport,
+  readOnly = false,
+  reportSaveContext,
+  onReportSaved,
+}: AMTeamInspectionViewerProps = {}) {
+  const [searchTerm, setSearchTerm] = useState(initialSearchTerm)
   const [lastQuery, setLastQuery] = useState('')
   const [candidatePipes, setCandidatePipes] = useState<AmTeamPipe[]>([])
   const [pipeGroups, setPipeGroups] = useState<AmTeamPipeInspectionGroup[]>([])
@@ -2152,6 +2463,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   const [distanceGroupValidationFailures, setDistanceGroupValidationFailures] = useState<Record<string, boolean>>({})
   const [reviewNotice, setReviewNotice] = useState<ReviewNotice | null>(null)
   const [generatedReviewReport, setGeneratedReviewReport] = useState<ReviewReportFile | null>(null)
+  const [reportProgressMessage, setReportProgressMessage] = useState('')
   const [collapsedDistanceGroups, setCollapsedDistanceGroups] = useState<Record<string, boolean>>({})
   const [snapshotSelections, setSnapshotSelections] = useState<Record<string, string>>({})
   const [extensiveDefectSelections, setExtensiveDefectSelections] = useState<Record<string, boolean>>({})
@@ -2164,6 +2476,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   const [defectColumnWidths, setDefectColumnWidths] = useState<Record<DefectColumnKey, number>>(DEFAULT_DEFECT_COLUMN_WIDTHS)
   const documentRef = useRef<HTMLDivElement | null>(null)
   const reviewNoticeIdRef = useRef(0)
+  const initialSearchLoadedRef = useRef(false)
 
   function showReviewNotice(message: string) {
     reviewNoticeIdRef.current += 1
@@ -2229,6 +2542,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function updateObservationDefectRole(groupKey: string, cardKey: string, role: ObservationDefectRole) {
+    if (readOnly) return
     clearReviewNotice()
     clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
@@ -2310,6 +2624,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function updateDistanceGroupAmScore(groupKey: string, value: string) {
+    if (readOnly) return
     const nextValue = boundedIntegerInputValue(value, 3, 5)
     if (nextValue === null) return
 
@@ -2332,6 +2647,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function updateDistanceGroupDefectComment(groupKey: string, value: string) {
+    if (readOnly) return
     clearGeneratedReviewReport()
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
@@ -2348,6 +2664,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function updateObservationSnapshotSelection(cardKey: string, imageUrl: string) {
+    if (readOnly) return
     clearGeneratedReviewReport()
     setSnapshotSelections((currentSelections) => ({
       ...currentSelections,
@@ -2356,6 +2673,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function updatePipeReviewInput(pipeId: string, input: Partial<PipeReviewInput>) {
+    if (readOnly) return
     if (!pipeId) return
     clearGeneratedReviewReport()
     setPipeReviewInputs((currentInputs) => ({
@@ -2368,6 +2686,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function captureCloggingFrame() {
+    if (readOnly) return
     if (!selectedPipeId || !activeVideoFrame) return
     updatePipeReviewInput(selectedPipeId, {
       cloggingSnapshotTimeSeconds: Number(activeVideoFrame.timeSeconds.toFixed(2)),
@@ -2406,6 +2725,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function toggleObservationExtensive(cardKey: string) {
+    if (readOnly) return
     clearGeneratedReviewReport()
     setExtensiveDefectSelections((currentSelections) => ({
       ...currentSelections,
@@ -2414,6 +2734,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function toggleDistanceGroupNoHighScoreConfirmation(groupKey: string) {
+    if (readOnly) return
     clearReviewNotice()
     clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
@@ -2514,6 +2835,12 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   function selectNextPipe() {
+    if (readOnly) {
+      const currentIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
+      const nextGroup = visiblePipeGroups[currentIndex + 1]
+      if (nextGroup) selectPipeDefault(nextGroup)
+      return
+    }
     const validation = validateAndMarkCurrentPipeReviewed()
     if (!validation) return
     const nextGroup = visiblePipeGroups[validation.currentIndex + 1]
@@ -2521,7 +2848,73 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
     selectPipeDefault(nextGroup)
   }
 
+  function buildCctvReviewReportSavePayload(memo: string | null): CctvReviewReportSavePayload | null {
+    if (!reportSaveContext) return null
+
+    return {
+      report_key: reportSaveContext.reportKey,
+      report_name: reportSaveContext.reportName,
+      binding_type: reportSaveContext.bindingType,
+      binding_text: reportSaveContext.bindingText,
+      inspection_date_text: reportSaveContext.inspectionDateText,
+      memo,
+      pipes: visiblePipeGroups.map((group) => {
+        const pipeId = recordId(group.ml_id)
+        const cachedPipe = pipeObservationCache[pipeId]
+        const inspection = cachedPipe?.inspection ?? inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0] ?? null
+        const pipeReviewInput = pipeReviewInputs[pipeId] ?? emptyPipeReviewInput()
+        const mediaRoot = cachedPipe?.media.media_root ?? (pipeId === selectedPipeId ? inspectionMedia.media_root : '')
+        const pipeObservations = cachedPipe?.observations ?? (pipeId === selectedPipeId ? observations : [])
+
+        return {
+          ml_id: pipeId,
+          mli_id: recordId(inspection?.mli_id),
+          clogging_percent: Math.max(0, Math.round(cloggingPercentNumber(pipeReviewInput))),
+          clogging_comment: pipeReviewInput.comments.trim() || null,
+          clogging_frame_seconds: pipeReviewInput.cloggingSnapshotTimeSeconds,
+          distance_groups: observationDistanceGroups(pipeObservations).map((distanceGroup) => {
+            const scopedGroupKey = pipeScopedKey(pipeId, distanceGroup.key)
+            const selection = observationDefectSelections[scopedGroupKey] ?? emptyObservationDefectSelection()
+            const hasMajorDefect = Boolean(selection.majorKey)
+
+            return {
+              distance_key: distanceGroup.key,
+              distance_feet: Number.isFinite(distanceGroup.sortValue) ? distanceGroup.sortValue : finiteNumberValue(distanceGroup.observations[0]?.distance),
+              am_score: hasMajorDefect ? Number(selection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE) : null,
+              defect_comment: hasMajorDefect && selection.defectComment.trim() ? selection.defectComment.trim() : null,
+              no_am_score_ge_3_confirmed: selection.noHighScoreConfirmed,
+              observations: distanceGroup.observations.map((observation, index) => {
+                const cardKey = observationCardKey(observation, index)
+                const scopedCardKey = pipeScopedKey(pipeId, cardKey)
+                const defectRole: 'none' | 'major' | 'other' = selection.majorKey === cardKey
+                  ? 'major'
+                  : selection.otherKeys.includes(cardKey)
+                    ? 'other'
+                    : 'none'
+
+                return {
+                  mlo_id: recordId(observation.mlo_id) || null,
+                  source_observation_key: cardKey,
+                  defect_role: defectRole,
+                  is_extensive: defectRole !== 'none' && Boolean(extensiveDefectSelections[scopedCardKey]),
+                  selected_picture_file_name: selectedSnapshotFileName(
+                    observation,
+                    scopedCardKey,
+                    snapshotSelections,
+                    selectedMediaMode,
+                    mediaRoot,
+                  ),
+                }
+              }),
+            }
+          }),
+        }
+      }),
+    }
+  }
+
   async function generateReviewReport() {
+    if (readOnly) return
     const validation = validateAndMarkCurrentPipeReviewed('generating the report')
     if (!validation) return
     const unvalidatedPipeCount = visiblePipeGroups.filter((group) => !validation.reviewedPipeIds[recordId(group.ml_id)]).length
@@ -2532,7 +2925,16 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
       return
     }
     if (!selectedInspection) return
+    const memo = reportSaveContext ? window.prompt('Memo for this generated report (optional)', '') : ''
+    if (reportSaveContext && memo === null) return
+    setReportProgressMessage(reportSaveContext ? 'Saving report data.' : 'Generating report file.')
     try {
+      const savePayload = buildCctvReviewReportSavePayload(memo)
+      if (savePayload) {
+        const saveResponse = await saveCctvReviewReport(savePayload)
+        onReportSaved?.(saveResponse.report)
+      }
+      setReportProgressMessage('Generating report file.')
       const report = await buildReviewReportFile({
         visiblePipeGroups,
         selectedInspectionDateKey,
@@ -2544,20 +2946,40 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
         mediaMode: selectedMediaMode,
       })
       setGeneratedReviewReport(report)
+      setReportProgressMessage('Starting report download.')
       await saveReviewReportFile(report)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       showReviewNotice(error instanceof Error ? error.message : 'Unable to generate report.')
+    } finally {
+      setReportProgressMessage('')
     }
   }
 
   async function downloadGeneratedReviewExport() {
-    if (!generatedReviewReport) return
+    setReportProgressMessage('Preparing report download.')
     try {
-      await saveReviewReportFile(generatedReviewReport)
+      let reportFile = generatedReviewReport
+      if (!reportFile && readOnly) {
+        reportFile = await buildReviewReportFile({
+          visiblePipeGroups,
+          selectedInspectionDateKey,
+          pipeObservationCache,
+          pipeReviewInputs,
+          observationDefectSelections,
+          snapshotSelections,
+          extensiveDefectSelections,
+          mediaMode: selectedMediaMode,
+        })
+        setGeneratedReviewReport(reportFile)
+      }
+      if (!reportFile) return
+      await saveReviewReportFile(reportFile)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.')
+    } finally {
+      setReportProgressMessage('')
     }
   }
 
@@ -2571,7 +2993,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
     setSelectedInspection(nextGroup ? inspectionForDate(nextGroup, dateKey) : null)
   }
 
-  async function runPipeGroupSearch(query: string, kind?: SearchCandidate['kind']) {
+  async function runPipeGroupSearch(query: string, kind?: SearchCandidate['kind'], preferredDateKey = '') {
     const trimmedQuery = query.trim()
     setLastQuery(trimmedQuery)
     clearInspectionReport()
@@ -2585,7 +3007,9 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
     try {
       const response = await fetchAmTeamPipeGroups(trimmedQuery, kind)
       const dateOptions = inspectionDateOptionsFromGroups(response.rows)
-      const nextDateKey = dateOptions[0]?.key ?? ''
+      const nextDateKey = preferredDateKey && dateOptions.some((option) => option.key === preferredDateKey)
+        ? preferredDateKey
+        : dateOptions[0]?.key ?? ''
       const sortedRows = sortPipeGroupsByMli(response.rows, nextDateKey)
       setPipeGroups(response.rows)
       setSelectedInspectionDateKey(nextDateKey)
@@ -2601,6 +3025,68 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
       setErrorMessage(error instanceof Error ? error.message : 'Pipe search failed.')
     }
   }
+
+  useEffect(() => {
+    if (!savedReport) return undefined
+
+    let cancelled = false
+    initialSearchLoadedRef.current = true
+    setSearchTerm(savedReport.binding_text)
+    setLastQuery(savedReport.binding_text)
+    clearInspectionReport()
+    setPipeStatus('loading')
+    setErrorMessage('')
+    setReportProgressMessage('Loading saved report.')
+
+    loadSavedCctvReviewState(savedReport)
+      .then((savedState) => {
+        if (cancelled) return
+        const firstGroup = savedState.visiblePipeGroups[0]
+        const firstPipeId = firstGroup ? recordId(firstGroup.ml_id) : ''
+        const firstCachedPipe = firstPipeId ? savedState.pipeObservationCache[firstPipeId] : null
+
+        setPipeGroups(savedState.pipeGroups)
+        setSelectedInspectionDateKey(savedState.selectedInspectionDateKey)
+        setSelectedPipeId(firstPipeId)
+        setSelectedInspection(firstCachedPipe?.inspection ?? null)
+        setObservations(firstCachedPipe?.observations ?? [])
+        setInspectionMedia(firstCachedPipe?.media ?? EMPTY_INSPECTION_MEDIA)
+        setPipeObservationCache(savedState.pipeObservationCache)
+        setPipeReviewInputs(savedState.pipeReviewInputs)
+        setObservationDefectSelections(savedState.observationDefectSelections)
+        setSnapshotSelections(savedState.snapshotSelections)
+        setExtensiveDefectSelections(savedState.extensiveDefectSelections)
+        setReviewedPipeIds(Object.fromEntries(savedState.visiblePipeGroups.map((group) => [recordId(group.ml_id), true])))
+        setCollapsedDistanceGroups({})
+        setDistanceGroupValidationFailures({})
+        setGeneratedReviewReport(null)
+        setPipeStatus('ready')
+        setObservationStatus(firstCachedPipe ? 'ready' : 'idle')
+      })
+      .catch((error) => {
+        if (cancelled) return
+        setPipeGroups([])
+        setSelectedInspection(null)
+        setPipeStatus('error')
+        setObservationStatus('idle')
+        setErrorMessage(error instanceof Error ? error.message : 'Saved report lookup failed.')
+      })
+      .finally(() => {
+        if (!cancelled) setReportProgressMessage('')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [savedReport?.id])
+
+  useEffect(() => {
+    if (savedReport) return
+    if (initialSearchLoadedRef.current || !initialSearchTerm.trim()) return
+    initialSearchLoadedRef.current = true
+    setSearchTerm(initialSearchTerm)
+    void runPipeGroupSearch(initialSearchTerm, initialSearchKind, initialInspectionDateKey)
+  }, [initialInspectionDateKey, initialSearchKind, initialSearchTerm, savedReport])
 
   async function handleSearch(event?: FormEvent) {
     event?.preventDefault()
@@ -2735,6 +3221,9 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   const candidates = useMemo(() => pipeSearchCandidates(candidatePipes), [candidatePipes])
   const showCandidateList = candidateOpen && searchTerm.trim().length >= 2
   const selectedMediaMode = useMemo<MediaSourceMode>(() => mediaSourceMode(), [])
+  const canBuildReadOnlyExport = readOnly
+    && visiblePipeGroups.length > 0
+    && visiblePipeGroups.every((group) => Boolean(pipeObservationCache[recordId(group.ml_id)]))
   const canShowDefectTable = Boolean(selectedInspection && observationStatus === 'ready')
   const hasVideoDefectLayout = Boolean(canShowDefectTable && inspectionMedia.videos.length)
   const videoDefectLayoutStyle = hasVideoDefectLayout
@@ -2841,9 +3330,14 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
   }
 
   return (
-    <main className="amteam-page">
-      <section className={`amteam-workspace ${isReviewNavigationCollapsed ? 'navigation-collapsed' : ''}`}>
-        <aside className={`amteam-sidebar ${isReviewNavigationCollapsed ? 'collapsed' : ''}`}>
+    <main className={`amteam-page${readOnly ? ' is-read-only' : ''}`} aria-readonly={readOnly ? 'true' : undefined}>
+      <section
+        className={`amteam-workspace ${isReviewNavigationCollapsed ? 'navigation-collapsed' : ''} ${
+          hideReviewNavigation ? 'navigation-hidden' : ''
+        }`}
+      >
+        {!hideReviewNavigation ? (
+          <aside className={`amteam-sidebar ${isReviewNavigationCollapsed ? 'collapsed' : ''}`}>
           <section className="amteam-navigation-panel" aria-label="Review navigation">
             <header className="amteam-navigation-panel-header">
               {!isReviewNavigationCollapsed ? (
@@ -2955,7 +3449,8 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
               </button>
             )}
           </section>
-        </aside>
+          </aside>
+        ) : null}
 
         <section className="amteam-document-shell">
           <div
@@ -2989,8 +3484,9 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                     onShowPipeInfo={showSelectedPipeInfo}
                     onNextPipe={selectNextPipe}
                     onGenerateReport={generateReviewReport}
-                    canDownloadExport={Boolean(generatedReviewReport)}
+                    canDownloadExport={Boolean(generatedReviewReport) || canBuildReadOnlyExport}
                     onDownloadExport={downloadGeneratedReviewExport}
+                    readOnly={readOnly}
                   />
                 ) : null}
 
@@ -3140,7 +3636,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                                 max="5"
                                 step="1"
                                 inputMode="numeric"
-                                disabled={!majorObservationEntry}
+                                disabled={readOnly || !majorObservationEntry}
                                 value={majorObservationEntry ? groupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE : ''}
                                 onChange={(event) => updateDistanceGroupAmScore(scopedGroupKey, event.currentTarget.value)}
                               />
@@ -3149,7 +3645,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                               <input
                                 aria-label="Defect comment"
                                 list="amteam-defect-comment-options"
-                                disabled={!majorObservationEntry}
+                                disabled={readOnly || !majorObservationEntry}
                                 placeholder="Select or enter"
                                 value={majorObservationEntry ? groupSelection.defectComment : ''}
                                 onChange={(event) => updateDistanceGroupDefectComment(scopedGroupKey, event.currentTarget.value)}
@@ -3160,10 +3656,10 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
 
                         <div className="amteam-defect-cell amteam-defect-distance-review-cell">
                           <div className="amteam-distance-review-status">
-                            <button
-                              type="button"
-                              className={distanceConfirmClasses}
-                              disabled={hasDistanceGroupHighAmScore}
+                              <button
+                                type="button"
+                                className={distanceConfirmClasses}
+                                disabled={readOnly || hasDistanceGroupHighAmScore}
                               title={
                                 hasDistanceGroupHighAmScore
                                   ? 'AM score greater or equal to 3 selected'
@@ -3191,6 +3687,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                               mediaRoot={inspectionMedia.media_root}
                               observation={majorObservationEntry.observation}
                               selectedUrl={snapshotSelections[pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey)]}
+                              readOnly={readOnly}
                               onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey), imageUrl)}
                             />
                           ) : (
@@ -3263,6 +3760,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                                     <select
                                       value={defectRole}
                                       aria-label={`Observation ${observationNumber} defect role`}
+                                      disabled={readOnly}
                                       onChange={(event) => updateObservationDefectRole(
                                         scopedGroupKey,
                                         cardKey,
@@ -3284,7 +3782,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                                     <input
                                       type="checkbox"
                                       checked={isExtensiveDefect}
-                                      disabled={!canMarkExtensive}
+                                      disabled={readOnly || !canMarkExtensive}
                                       onChange={() => toggleObservationExtensive(scopedCardKey)}
                                     />
                                   </label>
@@ -3296,6 +3794,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
                                     mediaRoot={inspectionMedia.media_root}
                                     observation={observation}
                                     selectedUrl={snapshotSelections[scopedCardKey]}
+                                    readOnly={readOnly}
                                     onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
                                   />
                                 </div>
@@ -3317,6 +3816,7 @@ export default function AMTeamInspectionViewer({}: AMTeamInspectionViewerProps =
           {reviewNotice.message}
         </div>
       ) : null}
+      {reportProgressMessage ? <ReportProgressOverlay message={reportProgressMessage} /> : null}
       <ObservationDetailsDialog
         selection={selectedObservationDetails}
         onClose={() => setSelectedObservationDetails(null)}

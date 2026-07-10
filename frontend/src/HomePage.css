@@ -674,17 +674,16 @@
   width: 38px;
   height: 38px;
   place-items: center;
-  border: 1px solid #aebdcb;
+  border: 0;
   border-radius: 0;
   color: #255a8f;
-  background: #ffffff;
+  background: transparent;
   cursor: pointer;
 }
 
 .home-resource-modal-close:hover {
-  border-color: var(--brand-blue);
   color: var(--brand-blue);
-  background: #edf5ff;
+  background: transparent;
 }
 
 .home-resource-modal iframe {
@@ -1060,14 +1059,13 @@ html.theme-dark .home-hero {
 }
 
 .home-resource-modal-close {
-  border-color: var(--panel-border);
   color: var(--panel-text);
-  background: var(--panel-bg);
+  background: transparent;
 }
 
 .home-resource-modal-close:hover {
-  border-color: var(--accent);
-  background: var(--panel-active-bg);
+  color: var(--accent);
+  background: transparent;
 }
 
 .home-empty-results {

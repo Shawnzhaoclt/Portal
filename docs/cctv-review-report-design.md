@@ -9,6 +9,7 @@ The CCTV source data can still come from DuckDB and media paths. The Portal data
 ## Resource
 
 - Resource name: Proactive Team CCTV Review
+- Resource ID: `RPT5W1C0`
 - Resource URL: `/report_proactive_team_cctv_review`
 - Resource type: Report
 - Primary users: Proactive Team, Planning Team, administrators
@@ -114,7 +115,11 @@ If export file creation fails after the database save, the saved latest report s
 
 ## Table Design
 
-### `cctv_review_reports`
+Table naming rule:
+
+- Every table owned by this report resource must start with the resource ID prefix `RPT5W1C0_`.
+
+### `RPT5W1C0_reports`
 
 One row per logical report.
 
@@ -146,7 +151,7 @@ Recommended indexes:
 - Index on `status`
 - Index on `updated_at`
 
-### `cctv_review_pipes`
+### `RPT5W1C0_pipes`
 
 One row per reviewed pipe in the latest saved report state. Store only source keys and user-entered review state. Pipe details such as asset name, street, manholes, material, inspection date, operator, reason, and direction should be queried from ML and MLI source tables by `ml_id` and `mli_id`.
 
@@ -164,9 +169,9 @@ Suggested columns:
 
 Important rule:
 
-Some pipes may have no observation records. These pipes still need a row in `cctv_review_pipes` so their pipe-level inputs, such as clogging, can be saved. `Defects Scored 3+` should be calculated in the frontend from the latest distance group and observation review state, not stored.
+Some pipes may have no observation records. These pipes still need a row in `RPT5W1C0_pipes` so their pipe-level inputs, such as clogging, can be saved. `Defects Scored 3+` should be calculated in the frontend from the latest distance group and observation review state, not stored.
 
-### `cctv_review_distance_groups`
+### `RPT5W1C0_distance_groups`
 
 One row per distance group in the latest saved report state. The distance is the minimum key needed to connect the group to observations shown in the UI.
 
@@ -175,7 +180,7 @@ Suggested columns:
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | INTEGER PK | Internal ID |
-| `pipe_review_id` | INTEGER NOT NULL | FK to `cctv_review_pipes.id` |
+| `pipe_review_id` | INTEGER NOT NULL | FK to `RPT5W1C0_pipes.id` |
 | `distance_key` | TEXT NOT NULL | Stable UI key |
 | `distance_feet` | REAL | Distance shown in UI |
 | `am_score` | INTEGER | User AM score, usually 3 to 5 |
@@ -184,7 +189,7 @@ Suggested columns:
 
 If a pipe has no observations, this table can have zero rows for that pipe.
 
-### `cctv_review_observations`
+### `RPT5W1C0_observations`
 
 One row per observation reviewed by the user in the latest saved report state. Store only the source observation key, selected picture file name when needed, and user-selected review values. Observation details such as code, observation text, grade, source distance, media path, snapshot count, selected snapshot index, and video time should be queried from MLO source data.
 
@@ -206,7 +211,7 @@ Important rule:
 
 Do not assume `mlo_id` is globally unique. The UI has shown cases where the same MLO ID appears more than once. Use the internal `id` and `source_observation_key` for stable identity.
 
-### `cctv_review_report_events`
+### `RPT5W1C0_report_events`
 
 Audit log for who edited a report and when.
 
@@ -252,7 +257,7 @@ When the user clicks `Generate Report`:
 2. Ask the user to enter an optional memo.
 3. Build `report_key` and `report_name`.
 4. Find existing report by `report_key`.
-5. If no existing report exists, insert `cctv_review_reports`.
+5. If no existing report exists, insert `RPT5W1C0_reports`.
 6. If report exists with `status = pending`, update the same logical report.
 7. If report exists with `status = ready_to_review`, require the user to use `Back to Edit` before saving changes.
 8. If report exists with `status = completed`, block the save because completed reports are read-only.
@@ -260,9 +265,9 @@ When the user clicks `Generate Report`:
 10. Update `updated_by_user_id` and `updated_at`.
 11. Delete or replace latest child rows for the report.
 12. Insert latest rows into:
-   - `cctv_review_pipes`
-   - `cctv_review_distance_groups`
-   - `cctv_review_observations`
+   - `RPT5W1C0_pipes`
+   - `RPT5W1C0_distance_groups`
+   - `RPT5W1C0_observations`
 13. Insert a `report_saved` event with the optional memo.
 14. Generate the export file.
 

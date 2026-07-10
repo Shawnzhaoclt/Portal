@@ -298,6 +298,11 @@ button:disabled {
   opacity: 0.48;
 }
 
+[data-sonner-toast] {
+  border-radius: 0 !important;
+  font-family: inherit !important;
+}
+
 #root {
   min-height: 100vh;
 }

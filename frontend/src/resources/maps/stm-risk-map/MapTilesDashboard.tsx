@@ -1,6 +1,7 @@
 import { type ChangeEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as echarts from "echarts";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSONFeature, type MapMouseEvent, type MapOptions } from "maplibre-gl";
+import { toast } from "sonner";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./MapTilesViewer.css";
 import {
@@ -2497,7 +2498,7 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not export the current map.";
       showError(new Error(message));
-      window.alert(`Could not export the selected map area to PDF.\n\n${message}`);
+      toast.error("Could not export the selected map area to PDF.", { description: message });
     } finally {
       setMapPdfExporting(false);
     }

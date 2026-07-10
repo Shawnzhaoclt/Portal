@@ -62,6 +62,10 @@
   grid-template-columns: 48px minmax(0, 1fr);
 }
 
+.amteam-workspace.navigation-hidden {
+  grid-template-columns: minmax(0, 1fr);
+}
+
 .amteam-sidebar {
   display: grid;
   align-content: start;
@@ -1623,7 +1627,7 @@
 }
 
 .amteam-defect-distance-extensive-cell {
-  background: rgba(239, 246, 251, 0.56);
+  background: transparent;
 }
 
 .amteam-defect-distance-snapshot-cell > span {
@@ -1788,6 +1792,80 @@
   font-weight: 850;
   line-height: 1;
   white-space: nowrap;
+}
+
+.amteam-defect-treelist {
+  --amteam-defect-table-font-size: 0.76rem;
+}
+
+.amteam-defect-treelist .amteam-defect-row {
+  font-size: var(--amteam-defect-table-font-size);
+}
+
+.amteam-defect-treelist .amteam-defect-cell {
+  font-size: var(--amteam-defect-table-font-size);
+}
+
+.amteam-defect-treelist strong,
+.amteam-defect-treelist button,
+.amteam-defect-treelist input,
+.amteam-defect-treelist select,
+.amteam-defect-treelist span {
+  font-size: var(--amteam-defect-table-font-size);
+}
+
+.amteam-defect-treelist .amteam-defect-tree-toggle strong,
+.amteam-defect-treelist .amteam-defect-observation-text-cell strong,
+.amteam-defect-treelist .amteam-tree-review-control span,
+.amteam-defect-treelist .amteam-defect-mlo-button,
+.amteam-defect-treelist .amteam-snapshot-link,
+.amteam-defect-treelist .amteam-snapshot-count {
+  font-size: var(--amteam-defect-table-font-size);
+}
+
+.amteam-defect-treelist .amteam-defect-mlo-button,
+.amteam-defect-treelist .amteam-snapshot-link {
+  width: auto;
+  min-width: 0;
+  min-height: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline-offset: 1px;
+}
+
+.amteam-defect-treelist .amteam-defect-mlo-button:hover,
+.amteam-defect-treelist .amteam-defect-mlo-button:focus-visible,
+.amteam-defect-treelist .amteam-snapshot-link:hover:not(:disabled),
+.amteam-defect-treelist .amteam-snapshot-link:focus-visible {
+  outline: 0;
+  text-decoration-thickness: 2px;
+}
+
+.amteam-defect-treelist .amteam-tree-review-control input,
+.amteam-defect-treelist .amteam-observation-role-control select,
+.amteam-defect-treelist .amteam-distance-confirm-button {
+  min-height: 24px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.amteam-defect-treelist .amteam-tree-review-control input {
+  border-bottom: 1px solid var(--amteam-border);
+}
+
+.amteam-defect-treelist .amteam-observation-role-control select {
+  border-bottom: 1px solid var(--amteam-border);
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button {
+  color: var(--amteam-blue);
+}
+
+.amteam-defect-treelist .amteam-defect-observation-extensive-cell input {
+  width: 12px;
+  height: 12px;
 }
 
 .amteam-review-panel {
@@ -1979,6 +2057,19 @@
 
 .amteam-review-nav button.report {
   min-width: 138px;
+  border-color: var(--amteam-border-strong);
+  background: var(--amteam-control-bg);
+  color: var(--amteam-blue);
+}
+
+.amteam-review-nav button.report:hover:not(:disabled),
+.amteam-review-nav button.report:focus:not(:disabled),
+.amteam-review-nav button.report:focus-visible,
+.amteam-review-nav button.report:active:not(:disabled) {
+  border-color: var(--amteam-blue);
+  background: var(--amteam-blue);
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.26);
 }
 
 .amteam-review-nav button.download-export {
@@ -2074,9 +2165,11 @@
   outline: 0;
 }
 
+.amteam-review-field input:disabled,
 .amteam-review-field select:disabled {
+  background: rgba(242, 246, 251, 0.74);
   color: var(--amteam-muted);
-  cursor: default;
+  cursor: not-allowed;
   opacity: 0.55;
 }
 
@@ -2094,27 +2187,29 @@
 
 .amteam-clogging-frame {
   display: flex;
-  flex: 0 0 220px;
+  flex: 0 0 250px;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   min-height: 32px;
-  padding: 4px 8px;
-  border: 1px solid var(--amteam-border);
+  padding: 5px 8px;
+  border: 0;
   border-radius: var(--amteam-radius-sm);
-  background: var(--amteam-control-bg);
+  background: transparent;
 }
 
 .amteam-clogging-frame.needs-capture {
-  border-color: rgba(201, 52, 47, 0.32);
-  background: #fff8f7;
+  background: transparent;
 }
 
 .amteam-clogging-frame-jump {
-  display: grid;
-  gap: 2px;
-  min-width: 0;
-  padding: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 1px;
+  min-width: 130px;
+  padding: 3px 5px;
   border: 0;
   background: transparent;
   color: inherit;
@@ -2134,19 +2229,23 @@
 }
 
 .amteam-clogging-frame-jump:focus-visible {
-  outline: 2px solid rgba(26, 94, 153, 0.32);
-  outline-offset: 3px;
+  outline: 0;
 }
 
 .amteam-clogging-frame span {
+  display: block;
+  width: 100%;
   color: var(--amteam-blue);
   font-size: 0.72rem;
   font-weight: 800;
   line-height: 1.2;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .amteam-clogging-frame strong {
+  display: block;
+  width: 100%;
   min-width: 0;
   overflow: hidden;
   color: var(--amteam-text);
@@ -2367,6 +2466,57 @@
   color: var(--amteam-blue);
   cursor: default;
   opacity: 1;
+}
+
+.amteam-defect-treelist .amteam-defect-header-cell,
+.amteam-defect-treelist .amteam-defect-row,
+.amteam-defect-treelist .amteam-defect-cell,
+.amteam-defect-treelist strong,
+.amteam-defect-treelist button,
+.amteam-defect-treelist input,
+.amteam-defect-treelist select,
+.amteam-defect-treelist span {
+  font-size: var(--amteam-defect-table-font-size);
+}
+
+.amteam-defect-treelist .amteam-defect-tree-toggle,
+.amteam-defect-treelist .amteam-defect-mlo-button,
+.amteam-defect-treelist .amteam-snapshot-link,
+.amteam-defect-treelist .amteam-distance-confirm-button,
+.amteam-defect-treelist .amteam-distance-confirm-button.confirmed,
+.amteam-defect-treelist .amteam-distance-confirm-button.needs-review,
+.amteam-defect-treelist .amteam-distance-confirm-button:disabled {
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: 0;
+}
+
+.amteam-defect-treelist .amteam-tree-review-control input,
+.amteam-defect-treelist .amteam-observation-role-control select {
+  min-height: 22px;
+  border: 0;
+  border-bottom: 1px solid rgba(15, 76, 129, 0.22);
+  background: transparent;
+  box-shadow: none;
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button {
+  color: var(--amteam-blue);
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button.confirmed {
+  color: var(--amteam-accent);
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button.needs-review {
+  color: #a92420;
+}
+
+.amteam-defect-treelist .amteam-defect-distance-row .amteam-defect-tree-toggle strong {
+  font-size: calc(var(--amteam-defect-table-font-size) + 2pt);
 }
 
 .amteam-observation-distance-cards {
@@ -3319,6 +3469,65 @@
   animation: amteam-spin 800ms linear infinite;
 }
 
+.amteam-report-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2200;
+  display: grid;
+  place-items: center;
+  background: rgba(12, 26, 40, 0.36);
+  backdrop-filter: blur(2px);
+}
+
+.amteam-report-progress-panel {
+  display: grid;
+  width: min(320px, calc(100vw - 48px));
+  gap: 10px;
+  justify-items: center;
+  padding: 24px 28px;
+  border: 1px solid var(--amteam-border-strong);
+  background: #fff;
+  box-shadow: 0 20px 46px rgba(28, 53, 78, 0.24);
+  color: var(--amteam-text);
+  text-align: center;
+}
+
+.amteam-report-progress-panel .spin {
+  color: var(--amteam-blue);
+  animation: amteam-spin 800ms linear infinite;
+}
+
+.amteam-report-progress-panel strong {
+  color: var(--amteam-blue);
+  font-size: 1rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.amteam-report-progress-panel span {
+  color: var(--amteam-muted);
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.amteam-report-progress-bar {
+  position: relative;
+  width: 100%;
+  height: 6px;
+  overflow: hidden;
+  background: #dbe8f4;
+}
+
+.amteam-report-progress-bar i {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -42%;
+  width: 42%;
+  background: var(--amteam-blue);
+  animation: amteam-report-progress 1.15s ease-in-out infinite;
+}
+
 .amteam-document > .amteam-status-message {
   margin: 16px 0 0;
 }
@@ -3332,6 +3541,16 @@
 @keyframes amteam-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+@keyframes amteam-report-progress {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(340%);
   }
 }
 

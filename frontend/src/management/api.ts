@@ -118,6 +118,101 @@ export type BulkPermissionAssignment = {
   permission_level: number | null
 }
 
+export type CctvReviewReportStatus = 'pending' | 'ready_to_review' | 'completed'
+
+export type CctvReviewReport = {
+  id: number
+  report_key: string
+  report_name: string
+  binding_type: 'address' | 'project_title'
+  binding_text: string
+  inspection_date_text: string
+  status: CctvReviewReportStatus
+  created_by_user_id: number | null
+  created_by_name: string | null
+  created_at: string
+  updated_by_user_id: number | null
+  updated_by_name: string | null
+  updated_at: string
+  submitted_by_user_id: number | null
+  submitted_by_name: string | null
+  submitted_at: string | null
+  reviewed_by_user_id: number | null
+  reviewed_by_name: string | null
+  reviewed_at: string | null
+  can_delete?: boolean
+}
+
+export type CctvReviewReportEvent = {
+  id: number
+  report_id: number
+  event_type: string
+  event_by_user_id: number | null
+  event_by_name: string | null
+  event_at: string
+  from_status: CctvReviewReportStatus | null
+  to_status: CctvReviewReportStatus | null
+  memo: string | null
+}
+
+export type CctvReviewObservationSave = {
+  mlo_id: string | null
+  source_observation_key: string
+  defect_role: 'none' | 'major' | 'other'
+  is_extensive: boolean
+  selected_picture_file_name: string | null
+}
+
+export type CctvReviewDistanceGroupSave = {
+  distance_key: string
+  distance_feet: number | null
+  am_score: number | null
+  defect_comment: string | null
+  no_am_score_ge_3_confirmed: boolean
+  observations: CctvReviewObservationSave[]
+}
+
+export type CctvReviewPipeSave = {
+  ml_id: string
+  mli_id: string
+  clogging_percent: number
+  clogging_comment: string | null
+  clogging_frame_seconds: number | null
+  distance_groups: CctvReviewDistanceGroupSave[]
+}
+
+export type CctvReviewReportSavePayload = {
+  report_key: string
+  report_name: string
+  binding_type: CctvReviewReport['binding_type']
+  binding_text: string
+  inspection_date_text: string
+  memo?: string | null
+  pipes: CctvReviewPipeSave[]
+}
+
+export type CctvReviewSavedObservation = CctvReviewObservationSave & {
+  id: number
+  distance_group_id: number
+}
+
+export type CctvReviewSavedDistanceGroup = Omit<CctvReviewDistanceGroupSave, 'observations'> & {
+  id: number
+  pipe_review_id: number
+  observations: CctvReviewSavedObservation[]
+}
+
+export type CctvReviewSavedPipe = Omit<CctvReviewPipeSave, 'distance_groups'> & {
+  id: number
+  report_id: number
+  distance_groups: CctvReviewSavedDistanceGroup[]
+}
+
+export type CctvReviewReportDetail = {
+  report: CctvReviewReport
+  pipes: CctvReviewSavedPipe[]
+}
+
 export type ResourceDiscoveryStatus = 'new' | 'changed' | 'unchanged' | 'conflict' | 'invalid' | 'stale' | 'inactive_stale'
 
 export type ResourceDiscoveryItem = {
@@ -474,6 +569,59 @@ export function updatePermissionMatrix(payload: {
     method: 'PUT',
     body: JSON.stringify(payload),
   })
+}
+
+export function fetchCctvReviewReports() {
+  return requestJson<{ reports: CctvReviewReport[]; total: number }>('/api/reports/proactive-team-cctv-review/reports')
+}
+
+export function fetchCctvReviewReportDetail(reportId: number) {
+  return requestJson<CctvReviewReportDetail>(`/api/reports/proactive-team-cctv-review/reports/${reportId}`)
+}
+
+export function saveCctvReviewReport(payload: CctvReviewReportSavePayload) {
+  return requestJson<{ ok: boolean; created: boolean; report: CctvReviewReport }>(
+    '/api/reports/proactive-team-cctv-review/reports/save',
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function updateCctvReviewReportStatus(
+  reportId: number,
+  payload: { action: 'submit_to_review' | 'return_to_edit' | 'complete'; memo?: string },
+) {
+  return requestJson<{ ok: boolean; report_id: number; from_status: CctvReviewReportStatus; to_status: CctvReviewReportStatus }>(
+    `/api/reports/proactive-team-cctv-review/reports/${reportId}/status`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function deleteCctvReviewReport(reportId: number) {
+  return requestJson<{
+    ok: boolean
+    report_id: number
+    deleted: {
+      observations: number
+      distance_groups: number
+      pipes: number
+      events: number
+      reports: number
+    }
+  }>(`/api/reports/proactive-team-cctv-review/reports/${reportId}`, {
+    method: 'DELETE',
+  })
+}
+
+export function fetchCctvReviewReportEvents(reportId: number) {
+  return requestJson<{ events: CctvReviewReportEvent[]; total: number }>(
+    `/api/reports/proactive-team-cctv-review/reports/${reportId}/events`,
+  )
 }
 
 export function fetchAuditLogs() {

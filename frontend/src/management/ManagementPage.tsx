@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, type CSSProperties, type FormEvent } from 'react'
+import { toast } from 'sonner'
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -391,6 +392,14 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
       ],
     [canManage],
   )
+
+  useEffect(() => {
+    if (status) toast(status)
+  }, [status])
+
+  useEffect(() => {
+    if (error) toast.error(error)
+  }, [error])
 
   async function loadSelf() {
     const [me, resourcesResponse, featuredResponse] = await Promise.all([
