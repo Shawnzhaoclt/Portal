@@ -932,10 +932,36 @@
 
 .management-permission-toolbar {
   display: grid;
-  grid-template-columns: minmax(220px, 2fr) 100px minmax(180px, 1fr) 110px max-content;
+  grid-template-columns: minmax(220px, 2fr) 100px minmax(180px, 1fr) minmax(440px, 2fr) max-content;
   gap: 8px;
   border-bottom: 1px solid #d6dee8;
   padding: 14px 16px;
+}
+
+.management-permission-type-options {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 12px;
+}
+
+.management-permission-type-options label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: max-content;
+  color: #1f2933;
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.management-permission-type-options input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
 }
 
 .management-permission-bulk-toolbar {
@@ -1035,7 +1061,12 @@
 }
 
 .management-permission-matrix {
-  min-width: 980px;
+  min-width: 1240px;
+}
+
+.management-permission-matrix th:last-child,
+.management-permission-matrix td:last-child {
+  width: 520px;
 }
 
 .management-permission-matrix td:first-child,

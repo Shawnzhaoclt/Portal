@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import DashboardLinksPage from './DashboardLinksPage'
 import HomePage from './HomePage'
 import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
+import ProactiveCCTVReviewHelp from './resources/reports/proactive-team-cctv-review/ProactiveCCTVReviewHelp'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
 import GISCriticalAssetHistoryDashboard from './dashboards/gis/GISCriticalAssetHistoryDashboard'
@@ -13,11 +14,11 @@ import { clearManagementToken, fetchMe, storedManagementToken } from './manageme
 import {
   ADMIN_MANAGEMENT_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
-  CRITICAL_TEAM_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
   GIS_HISTORY_ROUTE,
   PORTAL_LOGIN_ROUTE,
+  PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE,
   PLANNING_PENDING_AIF_QA_ROUTE,
   PROACTIVE_TEAM_CCTV_REVIEW_ROUTE,
   STM_RISK_MAP_ROUTE,
@@ -116,6 +117,11 @@ export default function AppRoutes() {
     return <ProactiveTeamCCTVReview />
   }
 
+  if (path === PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE) {
+    setPageMeta('Proactive CCTV Review Help')
+    return <ProactiveCCTVReviewHelp />
+  }
+
   if (path === PLANNING_PENDING_AIF_QA_ROUTE) {
     setPageMeta('Planning Pending AIF QA/QC')
     return <PlanningPendingAifQaTable />
@@ -157,7 +163,7 @@ export default function AppRoutes() {
   }
 
   const criticalTeamSheetId = criticalTeamSheetIdFromPath(path)
-  if (path === CRITICAL_TEAM_ROUTE || criticalTeamSheetId) {
+  if (criticalTeamSheetId) {
     setPageMeta('Critical Team Dashboard')
     return <CriticalTeamDashboard initialSheetId={criticalTeamSheetId ?? undefined} />
   }

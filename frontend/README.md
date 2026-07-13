@@ -27,7 +27,7 @@ pnpm ingest:critical-team
 Critical Team dashboard route:
 
 ```text
-http://10.40.68.23:5173/dashboard_critical_team
+http://10.40.68.23:5173/dashboard_critical_team_overview
 ```
 
 Use `pnpm exec tsc -b` for a compile check when you want to keep only one `index.html`; `pnpm build` creates `dist/index.html` as a generated build artifact.

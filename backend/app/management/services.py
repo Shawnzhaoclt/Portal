@@ -13,12 +13,16 @@ from backend.app.management.resource_ids import normalize_resource_id, resource_
 from backend.app.management.security import utc_now_text
 from backend.app.resources.metadata import load_resource_metadata
 
-PERMISSION_LABELS = {
-    10: "view",
-    20: "edit",
-    30: "manage",
-    40: "admin",
+PERMISSION_TYPES = {
+    "view": 1,
+    "edit": 2,
+    "review": 4,
+    "create": 8,
+    "delete": 16,
+    "manage": 32,
+    "admin": 64,
 }
+ALL_PERMISSION_MASK = sum(PERMISSION_TYPES.values())
 
 ROLE_USER = "user"
 ROLE_ADMIN = "admin"
@@ -192,26 +196,57 @@ def creates_team_cycle(db: Session, team_id: int, parent_team_id: int | None) ->
 def permission_label(level: int | None) -> str | None:
     if level is None:
         return None
-    return PERMISSION_LABELS.get(level, str(level))
+    labels = permission_types(level)
+    return ", ".join(labels) if labels else None
+
+
+def permission_types(level: int | None) -> list[str]:
+    if not level:
+        return []
+    return [name for name, bit in PERMISSION_TYPES.items() if int(level) & bit]
+
+
+def is_valid_permission_mask(level: int | None) -> bool:
+    return bool(level) and int(level) > 0 and int(level) & ~ALL_PERMISSION_MASK == 0
+
+
+def combine_permission_masks(levels) -> int:
+    result = 0
+    for level in levels:
+        if level:
+            result |= int(level)
+    return result
+
+
+def permission_result(level: int, sources: list[str] | tuple[str, ...]) -> dict[str, Any] | None:
+    if not level:
+        return None
+    unique_sources = list(dict.fromkeys(source for source in sources if source))
+    return {
+        "permission_level": level,
+        "permission": permission_label(level),
+        "permission_types": permission_types(level),
+        "source": " + ".join(unique_sources),
+    }
 
 
 def effective_resource_permission(db: Session, user: User, resource: Resource) -> dict[str, Any] | None:
     if resource.is_active != 1:
         return None
 
-    best_level = 0
-    source = None
+    permission_mask = 0
+    sources: list[str] = []
 
     if resource.is_public:
-        best_level = 10
-        source = "public"
+        permission_mask |= PERMISSION_TYPES["view"]
+        sources.append("public")
 
     active_role = selected_user_role(user)
     if active_role == ROLE_SYSTEM_ADMIN:
-        return {"permission_level": 40, "permission": "admin", "source": "system_admin"}
+        return permission_result(ALL_PERMISSION_MASK, ["system_admin"])
 
     if active_role == ROLE_ADMIN:
-        return {"permission_level": 40, "permission": "admin", "source": "portal_admin"}
+        return permission_result(ALL_PERMISSION_MASK, ["portal_admin"])
 
     team_permission_scopes = [
         (team_ancestor_ids(db, user.team_id), "team"),
@@ -220,29 +255,27 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
     for team_ids, team_source in team_permission_scopes:
         if not team_ids:
             continue
-        team_permission = db.scalar(
-            select(func.max(ResourcePermission.permission_level)).where(
+        team_permission = combine_permission_masks(db.scalars(
+            select(ResourcePermission.permission_level).where(
                 ResourcePermission.resource_id == resource.resource_id,
                 ResourcePermission.team_id.in_(team_ids),
             )
-        )
-        if team_permission and team_permission > best_level:
-            best_level = int(team_permission)
-            source = team_source
+        ).all())
+        if team_permission:
+            permission_mask |= team_permission
+            sources.append(team_source)
 
-    direct_permission = db.scalar(
-        select(func.max(ResourcePermission.permission_level)).where(
+    direct_permission = combine_permission_masks(db.scalars(
+        select(ResourcePermission.permission_level).where(
             ResourcePermission.resource_id == resource.resource_id,
             ResourcePermission.user_id == user.id,
         )
-    )
-    if direct_permission and direct_permission > best_level:
-        best_level = int(direct_permission)
-        source = "user"
+    ).all())
+    if direct_permission:
+        permission_mask |= direct_permission
+        sources.append("user")
 
-    if not best_level:
-        return None
-    return {"permission_level": best_level, "permission": permission_label(best_level), "source": source}
+    return permission_result(permission_mask, sources)
 
 
 def serialize_team(db: Session, team: Team) -> dict[str, Any]:
@@ -292,6 +325,7 @@ def serialize_user(db: Session, user: User) -> dict[str, Any]:
 
 
 def serialize_resource(resource: Resource, effective: dict[str, Any] | None = None) -> dict[str, Any]:
+    metadata = next((item for item in load_resource_metadata() if item.get("resource_slug") == resource.resource_key), {})
     return {
         "id": resource.id,
         "resource_id": resource.resource_id,
@@ -303,6 +337,7 @@ def serialize_resource(resource: Resource, effective: dict[str, Any] | None = No
         "description": resource.description,
         "category": resource.category,
         "icon": resource.icon,
+        "help_url": metadata.get("help_url"),
         "is_public": bool(resource.is_public),
         "is_active": bool(resource.is_active),
         "created_at": resource.created_at,
@@ -551,6 +586,7 @@ def serialize_permission(db: Session, permission: ResourcePermission) -> dict[st
         "team_name": team.name if team else None,
         "permission_level": permission.permission_level,
         "permission": permission_label(permission.permission_level),
+        "permission_types": permission_types(permission.permission_level),
         "created_by_user_id": permission.created_by_user_id,
         "created_at": permission.created_at,
         "updated_at": permission.updated_at,

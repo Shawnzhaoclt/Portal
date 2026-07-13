@@ -125,7 +125,7 @@
 }
 
 .cctv-report-table {
-  width: var(--cctv-report-table-width, 1380px);
+  width: max(100%, var(--cctv-report-table-width, 1380px));
   min-width: var(--cctv-report-table-width, 1380px);
   border-collapse: collapse;
   table-layout: fixed;

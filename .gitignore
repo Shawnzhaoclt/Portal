@@ -15,6 +15,7 @@ frontend/node_modules/.tmp/
 
 # Local/generated dashboard data
 backend/data/
+maintainace/backups/
 frontend/data/*.duckdb
 frontend/public/data/*.json
 backend/app/dashboards/map_tiles/runtime/build/pmtiles/

@@ -4,6 +4,7 @@
   "type": "report",
   "name": "Proactive Team CCTV Review",
   "url": "/report_proactive_team_cctv_review",
+  "help_url": "/help_proactive_team_cctv_review",
   "category": "Operations",
   "description": "Search CCTV pipe records, choose inspections, and compile proactive team review reports with defects and media.",
   "is_public": false,

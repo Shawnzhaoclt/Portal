@@ -95,7 +95,7 @@ Each Portal item should have one resource record.
 Examples:
 
 ```text
-/dashboard_critical_team
+/dashboard_critical_team_overview
 /map_stm_risk
 /tab_asset_inventory
 /doc_cctv_review_guide
@@ -143,12 +143,17 @@ Use resource-level access rules. Permissions can be assigned directly to users o
 
 Recommendation: use team-based permission management as the default. Individual user permissions should be used only for exceptions, temporary access, testing, or special admin cases.
 
-Suggested permission levels:
+Supported permission types:
 
 - `view`
 - `edit`
+- `review`
+- `create`
+- `delete`
 - `manage`
 - `admin`
+
+A user or team may hold multiple permission types for the same resource.
 
 For most Portal dashboards, maps, tables, and documents, `view` will be enough.
 
@@ -161,7 +166,7 @@ Suggested permission policy:
 - Use individual permissions only when one user needs access different from their team.
 - Show both assigned permission and effective permission in the management UI.
 - Show where effective access comes from: public, direct user permission, team permission, inherited parent team permission, portal admin, or system admin.
-- Public resources grant view access only. Edit, manage, and admin access still require explicit permission.
+- Public resources grant view access only. Edit, review, create, delete, manage, and admin capabilities still require explicit permission.
 - Permission changes should always write an audit log entry.
 
 ## Access Decision Rule
@@ -174,7 +179,7 @@ When a user requests a resource:
 4. Check permissions from the user's team.
 5. Include permissions inherited from parent teams.
 6. Check direct user permissions for the resource.
-7. Use the highest permission level found.
+7. Combine all permission types found into the effective permission set.
 
 If no matching permission is found, deny access.
 
@@ -264,13 +269,16 @@ PRAGMA foreign_keys = ON;
 
 SQLite stores booleans as integers, so boolean fields use `0` and `1` with `CHECK` constraints.
 
-Permission levels should use numeric values so the backend can easily select the highest effective permission:
+Permission types use bit values so multiple capabilities can be stored in one assignment and combined efficiently:
 
 ```text
-10 = view
-20 = edit
-30 = manage
-40 = admin
+1  = view
+2  = edit
+4  = review
+8  = create
+16 = delete
+32 = manage
+64 = admin
 ```
 
 ### SYS_TEAMS
@@ -390,7 +398,7 @@ Notes:
 
 Resource ID format:
 
-- `DAS` plus five random uppercase letters or digits: dashboard resources, such as `DASRHMBK`.
+- `DAS` plus five random uppercase letters or digits: dashboard resources, such as `DASXKG5R`.
 - `MAP` plus five random uppercase letters or digits: map resources, such as `MAP0B5FJ`.
 - `TAB` plus five random uppercase letters or digits: table resources, such as `TABT946I`.
 - `DOC` plus five random uppercase letters or digits: document resources.
@@ -410,7 +418,7 @@ CREATE TABLE SYS_RESOURCE_PERMISSIONS (
   resource_id TEXT NOT NULL,
   user_id INTEGER,
   team_id INTEGER,
-  permission_level INTEGER NOT NULL CHECK (permission_level IN (10, 20, 30, 40)),
+  permission_level INTEGER NOT NULL CHECK (permission_level BETWEEN 1 AND 127),
   created_by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -431,6 +439,7 @@ CREATE TABLE SYS_RESOURCE_PERMISSIONS (
 Notes:
 
 - A permission row belongs to either one user or one team.
+- A permission row stores a bitmask containing one or more permission types.
 - `resource_id` stores the public 8-character resource ID from `SYS_RESOURCES.resource_id`, not the internal primary key.
 - A permission row should not belong to both a user and a team.
 - A permission row should not have both `user_id` and `team_id` empty.
@@ -643,6 +652,34 @@ First version:
 - Public/private resource toggle
 - Access-filtered portal catalog
 - Personalized featured resources on the Portal home page
+
+## Resource Launch Context
+
+When an authenticated user opens a resource from the Portal, the Portal appends the
+current identity and effective resource permissions to the resource URL. Resources
+can read these query parameters in frontend or backend integration code:
+
+```text
+portal_resource_id
+portal_email
+portal_employeeid
+portal_first_name
+portal_last_name
+portal_team_name
+portal_is_manager
+portal_user_role
+portal_permission
+portal_permission_level
+portal_permission_types
+portal_permission_source
+```
+
+`portal_permission_types` is a comma-separated list such as
+`view,review,create`. `portal_permission_level` is the corresponding bitmask, and
+`portal_permission_source` identifies where the effective permissions came from,
+such as `team + user`. The backend remains the authority for protected operations;
+resources must not treat URL parameters as a substitute for server-side permission
+checks.
 
 ## Security Notes
 

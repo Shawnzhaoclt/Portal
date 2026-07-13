@@ -6,10 +6,14 @@ import type {
   CriticalTeamSummaryResponse,
   CriticalTeamWorkordersResponse,
 } from './types'
+import { storedManagementToken } from '../../management/api'
 
 async function apiGet<T>(path: string, params?: URLSearchParams): Promise<T> {
   const suffix = params && params.size > 0 ? `?${params.toString()}` : ''
-  const response = await fetch(`${path}${suffix}`)
+  const token = storedManagementToken()
+  const response = await fetch(`${path}${suffix}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+  })
 
   if (!response.ok) {
     const detail = await response.text()

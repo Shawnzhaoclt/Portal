@@ -349,11 +349,29 @@ function mediaAssetViewUrl(asset: AmTeamMediaAsset, mode: MediaSourceMode, media
   return asset.url
 }
 
+function uniqueMediaUrls(urls: Array<string | null | undefined>) {
+  return [...new Set(urls.filter((url): url is string => Boolean(url)))]
+}
+
+function mediaAssetViewUrls(asset: AmTeamMediaAsset, mode: MediaSourceMode, mediaRoot: string) {
+  return uniqueMediaUrls([
+    mediaAssetViewUrl(asset, mode, mediaRoot),
+    asset.url,
+  ])
+}
+
 function mediaViewUrl(url: string, mode: MediaSourceMode, mediaRoot: string) {
   if (mode === 'p-drive') {
     return localMediaUrl(mediaRoot, relativePathFromMediaApiUrl(url)) || url
   }
   return url
+}
+
+function mediaViewUrls(url: string, mode: MediaSourceMode, mediaRoot: string) {
+  return uniqueMediaUrls([
+    mediaViewUrl(url, mode, mediaRoot),
+    url,
+  ])
 }
 
 function fileNameFromMediaUrl(url: string) {
@@ -729,6 +747,14 @@ async function fetchReportImage(imageUrl: string): Promise<ReportImage | null> {
   }
 }
 
+async function fetchReportImageFromCandidates(imageUrls: string[]) {
+  for (const imageUrl of uniqueMediaUrls(imageUrls)) {
+    const image = await fetchReportImage(imageUrl)
+    if (image) return image
+  }
+  return null
+}
+
 async function fetchVideoFrameReportImage(videoUrl: string, timeSeconds: number): Promise<ReportImage | null> {
   if (!videoUrl || !Number.isFinite(timeSeconds)) return null
 
@@ -818,6 +844,14 @@ async function fetchVideoFrameReportImage(videoUrl: string, timeSeconds: number)
     video.src = videoUrl
     video.load()
   })
+}
+
+async function fetchVideoFrameReportImageFromCandidates(videoUrls: string[], timeSeconds: number) {
+  for (const videoUrl of uniqueMediaUrls(videoUrls)) {
+    const image = await fetchVideoFrameReportImage(videoUrl, timeSeconds)
+    if (image) return image
+  }
+  return null
 }
 
 function crc32(bytes: Uint8Array) {
@@ -1276,8 +1310,11 @@ async function buildReviewReportFile({
       if (!cloggingVideo) {
         throw new Error(`Inspection video for Asset ID ${reportAssetId(inspection)} was not found.`)
       }
-      const cloggingVideoUrl = mediaAssetViewUrl(cloggingVideo, mediaMode, cachedPipe?.media.media_root ?? '')
-      const cloggingImage = await fetchVideoFrameReportImage(cloggingVideoUrl, pipeReviewInput.cloggingSnapshotTimeSeconds ?? 0)
+      const cloggingVideoUrls = mediaAssetViewUrls(cloggingVideo, mediaMode, cachedPipe?.media.media_root ?? '')
+      const cloggingImage = await fetchVideoFrameReportImageFromCandidates(
+        cloggingVideoUrls,
+        pipeReviewInput.cloggingSnapshotTimeSeconds ?? 0,
+      )
       if (!cloggingImage) {
         throw new Error(
           `Unable to capture the clogging video frame for Asset ID ${reportAssetId(inspection)} at ${
@@ -1311,11 +1348,14 @@ async function buildReviewReportFile({
       const scopedMajorCardKey = pipeScopedKey(pipeId, majorEntry.cardKey)
       const selectedSnapshotUrl = snapshotSelections[scopedMajorCardKey]
       const majorImageUrls = observationImageUrls(majorEntry.observation)
-      const majorImageUrl = selectedSnapshotUrl
-        || (majorImageUrls[0]
-          ? mediaViewUrl(majorImageUrls[0], mediaMode, cachedPipe?.media.media_root ?? '')
-          : '')
-      const majorImage = await fetchReportImage(majorImageUrl)
+      const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
+      const selectedApiImageUrl = majorImageUrls.find((imageUrl) => (
+        fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
+      )) ?? majorImageUrls[0]
+      const majorImageCandidates = selectedApiImageUrl
+        ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
+        : uniqueMediaUrls([selectedSnapshotUrl])
+      const majorImage = await fetchReportImageFromCandidates(majorImageCandidates)
       const otherEntries = observationEntries.filter((entry) => selection.otherKeys.includes(entry.cardKey))
       const additionalCodes = otherEntries
         .map((entry) => observationReportText(entry.observation, Boolean(extensiveDefectSelections[pipeScopedKey(pipeId, entry.cardKey)])))
@@ -1742,20 +1782,35 @@ function SnapshotImageBox({
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
 }) {
-  const [failedUrls, setFailedUrls] = useState<string[]>([])
+  const [failedSourceUrls, setFailedSourceUrls] = useState<string[]>([])
+  const [sourceCandidateIndexes, setSourceCandidateIndexes] = useState<Record<string, number>>({})
   const [internalSelectedUrl, setInternalSelectedUrl] = useState<string | null>(null)
   const [isPickerOpen, setIsPickerOpen] = useState(false)
-  const viewUrls = imageUrls.map((imageUrl) => mediaViewUrl(imageUrl, mediaMode, mediaRoot))
-  const viewUrlKey = viewUrls.join('|')
-  const visibleUrls = viewUrls.filter((imageUrl) => !failedUrls.includes(imageUrl))
+  const mediaSources = imageUrls.map((sourceUrl) => ({
+    sourceUrl,
+    candidates: mediaViewUrls(sourceUrl, mediaMode, mediaRoot),
+  }))
+  const viewUrlKey = mediaSources.map(({ sourceUrl, candidates }) => `${sourceUrl}:${candidates.join(',')}`).join('|')
+  const visibleSources = mediaSources
+    .filter(({ sourceUrl }) => !failedSourceUrls.includes(sourceUrl))
+    .map((source) => ({
+      ...source,
+      viewUrl: source.candidates[Math.min(sourceCandidateIndexes[source.sourceUrl] ?? 0, source.candidates.length - 1)] ?? '',
+    }))
+    .filter(({ viewUrl }) => Boolean(viewUrl))
+  const visibleUrls = visibleSources.map(({ viewUrl }) => viewUrl)
   const currentSelectedUrl = selectedUrl ?? internalSelectedUrl
-  const selectedImageUrl = currentSelectedUrl && visibleUrls.includes(currentSelectedUrl) ? currentSelectedUrl : visibleUrls[0]
+  const selectedSource = currentSelectedUrl
+    ? visibleSources.find(({ candidates }) => candidates.includes(currentSelectedUrl))
+    : undefined
+  const selectedImageUrl = selectedSource?.viewUrl ?? visibleUrls[0]
   const selectedDisplayName = selectedImageUrl ? snapshotDisplayName(selectedImageUrl) : ''
   const selectedSnapshotIndex = selectedImageUrl ? visibleUrls.indexOf(selectedImageUrl) + 1 : 0
   const snapshotCountLabel = `${selectedSnapshotIndex}/${visibleUrls.length}`
 
   useEffect(() => {
-    setFailedUrls([])
+    setFailedSourceUrls([])
+    setSourceCandidateIndexes({})
     setInternalSelectedUrl(null)
     setIsPickerOpen(false)
   }, [viewUrlKey])
@@ -1808,10 +1863,10 @@ function SnapshotImageBox({
               </button>
             </header>
             <div className="amteam-snapshot-picker-grid">
-              {visibleUrls.map((imageUrl, index) => (
+              {visibleSources.map(({ sourceUrl, candidates, viewUrl: imageUrl }, index) => (
                 <button
                   type="button"
-                  key={imageUrl}
+                  key={sourceUrl}
                   className={imageUrl === selectedImageUrl ? 'selected' : ''}
                   aria-label={`Snapshot ${index + 1}: ${snapshotDisplayName(imageUrl)}`}
                   title={snapshotDisplayName(imageUrl)}
@@ -1824,9 +1879,19 @@ function SnapshotImageBox({
                     alt=""
                     loading="lazy"
                     src={imageUrl}
-                    onError={() => setFailedUrls((current) => (
-                      current.includes(imageUrl) ? current : [...current, imageUrl]
-                    ))}
+                    onError={() => {
+                      const currentCandidateIndex = sourceCandidateIndexes[sourceUrl] ?? 0
+                      if (currentCandidateIndex + 1 < candidates.length) {
+                        setSourceCandidateIndexes((currentIndexes) => ({
+                          ...currentIndexes,
+                          [sourceUrl]: currentCandidateIndex + 1,
+                        }))
+                        return
+                      }
+                      setFailedSourceUrls((current) => (
+                        current.includes(sourceUrl) ? current : [...current, sourceUrl]
+                      ))
+                    }}
                   />
                 </button>
               ))}
@@ -1963,12 +2028,14 @@ function InspectionVideoPlayer({
   const [currentTime, setCurrentTime] = useState(0)
   const [playbackRate, setPlaybackRate] = useState(1)
   const [pendingSeekRequest, setPendingSeekRequest] = useState<VideoSeekRequest | null>(null)
+  const [isUsingApiFallback, setUsingApiFallback] = useState(false)
 
   const selectedVideo = useMemo(
     () => videos.find((video) => video.relative_path === selectedVideoPath) ?? videos[0] ?? null,
     [selectedVideoPath, videos],
   )
-  const selectedVideoUrl = selectedVideo ? mediaAssetViewUrl(selectedVideo, mediaMode, mediaRoot) : ''
+  const selectedVideoUrls = selectedVideo ? mediaAssetViewUrls(selectedVideo, mediaMode, mediaRoot) : []
+  const selectedVideoUrl = selectedVideoUrls[isUsingApiFallback ? selectedVideoUrls.length - 1 : 0] ?? ''
 
   useEffect(() => {
     setSelectedVideoPath((currentPath) => {
@@ -1976,6 +2043,10 @@ function InspectionVideoPlayer({
       return videos[0]?.relative_path ?? ''
     })
   }, [videos])
+
+  useEffect(() => {
+    setUsingApiFallback(false)
+  }, [mediaMode, mediaRoot, selectedVideo?.relative_path])
 
   useEffect(() => {
     const video = videoRef.current
@@ -2109,6 +2180,11 @@ function InspectionVideoPlayer({
         ref={videoRef}
         src={selectedVideoUrl}
         onEnded={() => setIsPlaying(false)}
+        onError={() => {
+          if (!isUsingApiFallback && selectedVideoUrls.length > 1) {
+            setUsingApiFallback(true)
+          }
+        }}
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
         onPause={() => setIsPlaying(false)}
         onPlay={() => setIsPlaying(true)}

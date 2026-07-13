@@ -7,7 +7,6 @@ import type {
   CustomSeriesRenderItemParams,
   CustomSeriesRenderItemReturn,
   EChartsOption,
-  LineSeriesOption,
 } from 'echarts'
 import {
   ArrowDown,
@@ -17,7 +16,6 @@ import {
   BarChart3,
   CalendarCheck,
   CalendarDays,
-  ChartLine,
   ChevronLeft,
   ChevronRight,
   ChevronsLeft,
@@ -258,6 +256,18 @@ const SHEETS: SheetDefinition[] = [
     description: 'Operational detail rows from the same Cityworks source.',
   },
 ]
+
+const SUBMIT_TO_SCOPED_SHEET_IDS = new Set([
+  'insp-proj-start-date',
+  'insp-comp-date-bar-chart',
+  'insp-comp-date-table',
+  'report-comp-date-chart',
+  'report-comp-date-table',
+])
+const CLOSED_BY_SCOPED_SHEET_IDS = new Set([
+  'insp-comp-date-reviews',
+  'insp-comp-date-reviews-table',
+])
 
 function initialSheetIdFromUrl(initialSheetId?: string) {
   if (initialSheetId && SHEETS.some((sheet) => sheet.id === initialSheetId)) return initialSheetId
@@ -535,22 +545,22 @@ function columnLetter(index: number) {
   return column
 }
 
-function xlsxCell(value: AssetRow[string], column: DetailColumnKey, rowIndex: number, columnIndex: number) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  if (value === null || value === undefined || value === '') {
-    return `<c r="${cellRef}"/>`
-  }
+function workOrderHref(value: AssetRow[string]) {
+  const workOrderId = String(value ?? '').trim()
+  if (!/^\d+$/.test(workOrderId)) return null
+  return `https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/WOGeneralEdit.aspx?WorkOrderId=${workOrderId}`
+}
 
-  if (typeof value === 'number') {
-    return `<c r="${cellRef}"><v>${value}</v></c>`
-  }
-
-  const rawText = String(value).trim()
-  if ((column === 'workorder_id' || column === 'facility_id') && /^\d+$/.test(rawText)) {
-    return `<c r="${cellRef}"><v>${escapeXml(rawText)}</v></c>`
-  }
-
-  return `<c r="${cellRef}" t="inlineStr"><is><t>${escapeXml(String(valueText(value)))}</t></is></c>`
+function formatExcelGeneratedAt(date: Date) {
+  const parts = [
+    date.getMonth() + 1,
+    date.getDate(),
+    date.getFullYear(),
+    date.getHours(),
+    date.getMinutes(),
+    date.getSeconds(),
+  ].map((value, index) => (index === 2 ? String(value) : String(value).padStart(2, '0')))
+  return `${parts[0]}-${parts[1]}-${parts[2]}, ${parts[3]}:${parts[4]}:${parts[5]}`
 }
 
 function xlsxTextCell(columnIndex: number, rowIndex: number, value: string) {
@@ -727,29 +737,180 @@ function worksheetPackage(sheetName: string, worksheet: string) {
 }
 
 function createWorkOrderXlsx(rows: AssetRow[]) {
-  const headerCells = DETAIL_COLUMNS.map(
-    (column, columnIndex) =>
-      `<c r="${columnLetter(columnIndex)}1" t="inlineStr"><is><t>${escapeXml(column.label)}</t></is></c>`,
-  ).join('')
+  const hyperlinkRelationships: Array<{ id: string; target: string }> = []
+  const hyperlinkRefs: Array<{ ref: string; relationshipId: string }> = []
+  const titleRowIndex = 1
+  const generatedAtRowIndex = 2
+  const headerRowIndex = 3
+  const firstDataRowIndex = 4
+  const lastColumnLetter = columnLetter(DETAIL_COLUMNS.length - 1)
+  const lastRowIndex = Math.max(headerRowIndex, rows.length + firstDataRowIndex - 1)
+  const titleText = `Work Order Detail - ${formatNumber(rows.length)} Work Orders`
+  const generatedAtText = `Generated at ${formatExcelGeneratedAt(new Date())}`
+  const columnWidths = DETAIL_COLUMNS.map((column) => {
+    const maxContentLength = rows.reduce((maxLength, row) => {
+      const text = valueText(row[column.key], column.key)
+      return Math.max(maxLength, text === '-' ? 0 : text.length)
+    }, column.label.length)
+    const minimumWidth = column.key === 'workorder_id' ? 15 : 10
+    return Math.min(Math.max(maxContentLength + 2, minimumWidth), 38)
+  })
+  const columnXml = `<cols>${columnWidths
+    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width.toFixed(1)}" customWidth="1"/>`)
+    .join('')}</cols>`
+  const titleCells = DETAIL_COLUMNS.map((_, columnIndex) => {
+    const ref = `${columnLetter(columnIndex)}${titleRowIndex}`
+    return columnIndex === 0
+      ? `<c r="${ref}" s="2" t="inlineStr"><is><t>${escapeXml(titleText)}</t></is></c>`
+      : `<c r="${ref}" s="2"/>`
+  }).join('')
+  const generatedAtCells = DETAIL_COLUMNS.map((_, columnIndex) => {
+    const ref = `${columnLetter(columnIndex)}${generatedAtRowIndex}`
+    return columnIndex === 0
+      ? `<c r="${ref}" s="6" t="inlineStr"><is><t>${escapeXml(generatedAtText)}</t></is></c>`
+      : `<c r="${ref}" s="6"/>`
+  }).join('')
+  const headerCells = DETAIL_COLUMNS.map((column, columnIndex) => {
+    const ref = `${columnLetter(columnIndex)}${headerRowIndex}`
+    return `<c r="${ref}" s="3" t="inlineStr"><is><t>${escapeXml(column.label)}</t></is></c>`
+  }).join('')
   const bodyRows = rows
     .map((row, rowIndex) => {
-      const sheetRowIndex = rowIndex + 2
-      const cells = DETAIL_COLUMNS.map((column, columnIndex) =>
-        xlsxCell(row[column.key], column.key, sheetRowIndex, columnIndex),
-      ).join('')
+      const sheetRowIndex = rowIndex + firstDataRowIndex
+      const isBanded = rowIndex % 2 === 1
+      const cells = DETAIL_COLUMNS.map((column, columnIndex) => {
+        const ref = `${columnLetter(columnIndex)}${sheetRowIndex}`
+        const text = valueText(row[column.key], column.key)
+        const href = column.key === 'workorder_id' ? workOrderHref(row[column.key]) : null
+        const defaultStyle = isBanded ? 4 : 0
+        const hyperlinkStyle = isBanded ? 5 : 1
+        if (!text || text === '-') return `<c r="${ref}" s="${defaultStyle}"/>`
+        if (href) {
+          const relationshipId = `rId${hyperlinkRelationships.length + 1}`
+          hyperlinkRelationships.push({ id: relationshipId, target: href })
+          hyperlinkRefs.push({ ref, relationshipId })
+          return `<c r="${ref}" s="${hyperlinkStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
+        }
+        return `<c r="${ref}" s="${defaultStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
+      }).join('')
       return `<row r="${sheetRowIndex}">${cells}</row>`
     })
     .join('')
-  const lastCell = `${columnLetter(DETAIL_COLUMNS.length - 1)}${Math.max(1, rows.length + 1)}`
+  const lastCell = `${lastColumnLetter}${lastRowIndex}`
+  const hyperlinkXml = hyperlinkRefs.length
+    ? `<hyperlinks>${hyperlinkRefs.map((link) => `<hyperlink ref="${link.ref}" r:id="${link.relationshipId}"/>`).join('')}</hyperlinks>`
+    : ''
   const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
   <dimension ref="A1:${lastCell}"/>
+  <sheetViews><sheetView workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
+  <sheetFormatPr defaultRowHeight="18"/>
+  ${columnXml}
   <sheetData>
-    <row r="1">${headerCells}</row>
+    <row r="${titleRowIndex}" ht="28" customHeight="1">${titleCells}</row>
+    <row r="${generatedAtRowIndex}" ht="20" customHeight="1">${generatedAtCells}</row>
+    <row r="${headerRowIndex}" ht="22" customHeight="1">${headerCells}</row>
     ${bodyRows}
   </sheetData>
+  <autoFilter ref="A${headerRowIndex}:${lastColumnLetter}${lastRowIndex}"/>
+  <mergeCells count="2"><mergeCell ref="A1:${lastColumnLetter}1"/><mergeCell ref="A2:${lastColumnLetter}2"/></mergeCells>
+  ${hyperlinkXml}
 </worksheet>`
-  return worksheetPackage('Work Order Detail', worksheet)
+
+  const workbookFiles = [
+    {
+      name: '[Content_Types].xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+</Types>`,
+    },
+    {
+      name: '_rels/.rels',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+</Relationships>`,
+    },
+    {
+      name: 'xl/workbook.xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <sheets><sheet name="Work Order Detail" sheetId="1" r:id="rId1"/></sheets>
+</workbook>`,
+    },
+    {
+      name: 'xl/_rels/workbook.xml.rels',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`,
+    },
+    {
+      name: 'xl/styles.xml',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <fonts count="5">
+    <font><sz val="11"/><name val="Calibri"/></font>
+    <font><u/><color rgb="FF0563C1"/><sz val="11"/><name val="Calibri"/></font>
+    <font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
+    <font><b/><sz val="11"/><color rgb="FF0B3558"/><name val="Calibri"/></font>
+    <font><i/><sz val="10"/><color rgb="FF5B6B80"/><name val="Calibri"/></font>
+  </fonts>
+  <fills count="5">
+    <fill><patternFill patternType="none"/></fill>
+    <fill><patternFill patternType="gray125"/></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FF1F5D8F"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFD6E7F2"/><bgColor indexed="64"/></patternFill></fill>
+    <fill><patternFill patternType="solid"><fgColor rgb="FFEAF3FA"/><bgColor indexed="64"/></patternFill></fill>
+  </fills>
+  <borders count="2">
+    <border><left/><right/><top/><bottom/><diagonal/></border>
+    <border>
+      <left style="thin"><color rgb="FFB7C7D8"/></left>
+      <right style="thin"><color rgb="FFB7C7D8"/></right>
+      <top style="thin"><color rgb="FFB7C7D8"/></top>
+      <bottom style="thin"><color rgb="FFB7C7D8"/></bottom>
+      <diagonal/>
+    </border>
+  </borders>
+  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
+  <cellXfs count="7">
+    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+    <xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
+    <xf numFmtId="0" fontId="4" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
+  </cellXfs>
+  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
+</styleSheet>`,
+    },
+    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
+  ]
+
+  if (hyperlinkRelationships.length > 0) {
+    workbookFiles.push({
+      name: 'xl/worksheets/_rels/sheet1.xml.rels',
+      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  ${hyperlinkRelationships
+    .map(
+      (link) =>
+        `<Relationship Id="${link.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXml(link.target)}" TargetMode="External"/>`,
+    )
+    .join('\n  ')}
+</Relationships>`,
+    })
+  }
+
+  return createZip(workbookFiles)
 }
 
 function downloadWorkOrderGridRows(rows: AssetRow[]) {
@@ -1059,20 +1220,28 @@ function makeOverviewTrendOption(
           },
         ]
       : []
-  const lineSeries: LineSeriesOption[] = seriesList.map((series) => {
+  const barSeries: BarSeriesOption[] = seriesList.map((series) => {
     const lookup = new Map(series.points.map((point) => [point.month_label, point.count_value]))
 
     return {
       name: series.label,
-      type: 'line',
-      smooth: true,
-      symbol: 'circle',
-      symbolSize: 7,
-      lineStyle: { width: 3, color: series.color },
+      type: 'bar',
+      barMinWidth: 3,
+      barMaxWidth: 28,
+      barGap: '12%',
+      barCategoryGap: '22%',
       itemStyle: { color: series.color },
-      areaStyle: {
-        color: series.color,
-        opacity: 0.08,
+      label: {
+        show: true,
+        position: 'top',
+        distance: 3,
+        color: '#334155',
+        fontSize: 10,
+        fontWeight: 700,
+        formatter: ({ value }) => {
+          const count = Number(value)
+          return count > 0 ? formatNumber(count) : ''
+        },
       },
       emphasis: { focus: 'series' },
       data: months.map((month) => lookup.get(month) ?? 0),
@@ -1098,7 +1267,7 @@ function makeOverviewTrendOption(
     },
     xAxis: {
       type: 'category',
-      boundaryGap: false,
+      boundaryGap: true,
       data: months,
       axisTick: { alignWithLabel: true },
       axisLine: { lineStyle: { color: '#cfd8e3' } },
@@ -1113,11 +1282,12 @@ function makeOverviewTrendOption(
     yAxis: {
       type: 'value',
       name: 'Work orders',
+      max: ({ max }) => Math.max(1, Math.ceil(max * 1.15)),
       nameTextStyle: { color: '#64748b', fontWeight: 700 },
       axisLabel: { color: '#64748b' },
       splitLine: { lineStyle: { color: '#e4ebf1' } },
     },
-    series: [...labelBandRuleSeries, ...dividerSeries, ...lineSeries],
+    series: [...labelBandRuleSeries, ...dividerSeries, ...barSeries],
   }
 }
 
@@ -2275,7 +2445,7 @@ function Overview({
         </div>
         <div className="overview-trend-card">
           <PanelHeader
-            icon={<ChartLine size={18} />}
+            icon={<BarChart3 size={18} />}
             title="Trend"
             description="Monthly totals for project starts, inspection completions, report completions, and review completions."
           />
@@ -2338,6 +2508,7 @@ function OverviewFiltersPanel({
     { label: 'Recent 2 years', range: createRecentOverviewDateRange(24) },
   ]
   const isAllTime = !filters.dateFrom && !filters.dateTo
+  const hideSubmitToFilter = options?.viewer_scope.submit_to_restricted ?? false
 
   return (
     <div className="filter-card">
@@ -2393,14 +2564,16 @@ function OverviewFiltersPanel({
         </div>
       </div>
 
-      <ChecklistFilter
-        icon={<UserRound size={15} />}
-        label="Submit To"
-        values={options?.submit_to ?? []}
-        selected={filters.submitTo}
-        allLabel="All submitters"
-        onChange={(submitTo) => onChange((current) => ({ ...current, submitTo }))}
-      />
+      {!hideSubmitToFilter ? (
+        <ChecklistFilter
+          icon={<UserRound size={15} />}
+          label="Submit To"
+          values={options?.submit_to ?? []}
+          selected={filters.submitTo}
+          allLabel="All submitters"
+          onChange={(submitTo) => onChange((current) => ({ ...current, submitTo }))}
+        />
+      ) : null}
 
       <ChecklistFilter
         icon={<UserRound size={15} />}
@@ -2567,6 +2740,10 @@ function SheetFilters({
   const defaultStatuses = sheetConfig?.default_statuses ?? []
   const activeYears = filters.tableauDefaults ? defaultYears : filters.years
   const activeStatuses = filters.tableauDefaults && sheet.kind !== 'details' ? defaultStatuses : filters.statuses
+  const hideSubmitToFilter =
+    (options?.viewer_scope.submit_to_restricted ?? false) && SUBMIT_TO_SCOPED_SHEET_IDS.has(sheet.id)
+  const hideClosedByFilter =
+    (options?.viewer_scope.closed_by_restricted ?? false) && CLOSED_BY_SCOPED_SHEET_IDS.has(sheet.id)
 
   return (
     <div className="filter-card">
@@ -2606,7 +2783,7 @@ function SheetFilters({
         />
       ) : null}
 
-      {sheet.groupColumn === 'submit_to' || sheet.kind === 'details' ? (
+      {!hideSubmitToFilter && (sheet.groupColumn === 'submit_to' || sheet.kind === 'details') ? (
         <ChecklistFilter
           icon={<UserRound size={15} />}
           label="Submit To"
@@ -2617,7 +2794,7 @@ function SheetFilters({
         />
       ) : null}
 
-      {sheet.groupColumn === 'wo_closed_by' || sheet.kind === 'details' ? (
+      {!hideClosedByFilter && (sheet.groupColumn === 'wo_closed_by' || sheet.kind === 'details') ? (
         <SelectFilter
           icon={<UserRound size={15} />}
           label="Closed By"
@@ -3430,9 +3607,22 @@ function DetailTable({
                 >
                   {DETAIL_COLUMNS.map((column) => {
                     const text = valueText(row[column.key], column.key)
+                    const href = column.key === 'workorder_id' ? workOrderHref(row[column.key]) : null
                     return (
                       <td key={column.key} title={text}>
-                        {text}
+                        {href ? (
+                          <a
+                            className="detail-table-link"
+                            href={href}
+                            target="_blank"
+                            rel="noreferrer"
+                            onClick={(event) => event.stopPropagation()}
+                          >
+                            {text}
+                          </a>
+                        ) : (
+                          text
+                        )}
                       </td>
                     )
                   })}

@@ -356,7 +356,16 @@ def _copy_legacy_resource_permissions(connection) -> None:
                 id, resource_id, user_id, team_id, permission_level, created_by_user_id, created_at, updated_at
             )
             SELECT
-                p.id, r.resource_id, p.user_id, p.team_id, p.permission_level, p.created_by_user_id,
+                p.id, r.resource_id, p.user_id, p.team_id,
+                CASE p.permission_level
+                    WHEN 10 THEN 1
+                    WHEN 20 THEN 2
+                    WHEN 25 THEN 4
+                    WHEN 30 THEN 32
+                    WHEN 40 THEN 64
+                    ELSE p.permission_level
+                END,
+                p.created_by_user_id,
                 p.created_at, p.updated_at
             FROM {_quote_identifier(legacy_table)} p
             INNER JOIN {_quote_identifier(RESOURCE_TABLE)} r
@@ -476,6 +485,17 @@ def _resource_permission_has_public_resource_fk(connection, table_name: str = "S
     return any(str(row[2]) == RESOURCE_TABLE and str(row[3]) == "resource_id" and str(row[4]) == "resource_id" for row in rows)
 
 
+def _resource_permission_uses_permission_mask(connection, table_name: str = "SYS_RESOURCE_PERMISSIONS") -> bool:
+    if not _table_exists(connection, table_name):
+        return False
+    sql = connection.execute(
+        text("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = :table_name"),
+        {"table_name": table_name},
+    ).scalar()
+    normalized_sql = " ".join(str(sql or "").split()).lower()
+    return "permission_level between 1 and 127" in normalized_sql
+
+
 def _permission_resource_value_sql(connection, table_name: str) -> tuple[str, str]:
     columns = _table_columns(connection, table_name)
     quoted_table = _quote_identifier(table_name)
@@ -511,7 +531,12 @@ def _migrate_resource_permission_resource_ids() -> None:
         if not _table_exists(connection, table_name):
             return
         columns = _table_columns(connection, table_name)
-        if "resource_record_id" not in columns and _resource_permission_has_public_resource_fk(connection, table_name):
+        uses_permission_mask = _resource_permission_uses_permission_mask(connection, table_name)
+        if (
+            "resource_record_id" not in columns
+            and _resource_permission_has_public_resource_fk(connection, table_name)
+            and uses_permission_mask
+        ):
             _create_resource_permission_indexes(connection, table_name)
             return
 
@@ -519,6 +544,20 @@ def _migrate_resource_permission_resource_ids() -> None:
         new_table = f"{table_name}_NEW"
         quoted_new_table = _quote_identifier(new_table)
         resource_value_sql, resource_join_sql = _permission_resource_value_sql(connection, table_name)
+        permission_value_sql = (
+            "p.permission_level"
+            if uses_permission_mask
+            else """
+                CASE p.permission_level
+                    WHEN 10 THEN 1
+                    WHEN 20 THEN 2
+                    WHEN 25 THEN 4
+                    WHEN 30 THEN 32
+                    WHEN 40 THEN 64
+                    ELSE p.permission_level
+                END
+            """
+        )
 
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
         connection.exec_driver_sql("BEGIN")
@@ -541,7 +580,7 @@ def _migrate_resource_permission_resource_ids() -> None:
                             OR
                             (user_id IS NULL AND team_id IS NOT NULL)
                         ),
-                        CONSTRAINT ck_resource_permissions_level CHECK (permission_level IN (10, 20, 30, 40)),
+                        CONSTRAINT ck_resource_permissions_level CHECK (permission_level BETWEEN 1 AND 127),
                         CONSTRAINT uq_resource_permission_user UNIQUE (resource_id, user_id),
                         CONSTRAINT uq_resource_permission_team UNIQUE (resource_id, team_id),
                         FOREIGN KEY(resource_id) REFERENCES {RESOURCE_TABLE} (resource_id) ON DELETE CASCADE ON UPDATE CASCADE,
@@ -559,7 +598,7 @@ def _migrate_resource_permission_resource_ids() -> None:
                         id, resource_id, user_id, team_id, permission_level, created_by_user_id, created_at, updated_at
                     )
                     SELECT
-                        p.id, {resource_value_sql}, p.user_id, p.team_id, p.permission_level,
+                        p.id, {resource_value_sql}, p.user_id, p.team_id, {permission_value_sql},
                         p.created_by_user_id, p.created_at, p.updated_at
                     FROM {quoted_table} p
                     {resource_join_sql}

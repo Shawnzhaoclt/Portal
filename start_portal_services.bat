@@ -160,7 +160,7 @@ echo   Local portal home:        %LOCAL_FRONTEND_URL%/
 echo   Dashboard links:          %PUBLIC_FRONTEND_URL%/dashboard_links
 echo   Portal management:        %PUBLIC_FRONTEND_URL%/admin_management
 echo   Dashboard catalog API:    %BACKEND_URL%/api/dashboards
-echo   Critical Team:            %PUBLIC_FRONTEND_URL%/dashboard_critical_team
+echo   Critical Team Overview:   %PUBLIC_FRONTEND_URL%/dashboard_critical_team_overview
 echo   Critical Asset Tracking:  %PUBLIC_FRONTEND_URL%/dashboard_critical_asset_tracking
 echo   Critical Asset Facility:  %PUBLIC_FRONTEND_URL%/map_critical_asset_facility
 echo   Critical Asset History:   %PUBLIC_FRONTEND_URL%/map_critical_asset_history

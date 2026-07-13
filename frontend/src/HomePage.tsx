@@ -6,6 +6,7 @@ import {
   Database,
   FileText,
   Grid3X3,
+  CircleHelp,
   Info,
   LogIn,
   LogOut,
@@ -85,9 +86,11 @@ type ResourcePreview = 'facility' | 'pipe' | 'structure' | 'map' | 'history' | '
 type PortalResource = {
   id: string
   resourceId?: string
+  effectivePermission?: ManagedPortalResource['effective_permission']
   title: string
   description: string
   href: string
+  helpUrl?: string
   category: Exclude<ResourceCategory, 'all'>
   type: ResourceType
   preview: ResourcePreview
@@ -105,6 +108,10 @@ type PortalResourceLaunchContext = {
   portal_team_name: string
   portal_is_manager: string
   portal_user_role: string
+  portal_permission: string
+  portal_permission_level: string
+  portal_permission_types: string
+  portal_permission_source: string
 }
 
 type HomePageProps = {
@@ -387,6 +394,7 @@ function catalogResource(item: DashboardCatalogItem): PortalResource {
     title: item.title,
     description: item.description,
     href: item.path,
+    helpUrl: item.helpUrl,
     category: categoryForCatalogItem(item),
     type: typeForCatalogItem(item),
     preview: previewForCatalogItem(item),
@@ -490,13 +498,22 @@ function darkThumbnailForManagedResource(resource: ManagedPortalResource) {
 
 function managedResourceCard(resource: ManagedPortalResource, existingResources: PortalResource[]): PortalResource {
   const existing = existingResources.find((item) => item.id === resource.resource_key)
-  if (existing) return existing
+  if (existing) {
+    return {
+      ...existing,
+      resourceId: resource.resource_id,
+      effectivePermission: resource.effective_permission,
+      helpUrl: resource.help_url ?? existing.helpUrl,
+    }
+  }
   return {
     id: resource.resource_key,
     resourceId: resource.resource_id,
+    effectivePermission: resource.effective_permission,
     title: resource.name,
     description: resource.description ?? resource.name,
     href: resource.url,
+    helpUrl: resource.help_url ?? undefined,
     category: categoryForManagedResource(resource),
     type: typeForManagedResource(resource),
     preview: previewForManagedResource(resource),
@@ -601,8 +618,13 @@ function ResourceTypeIcon({ type }: { type: ResourceType }) {
   return <BarChart3 size={18} aria-hidden="true" />
 }
 
-function resourceLaunchContext(user: PortalUser | null): PortalResourceLaunchContext | null {
+function resourceLaunchContext(
+  user: PortalUser | null,
+  resource: PortalResource,
+): PortalResourceLaunchContext | null {
   if (!user) return null
+
+  const permission = resource.effectivePermission
 
   return {
     portal_email: user.email,
@@ -612,11 +634,15 @@ function resourceLaunchContext(user: PortalUser | null): PortalResourceLaunchCon
     portal_team_name: user.team_name ?? '',
     portal_is_manager: user.manager_user_id === user.id ? '1' : '0',
     portal_user_role: roleText(user.selected_role),
+    portal_permission: permission?.permission ?? '',
+    portal_permission_level: String(permission?.permission_level ?? 0),
+    portal_permission_types: permission?.permission_types.join(',') ?? '',
+    portal_permission_source: permission?.source ?? '',
   }
 }
 
-function appendPortalUserContext(url: URL, user: PortalUser | null) {
-  const context = resourceLaunchContext(user)
+function appendPortalUserContext(url: URL, user: PortalUser | null, resource: PortalResource) {
+  const context = resourceLaunchContext(user, resource)
   if (!context) return
 
   Object.entries(context).forEach(([key, value]) => {
@@ -627,17 +653,37 @@ function appendPortalUserContext(url: URL, user: PortalUser | null) {
 function resourcePopupUrl(resource: PortalResource, user: PortalUser | null) {
   try {
     const url = new URL(resource.href, window.location.origin)
+    if (resource.resourceId) {
+      url.searchParams.set('portal_resource_id', resource.resourceId)
+    }
+    appendPortalUserContext(url, user, resource)
+
     if (url.origin === window.location.origin) {
       url.searchParams.set('embed', '1')
-      if (resource.resourceId) {
-        url.searchParams.set('portal_resource_id', resource.resourceId)
-      }
-      appendPortalUserContext(url, user)
       return `${url.pathname}${url.search}${url.hash}`
     }
     return url.toString()
   } catch {
     return resource.href
+  }
+}
+
+function resourceHelpUrl(resource: PortalResource, user: PortalUser | null) {
+  if (!resource.helpUrl) return null
+
+  try {
+    const url = new URL(resource.helpUrl, window.location.origin)
+    if (resource.resourceId) {
+      url.searchParams.set('portal_resource_id', resource.resourceId)
+    }
+    appendPortalUserContext(url, user, resource)
+
+    if (url.origin === window.location.origin) {
+      return `${url.pathname}${url.search}${url.hash}`
+    }
+    return url.toString()
+  } catch {
+    return resource.helpUrl
   }
 }
 
@@ -681,6 +727,8 @@ function ResourcePopup({
   user: PortalUser | null
   onClose: () => void
 }) {
+  const helpUrl = resourceHelpUrl(resource, user)
+
   return (
     <div
       className="home-resource-modal-backdrop"
@@ -690,9 +738,16 @@ function ResourcePopup({
       }}
     >
       <section className="home-resource-modal" role="dialog" aria-modal="true" aria-label={resource.title}>
-        <button className="home-resource-modal-close" type="button" onClick={onClose} aria-label="Close resource popup">
-          <X size={21} />
-        </button>
+        <div className="home-resource-modal-tools" aria-label="Resource window controls">
+          <button className="home-resource-modal-close" type="button" onClick={onClose} aria-label="Close resource popup" title="Close">
+            <X size={21} />
+          </button>
+          {helpUrl ? (
+            <a className="home-resource-modal-help" href={helpUrl} target="_blank" rel="noreferrer" aria-label={`Open help for ${resource.title}`} title="Help">
+              <CircleHelp size={21} />
+            </a>
+          ) : null}
+        </div>
         <iframe src={resourcePopupUrl(resource, user)} title={resource.title} />
       </section>
     </div>

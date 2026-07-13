@@ -91,7 +91,10 @@ class ResourcePermission(Base):
             "(user_id IS NOT NULL AND team_id IS NULL) OR (user_id IS NULL AND team_id IS NOT NULL)",
             name="ck_resource_permissions_one_subject",
         ),
-        CheckConstraint("permission_level IN (10, 20, 30, 40)", name="ck_resource_permissions_level"),
+        CheckConstraint(
+            "permission_level BETWEEN 1 AND 127",
+            name="ck_resource_permissions_level",
+        ),
         UniqueConstraint("resource_id", "user_id", name="uq_resource_permission_user"),
         UniqueConstraint("resource_id", "team_id", name="uq_resource_permission_team"),
     )

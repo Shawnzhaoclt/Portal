@@ -13,7 +13,7 @@ http://10.40.68.23:5173/dashboard_links
 Current dashboard routes:
 
 ```text
-http://10.40.68.23:5173/dashboard_critical_team
+http://10.40.68.23:5173/dashboard_critical_team_overview
 http://10.40.68.23:5173/dashboard_critical_asset_tracking
 http://10.40.68.23:5173/map_critical_asset_facility
 http://10.40.68.23:5173/map_critical_asset_history

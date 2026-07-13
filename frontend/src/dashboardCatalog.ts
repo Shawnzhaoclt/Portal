@@ -4,6 +4,7 @@ export type DashboardCatalogItem = {
   title: string
   description: string
   path: string
+  helpUrl?: string
   category: 'Operations' | 'Planning' | 'Risk' | 'Maps'
   kind: 'dashboard' | 'map' | 'tab' | 'doc' | 'report'
 }
@@ -14,6 +15,7 @@ type ResourceMetadataItem = {
   type: DashboardCatalogItem['kind'] | 'dataset' | 'service' | 'admin' | 'api'
   name: string
   url: string
+  help_url?: string
   category: DashboardCatalogItem['category']
   description?: string
   show_in_catalog?: boolean
@@ -30,7 +32,7 @@ const RESOURCE_METADATA = Object.values(resourceMetadataModules)
 
 export const DASHBOARD_LINKS_ROUTE = '/dashboard_links'
 export const PROACTIVE_TEAM_CCTV_REVIEW_ROUTE = '/report_proactive_team_cctv_review'
-export const CRITICAL_TEAM_ROUTE = '/dashboard_critical_team'
+export const PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE = '/help_proactive_team_cctv_review'
 export const CRITICAL_ASSET_TRACKING_ROUTE = '/dashboard_critical_asset_tracking'
 export const GIS_FACILITY_ROUTE = '/map_critical_asset_facility'
 export const GIS_HISTORY_ROUTE = '/map_critical_asset_history'
@@ -69,7 +71,7 @@ const CRITICAL_ASSET_PATH_TO_SHEET_ID = Object.fromEntries(
 ) as Record<string, CriticalAssetSheetId>
 
 export function criticalTeamSheetPath(sheetId: string) {
-  return CRITICAL_TEAM_SHEET_ROUTES[sheetId as CriticalTeamSheetId] ?? CRITICAL_TEAM_ROUTE
+  return CRITICAL_TEAM_SHEET_ROUTES[sheetId as CriticalTeamSheetId] ?? CRITICAL_TEAM_SHEET_ROUTES.overview
 }
 
 export function criticalTeamSheetIdFromPath(path: string) {
@@ -95,6 +97,7 @@ export const DASHBOARD_CATALOG: DashboardCatalogItem[] = RESOURCE_METADATA
     title: resource.name,
     description: resource.description ?? '',
     path: resource.url,
+    helpUrl: resource.help_url,
     category: resource.category,
     kind: resource.type,
   }))

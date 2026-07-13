@@ -144,11 +144,24 @@ const EMPTY_TEAM_FORM = {
 }
 
 const PERMISSION_OPTIONS = [
-  { value: 10, label: 'View' },
-  { value: 20, label: 'Edit' },
-  { value: 30, label: 'Manage' },
-  { value: 40, label: 'Admin' },
+  { value: 1, label: 'View' },
+  { value: 2, label: 'Edit' },
+  { value: 4, label: 'Review' },
+  { value: 8, label: 'Create' },
+  { value: 16, label: 'Delete' },
+  { value: 32, label: 'Manage' },
+  { value: 64, label: 'Admin' },
 ]
+
+function permissionLabelsFromMask(mask: number | null | undefined) {
+  if (!mask) return []
+  return PERMISSION_OPTIONS.filter((option) => (mask & option.value) !== 0).map((option) => option.label)
+}
+
+function permissionMaskLabel(mask: number | null | undefined, fallback = '-') {
+  const labels = permissionLabelsFromMask(mask)
+  return labels.length ? labels.join(', ') : fallback
+}
 
 const RESOURCE_TYPE_OPTIONS: Array<PortalResource['resource_type']> = ['dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api']
 const FEATURED_LIMIT_PER_CATEGORY = 4
@@ -369,7 +382,7 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
   const [newUser, setNewUser] = useState(EMPTY_USER_FORM)
   const [newPermissionType, setNewPermissionType] = useState<'team' | 'user'>('team')
   const [newPermissionSubject, setNewPermissionSubject] = useState('')
-  const [newPermissionLevel, setNewPermissionLevel] = useState(10)
+  const [newPermissionLevel, setNewPermissionLevel] = useState(1)
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -727,22 +740,39 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
 
   function addPermissionDraft() {
     const subjectId = Number(newPermissionSubject)
-    if (!subjectId) return
-    setPermissionDrafts((current) => [
-      ...current,
-      {
-        user_id: newPermissionType === 'user' ? subjectId : null,
-        team_id: newPermissionType === 'team' ? subjectId : null,
-        permission_level: newPermissionLevel,
-      },
-    ])
+    if (!subjectId || !newPermissionLevel) return
+    setPermissionDrafts((current) => {
+      const existingIndex = current.findIndex((permission) => (
+        newPermissionType === 'user'
+          ? permission.user_id === subjectId
+          : permission.team_id === subjectId
+      ))
+      if (existingIndex < 0) {
+        return [
+          ...current,
+          {
+            user_id: newPermissionType === 'user' ? subjectId : null,
+            team_id: newPermissionType === 'team' ? subjectId : null,
+            permission_level: newPermissionLevel,
+          },
+        ]
+      }
+      return current.map((permission, index) => (
+        index === existingIndex
+          ? { ...permission, permission_level: permission.permission_level | newPermissionLevel }
+          : permission
+      ))
+    })
     setNewPermissionSubject('')
   }
 
   async function savePermissions() {
     if (!selectedResourceId) return
     setError('')
-    const response = await replaceResourcePermissions(selectedResourceId, permissionDrafts)
+    const response = await replaceResourcePermissions(
+      selectedResourceId,
+      permissionDrafts.filter((permission) => permission.permission_level > 0),
+    )
     setPermissionDrafts(
       response.permissions.map((permission) => ({
         user_id: permission.user_id,
@@ -2204,6 +2234,31 @@ function ResourcesPanel({
   )
 }
 
+function PermissionTypeOptions({
+  value,
+  onChange,
+}: {
+  value: number
+  onChange: (value: number) => void
+}) {
+  return (
+    <div className="management-permission-type-options">
+      {PERMISSION_OPTIONS.map((option) => (
+        <label key={option.value}>
+          <input
+            type="checkbox"
+            checked={(value & option.value) !== 0}
+            onChange={(event) => onChange(
+              event.target.checked ? value | option.value : value & ~option.value,
+            )}
+          />
+          <span>{option.label}</span>
+        </label>
+      ))}
+    </div>
+  )
+}
+
 function PermissionsPanel({
   currentUser,
   newPermissionLevel,
@@ -2364,18 +2419,28 @@ function PermissionsPanel({
     })
   }
 
-  function setSelectedBulkPermission(level: string) {
+  function addSelectedBulkPermission(permissionType: number) {
     if (!bulkSelectedIds.size) return
     setBulkDrafts((current) => {
       const next = { ...current }
-      for (const resourceId of bulkSelectedIds) next[resourceId] = level
+      for (const resourceId of bulkSelectedIds) {
+        next[resourceId] = String((Number(next[resourceId]) || 0) | permissionType)
+      }
+      return next
+    })
+  }
+
+  function clearSelectedBulkPermissions() {
+    if (!bulkSelectedIds.size) return
+    setBulkDrafts((current) => {
+      const next = { ...current }
+      for (const resourceId of bulkSelectedIds) next[resourceId] = ''
       return next
     })
   }
 
   function bulkPermissionLabel(level: number | null | undefined, fallback = '-') {
-    if (level == null) return fallback
-    return PERMISSION_OPTIONS.find((option) => option.value === level)?.label ?? String(level)
+    return permissionMaskLabel(level, fallback)
   }
 
   return (
@@ -2433,11 +2498,11 @@ function PermissionsPanel({
             <button type="button" onClick={() => setBulkSelectedIds(new Set(bulkRows.map((row) => row.resource.id)))}>Select all shown</button>
             <button type="button" onClick={() => setBulkSelectedIds(new Set())}>Clear selection</button>
             {PERMISSION_OPTIONS.map((option) => (
-              <button key={option.value} type="button" onClick={() => setSelectedBulkPermission(String(option.value))}>
-                Set {option.label}
+              <button key={option.value} type="button" onClick={() => addSelectedBulkPermission(option.value)}>
+                Add {option.label}
               </button>
             ))}
-            <button type="button" onClick={() => setSelectedBulkPermission('')}>Clear permission</button>
+            <button type="button" onClick={clearSelectedBulkPermissions}>Clear permissions</button>
             <button className="management-primary-button" type="button" onClick={saveBulkPermissions} disabled={!changedBulkAssignments.length || bulkLoading}>
               <Save size={16} />
               Save changes
@@ -2475,13 +2540,13 @@ function PermissionsPanel({
                         : '-'}
                     </td>
                     <td>
-                      <select
-                        value={bulkDrafts[row.resource.id] ?? ''}
-                        onChange={(event) => setBulkDrafts((current) => ({ ...current, [row.resource.id]: event.target.value }))}
-                      >
-                        <option value="">No direct permission</option>
-                        {PERMISSION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                      </select>
+                      <PermissionTypeOptions
+                        value={Number(bulkDrafts[row.resource.id]) || 0}
+                        onChange={(value) => setBulkDrafts((current) => ({
+                          ...current,
+                          [row.resource.id]: value ? String(value) : '',
+                        }))}
+                      />
                     </td>
                   </tr>
                 ))}
@@ -2510,10 +2575,8 @@ function PermissionsPanel({
                 <option key={item.id} value={item.id}>{'display_name' in item ? item.display_name : item.name}</option>
               ))}
             </select>
-            <select value={newPermissionLevel} onChange={(event) => onLevelChange(Number(event.target.value))}>
-              {PERMISSION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-            <button type="button" onClick={onAdd}>
+            <PermissionTypeOptions value={newPermissionLevel} onChange={onLevelChange} />
+            <button type="button" onClick={onAdd} disabled={!newPermissionSubject || !newPermissionLevel}>
               <Plus size={16} />
               Add
             </button>
@@ -2537,18 +2600,16 @@ function PermissionsPanel({
                       <td>{user?.display_name ?? team?.name ?? 'Unknown'}</td>
                       <td>{permission.user_id ? 'User exception' : 'Team'}</td>
                       <td>
-                        <select
+                        <PermissionTypeOptions
                           value={permission.permission_level}
-                          onChange={(event) =>
+                          onChange={(value) =>
                             onPermissionChange(
                               permissions.map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, permission_level: Number(event.target.value) } : item,
+                                itemIndex === index ? { ...item, permission_level: value } : item,
                               ),
                             )
                           }
-                        >
-                          {PERMISSION_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-                        </select>
+                        />
                       </td>
                       {canUseSystemAdmin(currentUser) ? (
                         <td><button type="button" onClick={() => onRemove(index)}>Remove</button></td>

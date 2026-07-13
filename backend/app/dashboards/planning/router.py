@@ -10,7 +10,7 @@ from backend.app.core.data_sources import critical_team_data_source, portal_env
 from backend.app.core.records import clean_record
 from backend.app.core.sql import bracket_identifier, qualified_table_name
 from backend.app.dashboards.critical_team.router import critical_team_connection, fetch_all
-from backend.app.management.database import management_database_path
+from backend.app.management.database import SYSTEM_TABLES, management_database_path
 
 
 router = APIRouter(prefix="/api/planning", tags=["planning"])
@@ -118,19 +118,21 @@ def pending_aif_person_team_lookup() -> dict[str, str]:
     if not path.exists():
         return {}
 
+    user_table = sql_identifier(SYSTEM_TABLES["users"])
+    team_table = sql_identifier(SYSTEM_TABLES["teams"])
     connection = sqlite3.connect(path)
     connection.row_factory = sqlite3.Row
     try:
         rows = connection.execute(
-            """
+            f"""
             SELECT
                 u.first_name,
                 u.last_name,
                 u.email,
                 u.username,
                 t.name AS team_name
-            FROM users AS u
-            LEFT JOIN teams AS t
+            FROM {user_table} AS u
+            LEFT JOIN {team_table} AS t
                 ON t.id = u.team_id
             WHERE u.deleted_at IS NULL
               AND u.is_active = 1

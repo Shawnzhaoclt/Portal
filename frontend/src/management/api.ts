@@ -49,6 +49,7 @@ export type PortalResource = {
   description: string | null
   category: string | null
   icon: string | null
+  help_url?: string | null
   is_public: boolean
   is_active: boolean
   created_at: string
@@ -57,6 +58,7 @@ export type PortalResource = {
   effective_permission?: {
     permission_level: number
     permission: string
+    permission_types: string[]
     source: string
   } | null
 }
@@ -90,6 +92,7 @@ export type ResourcePermission = {
   team_name: string | null
   permission_level: number
   permission: string
+  permission_types: string[]
   created_by_user_id: number | null
   created_at: string
   updated_at: string
@@ -100,9 +103,11 @@ export type BulkPermissionRow = {
   direct_permission_id: number | null
   direct_permission_level: number | null
   direct_permission: string | null
+  direct_permission_types: string[]
   effective_permission: {
     permission_level: number
     permission: string
+    permission_types: string[]
     source: string
   } | null
 }

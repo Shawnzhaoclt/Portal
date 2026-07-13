@@ -9,6 +9,7 @@ import {
   ChevronRight,
   CircleDot,
   Download,
+  ExternalLink,
   Filter,
   Landmark,
   Layers,
@@ -639,6 +640,15 @@ export default function App() {
   const searchFlashIntervalRef = useRef<number | null>(null);
   const searchFlashTimeoutRef = useRef<number | null>(null);
   const map3dEnabledRef = useRef(false);
+  const middleMouseRotateRef = useRef<{
+    map: MapLibreMap;
+    startX: number;
+    startY: number;
+    startBearing: number;
+    startPitch: number;
+  } | null>(null);
+  const middleMouseRotateCleanupRef = useRef<(() => void) | null>(null);
+  const stopMiddleMouseRotateRef = useRef<(() => void) | null>(null);
   const drawFeaturesRef = useRef<DrawGeoJsonFeature[]>([]);
   const drawDraftFeaturesRef = useRef<DrawGeoJsonFeature[]>([]);
   const drawInteractionRef = useRef<DrawInteraction | null>(null);
@@ -721,6 +731,7 @@ export default function App() {
   const [selectedFeatureOptions, setSelectedFeatureOptions] = useState<IdentifyFeature[]>([]);
   const [selectedFeatureOptionIndex, setSelectedFeatureOptionIndex] = useState(0);
   const [selectedFeatureGeometry, setSelectedFeatureGeometry] = useState<AssetSearchResult["geometry"]>(null);
+  const [selectedFeatureStreetViewPoint, setSelectedFeatureStreetViewPoint] = useState<LngLatPair | null>(null);
   const [mapBearing, setMapBearing] = useState(0);
   const [northArrowDragging, setNorthArrowDragging] = useState(false);
   const northArrowDragRef = useRef<{
@@ -1378,6 +1389,7 @@ export default function App() {
         setSelectedFeatureOptions([]);
         setSelectedFeatureOptionIndex(0);
         setSelectedFeatureGeometry(null);
+        setSelectedFeatureStreetViewPoint(null);
         return;
       }
 
@@ -1385,6 +1397,7 @@ export default function App() {
       setSelectedFeatureOptionIndex(0);
       setSelectedFeature(selectedFeatureFromIdentifyFeature(identifyFeatures[0]));
       setSelectedFeatureGeometry(identifyFeatures[0].geometry || null);
+      setSelectedFeatureStreetViewPoint([event.lngLat.lng, event.lngLat.lat]);
     },
     [getLayerVisibility, operationalLayers],
   );
@@ -1664,6 +1677,16 @@ export default function App() {
   const flashSelectedFeature = useCallback(() => {
     flashGeoJsonFeature(geometryToHighlightFeature(selectedFeatureGeometry, { source: "selected-feature" }));
   }, [flashGeoJsonFeature, selectedFeatureGeometry]);
+  const selectedFeatureStreetViewUrl = useMemo(() => {
+    const point = selectedFeatureStreetViewPoint || geometryStreetViewPoint(selectedFeatureGeometry);
+    return point ? googleStreetViewUrl(point) : null;
+  }, [selectedFeatureGeometry, selectedFeatureStreetViewPoint]);
+  const openSelectedFeatureStreetView = useCallback(() => {
+    if (!selectedFeatureStreetViewUrl) {
+      return;
+    }
+    window.open(selectedFeatureStreetViewUrl, "_blank", "noopener,noreferrer");
+  }, [selectedFeatureStreetViewUrl]);
 
   const zoomToSearchResult = useCallback((result: AssetSearchResult) => {
     const map = mapRef.current;
@@ -1699,6 +1722,7 @@ export default function App() {
       setSelectedFeatureOptions([]);
       setSelectedFeatureOptionIndex(0);
       setSelectedFeatureGeometry(searchResultGeometry(result));
+      setSelectedFeatureStreetViewPoint(null);
       zoomToSearchResult(result);
       flashSearchResult(result);
     },
@@ -1736,6 +1760,7 @@ export default function App() {
       setSelectedFeatureOptions([]);
       setSelectedFeatureOptionIndex(0);
       setSelectedFeatureGeometry(riskTopListItemGeometry(item));
+      setSelectedFeatureStreetViewPoint(null);
       zoomToRiskTopListItem(item);
       flashGeoJsonFeature(riskTopListItemToFeature(item));
     },
@@ -1852,6 +1877,78 @@ export default function App() {
     event.stopPropagation();
     northArrowDragRef.current = null;
     setNorthArrowDragging(false);
+  }, []);
+
+  const enableMiddleMouse3dRotation = useCallback((map: MapLibreMap) => {
+    middleMouseRotateCleanupRef.current?.();
+
+    const canvas = map.getCanvas();
+    const stopRotation = () => {
+      middleMouseRotateRef.current = null;
+      canvas.style.cursor = "";
+      window.removeEventListener("mousemove", handleMouseMove, true);
+      window.removeEventListener("mouseup", handleMouseUp, true);
+      window.removeEventListener("blur", stopRotation);
+    };
+    const handleMouseMove = (event: MouseEvent) => {
+      const drag = middleMouseRotateRef.current;
+      if (!drag || drag.map !== map) {
+        return;
+      }
+      if ((event.buttons & 4) === 0) {
+        stopRotation();
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      map.jumpTo({
+        bearing: normalizeBearing(drag.startBearing + (event.clientX - drag.startX) * 0.35),
+        pitch: clampNumber(drag.startPitch - (event.clientY - drag.startY) * 0.3, 0, 70),
+      });
+    };
+    const handleMouseUp = (event: MouseEvent) => {
+      if (event.button !== 1 || middleMouseRotateRef.current?.map !== map) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      stopRotation();
+    };
+    const handleMouseDown = (event: MouseEvent) => {
+      if (event.button !== 1 || !map3dEnabledRef.current) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      middleMouseRotateRef.current = {
+        map,
+        startX: event.clientX,
+        startY: event.clientY,
+        startBearing: map.getBearing(),
+        startPitch: map.getPitch(),
+      };
+      canvas.style.cursor = "grabbing";
+      window.addEventListener("mousemove", handleMouseMove, true);
+      window.addEventListener("mouseup", handleMouseUp, true);
+      window.addEventListener("blur", stopRotation);
+    };
+    const preventMiddleAuxClick = (event: MouseEvent) => {
+      if (event.button === 1 && map3dEnabledRef.current) {
+        event.preventDefault();
+      }
+    };
+
+    canvas.addEventListener("mousedown", handleMouseDown, true);
+    canvas.addEventListener("auxclick", preventMiddleAuxClick, true);
+    stopMiddleMouseRotateRef.current = stopRotation;
+    middleMouseRotateCleanupRef.current = () => {
+      stopRotation();
+      canvas.removeEventListener("mousedown", handleMouseDown, true);
+      canvas.removeEventListener("auxclick", preventMiddleAuxClick, true);
+      if (stopMiddleMouseRotateRef.current === stopRotation) {
+        stopMiddleMouseRotateRef.current = null;
+      }
+    };
   }, []);
 
   const handleInventoryWidgetPointerDown = useCallback(
@@ -2118,6 +2215,7 @@ export default function App() {
     setSelectedFeatureOptions([]);
     setSelectedFeatureOptionIndex(0);
     setSelectedFeatureGeometry(null);
+    setSelectedFeatureStreetViewPoint(null);
 
     fetchMapStyle(selectedMap.style)
       .then(async ({ style }) => {
@@ -2185,6 +2283,7 @@ export default function App() {
       } as MapOptions);
       const map = new maplibregl.Map(mapOptions);
       mapRef.current = map;
+      enableMiddleMouse3dRotation(map);
       const updateBearing = () => {
         const nextBearing = map.getBearing();
         setMapBearing((currentBearing) => (Math.abs(currentBearing - nextBearing) > 0.1 ? nextBearing : currentBearing));
@@ -2275,6 +2374,7 @@ export default function App() {
     applyBasemapSelection,
     configureNavigationConstraints,
     enforceProtectedBounds,
+    enableMiddleMouse3dRotation,
     handleDrawClick,
     handleDrawDoubleClick,
     handleDrawMouseDown,
@@ -2449,6 +2549,8 @@ export default function App() {
       }
       splitMapRef.current?.remove();
       splitMapRef.current = null;
+      middleMouseRotateCleanupRef.current?.();
+      middleMouseRotateCleanupRef.current = null;
       mapRef.current?.remove();
       mapRef.current = null;
     };
@@ -2777,19 +2879,27 @@ export default function App() {
     const nextEnabled = !map3dEnabledRef.current;
     map3dEnabledRef.current = nextEnabled;
     setMap3dEnabled(nextEnabled);
+    if (nextEnabled) {
+      setMapViewMode("single");
+      setMapViewMenuOpen(false);
+    } else {
+      stopMiddleMouseRotateRef.current?.();
+    }
     applyTerrainToMap(mapRef.current, activeStyleRef.current, nextEnabled);
-    applyTerrainToMap(splitMapRef.current, activeStyleRef.current, nextEnabled);
     mapRef.current?.easeTo({
-      pitch: nextEnabled ? 55 : 0,
-      duration: 260,
-    });
-    splitMapRef.current?.easeTo({
       pitch: nextEnabled ? 55 : 0,
       duration: 260,
     });
   };
 
   const changeMapViewMode = (mode: MapViewMode) => {
+    if (mode !== "single" && map3dEnabledRef.current) {
+      map3dEnabledRef.current = false;
+      setMap3dEnabled(false);
+      stopMiddleMouseRotateRef.current?.();
+      applyTerrainToMap(mapRef.current, activeStyleRef.current, false);
+      mapRef.current?.easeTo({ pitch: 0, duration: 260 });
+    }
     setMapViewMode(mode);
     setMapViewMenuOpen(false);
   };
@@ -3252,7 +3362,7 @@ export default function App() {
                   </select>
                 </label>
               ) : null}
-              <div className="mb-3 flex justify-end">
+              <div className="mb-3 flex flex-wrap justify-end gap-2">
                 <button
                   type="button"
                   className="inline-flex h-7 items-center gap-1.5 border border-[var(--accent)] bg-[var(--panel-active-bg)] px-2.5 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--accent)] transition hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-transparent disabled:text-[var(--panel-disabled)]"
@@ -3261,6 +3371,15 @@ export default function App() {
                 >
                   <Activity className="h-3.5 w-3.5" />
                   Flash feature
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-7 items-center gap-1.5 border border-[var(--accent)] bg-[var(--panel-active-bg)] px-2.5 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--accent)] transition hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-transparent disabled:text-[var(--panel-disabled)]"
+                  onClick={openSelectedFeatureStreetView}
+                  disabled={!selectedFeatureStreetViewUrl}
+                >
+                  <ExternalLink className="h-3.5 w-3.5" />
+                  Street View
                 </button>
               </div>
               <FeatureDetails feature={selectedFeature} />
@@ -6738,12 +6857,37 @@ function geometryBounds(geometry?: AssetSearchResult["geometry"]): Bounds | null
   }
   const coordinates: Array<[number, number]> = [];
   collectCoordinates(geometry.coordinates, coordinates);
+  collectCoordinates(geometry.geometries, coordinates);
   if (!coordinates.length) {
     return null;
   }
   const lngs = coordinates.map(([lng]) => lng);
   const lats = coordinates.map(([, lat]) => lat);
   return [Math.min(...lngs), Math.min(...lats), Math.max(...lngs), Math.max(...lats)];
+}
+
+function geometryStreetViewPoint(geometry?: AssetSearchResult["geometry"]): LngLatPair | null {
+  const bounds = geometryBounds(geometry);
+  if (!bounds) {
+    return null;
+  }
+  const point: LngLatPair = [(bounds[0] + bounds[2]) / 2, (bounds[1] + bounds[3]) / 2];
+  return validLngLatPair(point) ? point : null;
+}
+
+function validLngLatPair(point: LngLatPair): boolean {
+  const [lng, lat] = point;
+  return Number.isFinite(lng) && Number.isFinite(lat) && lng >= -180 && lng <= 180 && lat >= -90 && lat <= 90;
+}
+
+function googleStreetViewUrl(point: LngLatPair): string {
+  const [lng, lat] = point;
+  const params = new URLSearchParams({
+    api: "1",
+    map_action: "pano",
+    viewpoint: `${lat.toFixed(7)},${lng.toFixed(7)}`,
+  });
+  return `https://www.google.com/maps/@?${params.toString()}`;
 }
 
 function collectCoordinates(value: unknown, out: Array<[number, number]>): void {

@@ -50,7 +50,12 @@ from backend.app.management.services import (
     set_selected_user_role,
     team_ancestor_ids,
     is_system_admin_session,
+    combine_permission_masks,
+    is_valid_permission_mask,
     permission_label,
+    permission_result,
+    permission_types,
+    PERMISSION_TYPES,
     write_audit_log,
 )
 
@@ -807,35 +812,33 @@ def _effective_team_permission(db: Session, team: Team, resource: Resource) -> d
     if resource.is_active != 1:
         return None
 
-    best_level = 10 if resource.is_public else 0
-    source = "public" if resource.is_public else None
+    permission_mask = PERMISSION_TYPES["view"] if resource.is_public else 0
+    sources = ["public"] if resource.is_public else []
     ancestor_ids = team_ancestor_ids(db, team.id)
     if ancestor_ids:
-        direct_level = db.scalar(
-            select(func.max(ResourcePermission.permission_level)).where(
+        direct_level = combine_permission_masks(db.scalars(
+            select(ResourcePermission.permission_level).where(
                 ResourcePermission.resource_id == resource.resource_id,
                 ResourcePermission.team_id == team.id,
             )
-        )
-        if direct_level and direct_level > best_level:
-            best_level = int(direct_level)
-            source = "team"
+        ).all())
+        if direct_level:
+            permission_mask |= direct_level
+            sources.append("team")
 
         parent_ids = [team_id for team_id in ancestor_ids if team_id != team.id]
         if parent_ids:
-            parent_level = db.scalar(
-                select(func.max(ResourcePermission.permission_level)).where(
+            parent_level = combine_permission_masks(db.scalars(
+                select(ResourcePermission.permission_level).where(
                     ResourcePermission.resource_id == resource.resource_id,
                     ResourcePermission.team_id.in_(parent_ids),
                 )
-            )
-            if parent_level and parent_level > best_level:
-                best_level = int(parent_level)
-                source = "parent_team"
+            ).all())
+            if parent_level:
+                permission_mask |= parent_level
+                sources.append("parent_team")
 
-    if not best_level:
-        return None
-    return {"permission_level": best_level, "permission": permission_label(best_level), "source": source}
+    return permission_result(permission_mask, sources)
 
 
 @router.get("/api/admin/permissions/matrix")
@@ -897,6 +900,7 @@ def permission_matrix(
                 "direct_permission_id": direct.id if direct else None,
                 "direct_permission_level": direct.permission_level if direct else None,
                 "direct_permission": permission_label(direct.permission_level) if direct else None,
+                "direct_permission_types": permission_types(direct.permission_level) if direct else [],
                 "effective_permission": effective,
             }
         )
@@ -921,8 +925,8 @@ def update_permission_matrix(
     if len(resource_ids) != len(set(resource_ids)):
         raise HTTPException(status_code=400, detail="Duplicate resource assignments are not allowed.")
     for assignment in payload.assignments:
-        if assignment.permission_level is not None and assignment.permission_level not in {10, 20, 30, 40}:
-            raise HTTPException(status_code=400, detail="Invalid permission level.")
+        if assignment.permission_level is not None and not is_valid_permission_mask(assignment.permission_level):
+            raise HTTPException(status_code=400, detail="Invalid permission type selection.")
         get_resource_by_public_id_or_404(db, assignment.resource_id)
 
     existing_permissions = {}
@@ -1001,8 +1005,8 @@ def get_resource_permissions(
 
 
 def _validate_permission_assignment(db: Session, assignment: PermissionAssignment) -> None:
-    if assignment.permission_level not in {10, 20, 30, 40}:
-        raise HTTPException(status_code=400, detail="Invalid permission level.")
+    if not is_valid_permission_mask(assignment.permission_level):
+        raise HTTPException(status_code=400, detail="Invalid permission type selection.")
     if bool(assignment.user_id) == bool(assignment.team_id):
         raise HTTPException(status_code=400, detail="Each permission must target exactly one user or one team.")
     if assignment.user_id is not None:

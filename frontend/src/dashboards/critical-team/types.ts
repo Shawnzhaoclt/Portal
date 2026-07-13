@@ -69,6 +69,7 @@ export type CriticalTeamOverviewResponse = {
   filters: {
     date_from: string
     date_to: string
+    submit_to: string[]
   }
   metrics: CriticalTeamOverviewMetrics
   totals: {
@@ -89,6 +90,12 @@ export type CriticalTeamFilterOptionsResponse = {
   wo_closed_by: string[]
   critical_team_status: string[]
   years: Record<string, string[]>
+  viewer_scope: {
+    submit_to_restricted: boolean
+    submit_to: string | null
+    closed_by_restricted: boolean
+    closed_by: string | null
+  }
 }
 
 export type CriticalTeamSheetRow = {

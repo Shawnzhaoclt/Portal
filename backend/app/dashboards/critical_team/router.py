@@ -5,7 +5,9 @@ from typing import Any
 
 import duckdb
 import pyodbc
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from backend.app.core.data_sources import (
     CriticalTeamDataSource,
@@ -15,6 +17,10 @@ from backend.app.core.data_sources import (
 )
 from backend.app.core.records import clean_record
 from backend.app.core.sql import bracket_identifier, qualified_table_name
+from backend.app.management.database import get_db
+from backend.app.management.models import Team, User
+from backend.app.management.router import get_current_user
+from backend.app.management.services import ADMIN_ROLES, selected_user_role
 
 
 router = APIRouter(prefix="/api/critical-team", tags=["critical-team"])
@@ -46,6 +52,17 @@ CRITICAL_TEAM_OVERVIEW_SERIES = [
     ("reports_completed", "Reports Complete", "report_complete_date", None, "#f28e2b"),
     ("review_complete", "Review Complete", "wo_closed_date", "Review Complete", "#7b5ea7"),
 ]
+SUBMIT_TO_SCOPED_SHEET_IDS = {
+    "insp-proj-start-date",
+    "insp-comp-date-bar-chart",
+    "insp-comp-date-table",
+    "report-comp-date-chart",
+    "report-comp-date-table",
+}
+CLOSED_BY_SCOPED_SHEET_IDS = {
+    "insp-comp-date-reviews",
+    "insp-comp-date-reviews-table",
+}
 CRITICAL_TEAM_SHEETS = {
     "insp-proj-start-date": {
         "title": "Insp_Proj_Start_Date",
@@ -132,6 +149,55 @@ CRITICAL_TEAM_COLUMNS = [
 
 def sql_identifier(identifier: str) -> str:
     return bracket_identifier(identifier)
+
+
+def critical_team_user_is_manager(db: Session, user: User) -> bool:
+    return db.scalar(
+        select(Team.id).where(
+            Team.manager_user_id == user.id,
+            Team.is_active == 1,
+        ).limit(1)
+    ) is not None
+
+
+def critical_team_submit_to_scope(db: Session, user: User) -> tuple[bool, str | None]:
+    if selected_user_role(user) in ADMIN_ROLES or critical_team_user_is_manager(db, user):
+        return False, None
+
+    first_name = str(user.first_name or "").strip()
+    last_name = str(user.last_name or "").strip()
+    if not first_name or not last_name:
+        raise HTTPException(
+            status_code=403,
+            detail="Your profile must include a first and last name to access this resource.",
+        )
+    return True, f"{last_name}, {first_name}"
+
+
+def scoped_submit_to_values(
+    db: Session,
+    user: User,
+    requested_values: list[str] | None,
+    *,
+    apply_scope: bool,
+) -> list[str] | None:
+    if not apply_scope:
+        return requested_values
+    restricted, submit_to_value = critical_team_submit_to_scope(db, user)
+    return [submit_to_value] if restricted and submit_to_value else requested_values
+
+
+def scoped_closed_by_value(
+    db: Session,
+    user: User,
+    requested_value: str | None,
+    *,
+    apply_scope: bool,
+) -> str | None:
+    if not apply_scope:
+        return requested_value
+    restricted, closed_by_value = critical_team_submit_to_scope(db, user)
+    return closed_by_value if restricted and closed_by_value else requested_value
 
 
 def duckdb_identifier(identifier: str) -> str:
@@ -588,8 +654,18 @@ def critical_team_source() -> dict[str, Any]:
 
 
 @router.get("/summary")
-def critical_team_summary() -> dict[str, Any]:
+def critical_team_summary(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     source = critical_team_data_source()
+    effective_submit_to = scoped_submit_to_values(
+        db,
+        current_user,
+        None,
+        apply_scope=True,
+    )
+    where_sql, person_params = critical_team_person_filter_sql(submit_to=effective_submit_to)
     with critical_team_connection() as con:
         cursor = con.cursor()
         names, row = fetch_one(
@@ -606,8 +682,12 @@ def critical_team_summary() -> dict[str, Any]:
                 SUM(CASE WHEN critical_team_status = 'Ready For Review' THEN 1 ELSE 0 END) AS ready_for_review,
                 SUM(CASE WHEN critical_team_status = 'Review Complete' THEN 1 ELSE 0 END) AS review_complete
             FROM critical_team_workorders
-            """.format(source_cte=critical_team_source_cte(source)),
-            critical_team_base_params(source),
+            {where_sql}
+            """.format(
+                source_cte=critical_team_source_cte(source),
+                where_sql=where_sql,
+            ),
+            [*critical_team_base_params(source), *person_params],
         )
 
     return clean_record(dict(zip(names, row)))
@@ -619,10 +699,21 @@ def critical_team_overview(
     date_to: str | None = Query(default=None),
     submit_to: list[str] | None = Query(default=None),
     closed_by: list[str] | None = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     source = critical_team_data_source()
     start_date, end_date = critical_team_overview_dates(date_from, date_to)
-    person_where_sql, person_params = critical_team_person_filter_sql(submit_to=submit_to, closed_by=closed_by)
+    effective_submit_to = scoped_submit_to_values(
+        db,
+        current_user,
+        submit_to,
+        apply_scope=True,
+    )
+    person_where_sql, person_params = critical_team_person_filter_sql(
+        submit_to=effective_submit_to,
+        closed_by=closed_by,
+    )
     filtered_cte = f"""
         {critical_team_source_cte(source)},
         parameters AS (
@@ -777,6 +868,7 @@ def critical_team_overview(
         "filters": {
             "date_from": start_date.isoformat() if start_date else "",
             "date_to": end_date.isoformat() if end_date else "",
+            "submit_to": effective_submit_to or [],
         },
         "metrics": clean_record(dict(zip(metric_names, metric_row))),
         "totals": clean_record(dict(zip(total_names, total_row))),
@@ -785,8 +877,12 @@ def critical_team_overview(
 
 
 @router.get("/filter-options")
-def critical_team_filter_options() -> dict[str, Any]:
+def critical_team_filter_options(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     source = critical_team_data_source()
+    person_restricted, scoped_person_name = critical_team_submit_to_scope(db, current_user)
     with critical_team_connection() as con:
         cursor = con.cursor()
 
@@ -833,6 +929,12 @@ def critical_team_filter_options() -> dict[str, Any]:
             "wo_closed_by": values("wo_closed_by"),
             "critical_team_status": values("critical_team_status"),
             "years": years,
+            "viewer_scope": {
+                "submit_to_restricted": person_restricted,
+                "submit_to": scoped_person_name,
+                "closed_by_restricted": person_restricted,
+                "closed_by": scoped_person_name,
+            },
         }
 
 
@@ -844,16 +946,30 @@ def critical_team_sheet_data(
     closed_by: str | None = Query(default=None),
     status: list[str] | None = Query(default=None),
     tableau_defaults: bool = Query(default=True),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     source = critical_team_data_source()
     sheet = critical_team_sheet(sheet_id)
     date_column = CRITICAL_TEAM_DATE_COLUMNS[sheet["date_key"]]
     group_column = sheet["group_column"]
+    effective_submit_to = scoped_submit_to_values(
+        db,
+        current_user,
+        submit_to,
+        apply_scope=sheet_id in SUBMIT_TO_SCOPED_SHEET_IDS,
+    )
+    effective_closed_by = scoped_closed_by_value(
+        db,
+        current_user,
+        closed_by,
+        apply_scope=sheet_id in CLOSED_BY_SCOPED_SHEET_IDS,
+    )
     where_sql, params = critical_team_filter_sql(
         sheet,
         year=year,
-        submit_to=submit_to,
-        closed_by=closed_by,
+        submit_to=effective_submit_to,
+        closed_by=effective_closed_by,
         status=status,
         use_tableau_defaults=tableau_defaults,
     )
