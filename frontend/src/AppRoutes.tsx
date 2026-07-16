@@ -8,11 +8,13 @@ import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashbo
 import GISCriticalAssetHistoryDashboard from './dashboards/gis/GISCriticalAssetHistoryDashboard'
 import GISDashboard from './dashboards/gis/GISDashboard'
 import ManagementPage from './management/ManagementPage'
+import AifOverviewDashboard from './dashboards/planning/AifOverviewDashboard'
 import PlanningPendingAifQaTable from './dashboards/planning/PlanningPendingAifQaTable'
 import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
 import { clearManagementToken, fetchMe, storedManagementToken } from './management/api'
 import {
   ADMIN_MANAGEMENT_ROUTE,
+  AIF_OVERVIEW_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
@@ -125,6 +127,11 @@ export default function AppRoutes() {
   if (path === PLANNING_PENDING_AIF_QA_ROUTE) {
     setPageMeta('Planning Pending AIF QA/QC')
     return <PlanningPendingAifQaTable />
+  }
+
+  if (path === AIF_OVERVIEW_ROUTE) {
+    setPageMeta('AIF Overview')
+    return <AifOverviewDashboard />
   }
 
   if (path === GIS_FACILITY_ROUTE) {

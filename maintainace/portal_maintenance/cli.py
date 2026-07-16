@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import sqlite3
 import sys
 from contextlib import closing
@@ -18,18 +17,9 @@ def _default_management_db() -> Path:
     return PROJECT_ROOT / "backend" / "data" / "portal_management.sqlite3"
 
 
-def _default_org_csv() -> Path:
-    return PROJECT_ROOT / "PTO_ORG.csv"
-
-
 def _default_backup_path(database_path: Path) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     return PROJECT_ROOT / "maintainace" / "backups" / f"{database_path.stem}_{timestamp}.sqlite3"
-
-
-def _set_env_if_value(name: str, value: str | None) -> None:
-    if value and value.strip():
-        os.environ[name] = value.strip()
 
 
 def _configure_import_path() -> None:
@@ -42,18 +32,11 @@ def _database_path(value: str | None) -> Path:
     return Path(value).expanduser().resolve() if value else _default_management_db()
 
 
-def _org_csv_path(value: str | None) -> Path:
-    return Path(value).expanduser().resolve() if value else _default_org_csv()
-
-
-def _configure_database_env(database_path: Path, org_csv_path: Path | None = None, args: argparse.Namespace | None = None) -> None:
+def _configure_database_env(database_path: Path) -> None:
     database_path.parent.mkdir(parents=True, exist_ok=True)
+    import os
+
     os.environ["PORTAL_MANAGEMENT_DB"] = str(database_path)
-    if org_csv_path is not None:
-        os.environ["PORTAL_PTO_ORG_CSV"] = str(org_csv_path)
-    if args is not None:
-        _set_env_if_value("PORTAL_DEFAULT_ADMIN_EMAILS", getattr(args, "admin_emails", None))
-        _set_env_if_value("PORTAL_DEFAULT_SYSTEM_ADMIN_EMAILS", getattr(args, "system_admin_emails", None))
 
 
 def _database_summary(database_path: Path) -> dict[str, Any]:
@@ -112,26 +95,23 @@ def _print_summary(summary: dict[str, Any], *, json_output: bool) -> None:
     print(f"Foreign key errors: {summary.get('foreign_key_errors', 0)}")
 
 
-def _run_upgrade(database_path: Path, *, seed_org: bool = False, org_csv_path: Path | None = None, args: argparse.Namespace | None = None) -> None:
-    _configure_database_env(database_path, org_csv_path, args)
+def _run_upgrade(database_path: Path) -> None:
+    _configure_database_env(database_path)
     _configure_import_path()
 
     from backend.app.management.database import create_management_schema, session_scope
-    from backend.app.management.seed import seed_org_users, seed_resources
+    from backend.app.management.seed import seed_resources
     from backend.app.resources.reports.proactive_team_cctv_review import ensure_report_schema
 
     create_management_schema()
     with session_scope() as db:
         seed_resources(db)
-        if seed_org:
-            seed_org_users(db)
     ensure_report_schema()
 
 
 def init_db(args: argparse.Namespace) -> int:
     database_path = _database_path(args.db)
-    org_csv_path = _org_csv_path(args.org_csv)
-    _configure_database_env(database_path, org_csv_path, args)
+    _configure_database_env(database_path)
     _configure_import_path()
 
     from backend.app.management.seed import initialize_management_database
@@ -143,23 +123,19 @@ def init_db(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
-        print(f"Portal management database deployed and seeded: {database_path}")
-        print(f"Organization CSV: {org_csv_path}")
+        print(f"Portal management database deployed: {database_path}")
         _print_summary(summary, json_output=False)
     return 0
 
 
 def upgrade_db(args: argparse.Namespace) -> int:
     database_path = _database_path(args.db)
-    org_csv_path = _org_csv_path(args.org_csv) if args.seed_org or args.org_csv else None
-    _run_upgrade(database_path, seed_org=args.seed_org, org_csv_path=org_csv_path, args=args)
+    _run_upgrade(database_path)
     summary = _database_summary(database_path)
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
         print(f"Portal management database upgraded: {database_path}")
-        if args.seed_org and org_csv_path is not None:
-            print(f"Organization CSV refreshed: {org_csv_path}")
         _print_summary(summary, json_output=False)
     return 0
 
@@ -253,26 +229,17 @@ def _add_common_db_argument(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--db", help="SQLite management DB path. Defaults to backend/data/portal_management.sqlite3.")
 
 
-def _add_seed_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--org-csv", help="Organization CSV path. Defaults to PTO_ORG.csv.")
-    parser.add_argument("--admin-emails", help="Comma-separated admin email list.")
-    parser.add_argument("--system-admin-emails", help="Comma-separated system admin email list.")
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Portal database maintainace utilities.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    init_parser = subparsers.add_parser("init-db", help="Deploy and seed the management DB.")
+    init_parser = subparsers.add_parser("init-db", help="Deploy the management DB.")
     _add_common_db_argument(init_parser)
-    _add_seed_arguments(init_parser)
     init_parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     init_parser.set_defaults(func=init_db)
 
     upgrade_parser = subparsers.add_parser("upgrade-db", help="Apply database upgrades and refresh resource metadata.")
     _add_common_db_argument(upgrade_parser)
-    _add_seed_arguments(upgrade_parser)
-    upgrade_parser.add_argument("--seed-org", action="store_true", help="Also refresh teams and users from the organization CSV.")
     upgrade_parser.add_argument("--json", action="store_true", help="Print JSON summary.")
     upgrade_parser.set_defaults(func=upgrade_db)
 

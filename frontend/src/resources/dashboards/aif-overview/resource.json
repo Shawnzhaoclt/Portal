@@ -1,0 +1,12 @@
+{
+  "resource_id": "DASAIF01",
+  "resource_slug": "aif_overview",
+  "type": "dashboard",
+  "name": "AIF Overview",
+  "url": "/dashboard_aif_overview",
+  "category": "Planning",
+  "description": "Asset Inspection Form completed, inspection, and project-start activity by month.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

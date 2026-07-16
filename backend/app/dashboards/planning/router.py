@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 import re
 import sqlite3
 from typing import Any
@@ -54,6 +55,18 @@ DEFAULT_CITYWORKS_WORKORDER_URL_TEMPLATE = (
     "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/"
     "WorkManagement/WOGeneralEdit.aspx?WorkOrderId={id}"
 )
+DEFAULT_AIF_OVERVIEW_DATE_FROM = date(2025, 7, 1)
+DEFAULT_AIF_OVERVIEW_DATE_TO = date(2026, 6, 30)
+AIF_OVERVIEW_ACTIVITIES = {
+    "completed": "AIFs Completed",
+    "inspections": "Inspections Performed",
+    "project_started": "Projects Started",
+}
+AIF_OVERVIEW_ACTIVITY_COLORS = {
+    "completed": "#2f855a",
+    "inspections": "#4e79a7",
+    "project_started": "#f28e2b",
+}
 
 PENDING_AIF_SQL_CATEGORY_COLUMNS = [
     column for column in PENDING_AIF_CATEGORY_COLUMNS if column != "team"
@@ -416,6 +429,176 @@ def attach_links(record: dict[str, Any], templates: dict[str, str]) -> dict[str,
         for column in PENDING_AIF_LINK_COLUMNS
     }
     return {**record, "_links": {column: url for column, url in links.items() if url}}
+
+
+def parse_aif_overview_date(value: str | None, fallback: date) -> date:
+    if not value:
+        return fallback
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return fallback
+
+
+def month_start(value: date) -> date:
+    return date(value.year, value.month, 1)
+
+
+def next_month(value: date) -> date:
+    if value.month == 12:
+        return date(value.year + 1, 1, 1)
+    return date(value.year, value.month + 1, 1)
+
+
+def aif_overview_months(start_date: date, end_date: date) -> list[str]:
+    months: list[str] = []
+    current = month_start(start_date)
+    final = month_start(end_date)
+    while current <= final:
+        months.append(current.strftime("%Y-%m"))
+        current = next_month(current)
+    return months
+
+
+def aif_overview_month_label(month_key: str) -> str:
+    try:
+        return datetime.strptime(month_key, "%Y-%m").strftime("%b %Y")
+    except ValueError:
+        return month_key
+
+
+@router.get("/aif-overview")
+def aif_overview(
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
+) -> dict[str, Any]:
+    start_date = parse_aif_overview_date(date_from, DEFAULT_AIF_OVERVIEW_DATE_FROM)
+    end_date = parse_aif_overview_date(date_to, DEFAULT_AIF_OVERVIEW_DATE_TO)
+    if end_date < start_date:
+        start_date, end_date = end_date, start_date
+
+    source = critical_team_data_source()
+    schema = source.schema or "azteca"
+    inspection_table = qualified_table_name(schema, "INSPECTION")
+    start_text = f"{start_date.isoformat()} 00:00:00"
+    end_text = f"{end_date.isoformat()} 23:59:59"
+
+    with critical_team_connection() as con:
+        cursor = con.cursor()
+        names, rows = fetch_all(
+            cursor,
+            f"""
+            WITH aif_forms AS (
+                SELECT
+                    TRY_CONVERT(bigint, i.INSPECTIONID) AS inspection_id,
+                    CAST(i.INSPTEMPLATENAME AS varchar(255)) AS inspection_template_name,
+                    CAST(i.INSPECTEDBY AS varchar(255)) AS inspected_by,
+                    TRY_CONVERT(datetime2, i.INSPDATE) AS inspection_date,
+                    CAST(i.INITIATEDBY AS varchar(255)) AS initiated_by,
+                    TRY_CONVERT(datetime2, i.DATESUBMITTO) AS date_submit_to,
+                    TRY_CONVERT(datetime2, i.PRJSTARTDATE) AS project_start_date,
+                    TRY_CONVERT(datetime2, i.INITIATEDATE) AS initiate_date,
+                    TRY_CONVERT(datetime2, i.ACTFINISHDATE) AS actual_finish_date,
+                    TRY_CONVERT(datetime2, i.DATECLOSED) AS date_closed,
+                    TRY_CONVERT(datetime2, i.PRJFINISHDATE) AS project_finish_date,
+                    UPPER(LTRIM(RTRIM(CAST(i.STATUS AS varchar(255))))) AS status
+                FROM {inspection_table} AS i
+                WHERE i.INSPTEMPLATENAME LIKE '%Asset Insp%'
+                  AND i.ENTITYTYPE IN ('CHANNELS', 'PIPES', 'STRUCTURES')
+            )
+            SELECT
+                activity_key,
+                CONVERT(char(7), event_date, 120) AS month_key,
+                COUNT(DISTINCT inspection_id) AS count_value
+            FROM (
+                SELECT
+                    'completed' AS activity_key,
+                    date_closed AS event_date,
+                    inspection_id
+                FROM aif_forms
+                WHERE date_closed IS NOT NULL
+                  AND date_closed BETWEEN ? AND ?
+                  AND status IN ('COMPLETED', 'CLOSED')
+
+                UNION ALL
+
+                SELECT
+                    'inspections' AS activity_key,
+                    inspection_date AS event_date,
+                    inspection_id
+                FROM aif_forms
+                WHERE inspection_date IS NOT NULL
+                  AND inspection_date BETWEEN ? AND ?
+
+                UNION ALL
+
+                SELECT
+                    'project_started' AS activity_key,
+                    project_start_date AS event_date,
+                    inspection_id
+                FROM aif_forms
+                WHERE project_start_date IS NOT NULL
+                  AND project_start_date BETWEEN ? AND ?
+            ) AS activity_events
+            GROUP BY activity_key, CONVERT(char(7), event_date, 120)
+            ORDER BY month_key, activity_key
+            """,
+            [start_text, end_text, start_text, end_text, start_text, end_text],
+        )
+
+    records = [clean_record(dict(zip(names, row))) for row in rows]
+    months = aif_overview_months(start_date, end_date)
+    lookup = {
+        (
+            str(record.get("activity_key") or ""),
+            str(record.get("month_key") or ""),
+        ): int(record.get("count_value") or 0)
+        for record in records
+    }
+    series = []
+    activity_totals = {activity_key: 0 for activity_key in AIF_OVERVIEW_ACTIVITIES}
+    for activity_key, activity_label in AIF_OVERVIEW_ACTIVITIES.items():
+        points = [
+            {
+                "month_key": month,
+                "month_label": aif_overview_month_label(month),
+                "count_value": lookup.get((activity_key, month), 0),
+            }
+            for month in months
+        ]
+        activity_totals[activity_key] = sum(point["count_value"] for point in points)
+        series.append(
+            {
+                "key": activity_key,
+                "activity_key": activity_key,
+                "activity_label": activity_label,
+                "label": activity_label,
+                "color": AIF_OVERVIEW_ACTIVITY_COLORS[activity_key],
+                "points": points,
+            }
+        )
+
+    total_count = sum(activity_totals.values())
+    return {
+        "date_from": start_date.isoformat(),
+        "date_to": end_date.isoformat(),
+        "months": [{"key": month, "label": aif_overview_month_label(month)} for month in months],
+        "activities": [
+            {
+                "key": activity_key,
+                "label": activity_label,
+                "total": activity_totals.get(activity_key, 0),
+            }
+            for activity_key, activity_label in AIF_OVERVIEW_ACTIVITIES.items()
+        ],
+        "metrics": {
+            "total": total_count,
+            "completed": activity_totals.get("completed", 0),
+            "inspections": activity_totals.get("inspections", 0),
+            "project_started": activity_totals.get("project_started", 0),
+        },
+        "series": series,
+    }
 
 
 @router.get("/pending-aif/filter-options")
