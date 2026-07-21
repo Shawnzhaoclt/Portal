@@ -1,0 +1,34 @@
+name: portal
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13
+  - pip
+  # Local application logic and desktop packaging
+  - sqlalchemy
+  - alembic
+  - pydantic
+  - python-dotenv
+  - pyinstaller
+  - pytest
+  - email-validator
+  # Tabular files: CSV, Excel
+  - numpy
+  - pandas
+  - openpyxl
+  - xlrd
+  # DuckDB and Parquet/GeoParquet
+  - duckdb
+  - pyarrow
+  # Vector geospatial: GeoParquet, GeoJSON, shapefiles, etc.
+  - geopandas
+  - shapely
+  - pyproj
+  - pyogrio
+  - geojson
+  # Raster geospatial: GeoTIFF and Cloud Optimized GeoTIFF
+  - rasterio
+  - rioxarray
+  - xarray
+  # SQL Server connectivity; also install Microsoft ODBC Driver 18 for SQL Server.
+  - pyodbc

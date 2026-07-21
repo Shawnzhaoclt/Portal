@@ -5,24 +5,35 @@ __pycache__/
 
 # Logs
 *.log
+workstation-sync/logs/
+workstation-sync/sync.settings.json
 
 # Frontend dependencies and build output
-frontend/node_modules/
-frontend/dist/
-frontend/.vite/
-frontend/.vite-temp/
-frontend/node_modules/.tmp/
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.vite-temp/
+ui/node_modules/.tmp/
+
+# Desktop build output
+/dist/
+/src-tauri/target/
+/python/portal/ipc/build/
+/python/portal/ipc/dist/
+/tmp/
+/${PORTAL_APP_ROOT}/
+/python/${PORTAL_DATA_ROOT}/
 
 # Local/generated dashboard data
-backend/data/
-maintainace/backups/
-frontend/data/*.duckdb
-frontend/public/data/*.json
-backend/app/dashboards/map_tiles/runtime/build/pmtiles/
-backend/app/dashboards/map_tiles/runtime/build/terrain/
-backend/app/dashboards/map_tiles/runtime/build/staging/
-backend/app/dashboards/map_tiles/runtime/build/reports/
-backend/app/dashboards/map_tiles/runtime/build/logs/
+python/portal/data/
+maintenance/backups/
+ui/data/*.duckdb
+ui/public/data/*.json
+python/portal/app/dashboards/map_tiles/runtime/build/pmtiles/
+python/portal/app/dashboards/map_tiles/runtime/build/terrain/
+python/portal/app/dashboards/map_tiles/runtime/build/staging/
+python/portal/app/dashboards/map_tiles/runtime/build/reports/
+python/portal/app/dashboards/map_tiles/runtime/build/logs/
 
 # Environment/local editor files
 *.local

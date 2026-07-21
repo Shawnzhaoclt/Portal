@@ -1,0 +1,146 @@
+.desktop-startup-screen {
+  display: grid;
+  min-width: 100vw;
+  min-height: 100vh;
+  place-items: center;
+  padding: 40px;
+  color: #1f2933;
+  background: #edf3f7;
+  font-family: var(--font);
+}
+
+.desktop-startup-content {
+  display: flex;
+  width: min(620px, 92vw);
+  min-height: 360px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.desktop-startup-logo {
+  display: block;
+  width: 210px;
+  height: auto;
+  margin-bottom: 22px;
+  object-fit: contain;
+}
+
+.desktop-startup-rule {
+  width: 64px;
+  height: 3px;
+  margin-bottom: 22px;
+  background: #255a8f;
+}
+
+.desktop-startup-content h1,
+.desktop-startup-content h2,
+.desktop-startup-content p {
+  margin: 0;
+  letter-spacing: 0;
+}
+
+.desktop-startup-content h1 {
+  max-width: 620px;
+  font-size: 30px;
+  font-weight: 650;
+  line-height: 1.2;
+}
+
+.desktop-startup-content h2 {
+  margin-top: 14px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.desktop-startup-content p {
+  min-height: 24px;
+  margin-top: 8px;
+  color: #687586;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.desktop-startup-spinner {
+  width: 28px;
+  height: 28px;
+  margin-top: 30px;
+  color: #255a8f;
+  animation: desktop-startup-spin 0.9s linear infinite;
+}
+
+.desktop-startup-progress {
+  width: 280px;
+  height: 3px;
+  margin-top: 24px;
+  overflow: hidden;
+  background: #cfdae5;
+}
+
+.desktop-startup-progress span {
+  display: block;
+  width: 38%;
+  height: 100%;
+  background: #255a8f;
+  animation: desktop-startup-progress 1.4s ease-in-out infinite;
+}
+
+.desktop-startup-error-icon {
+  width: 32px;
+  height: 32px;
+  margin-top: 28px;
+  color: #b42318;
+}
+
+.desktop-startup-error {
+  max-width: 560px;
+  white-space: pre-line;
+}
+
+.desktop-startup-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.desktop-startup-actions button {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #9eb2c6;
+  padding: 0 18px;
+  color: #174f83;
+  background: #ffffff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.desktop-startup-actions button:hover {
+  border-color: #255a8f;
+  background: #e7f1fb;
+}
+
+@keyframes desktop-startup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes desktop-startup-progress {
+  0% {
+    transform: translateX(-110%);
+  }
+  100% {
+    transform: translateX(365%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-startup-spinner,
+  .desktop-startup-progress span {
+    animation: none;
+  }
+}

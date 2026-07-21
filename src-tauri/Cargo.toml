@@ -1,0 +1,36 @@
+[package]
+name = "portal-desktop"
+version = "0.1.0"
+description = "Storm Water Asset Intelligence Portal desktop host"
+authors = ["City of Charlotte Storm Water Services"]
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "portal_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "Portal"
+path = "src/main.rs"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2", features = [] }
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+
+[patch.crates-io]
+# The corporate proxy resets this generated bindings crate on static.crates.io.
+# Pinning its official release commit keeps desktop builds reproducible.
+webview2-com-sys = { git = "https://github.com/wravery/webview2-rs.git", rev = "b74dc5e2b394044bea5191052868ce7a106c202c" }

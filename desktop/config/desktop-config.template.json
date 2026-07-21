@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "shared": {
+    "dataRoot": ""
+  },
+  "system": {
+    "database": "${PORTAL_APP_ROOT}/config/system.db",
+    "readOnly": true
+  },
+  "risk": {
+    "databases": {
+      "assetRisk": "${PORTAL_SHARED_DATA_ROOT}/intermediate/amteam/amteam.duckdb",
+      "mapRisk": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/staging/duckdb/stm_risk.duckdb",
+      "inventory": "${PORTAL_SHARED_DATA_ROOT}/intermediate/inventory/inventory.db",
+      "cityPipes": "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb"
+    },
+    "readOnly": true
+  },
+  "dataSources": {
+    "portalSources": {
+      "manifest": "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json",
+      "readOnly": true
+    },
+    "gisFacility": {
+      "database": "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+      "readOnly": true
+    },
+    "spatialDataWarehouse": {
+      "database": "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb",
+      "readOnly": true
+    }
+  },
+  "maps": {
+    "runtimeRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles",
+    "pmtilesRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
+    "configurationRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/config",
+    "maplibreRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/maplibre",
+    "terrainRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/terrain",
+    "reportsRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
+    "readOnly": true
+  },
+  "business": {
+    "database": "${PORTAL_DATA_ROOT}/data/business.db",
+    "backupRoot": "${PORTAL_DATA_ROOT}/data/backups",
+    "inboxRoot": "${PORTAL_DATA_ROOT}/inbox",
+    "outboxRoot": "${PORTAL_DATA_ROOT}/outbox"
+  },
+  "businessSync": {
+    "networkRoot": "${PORTAL_SHARED_DATA_ROOT}/portal/data",
+    "masterManifest": "${PORTAL_BUSINESS_NETWORK_ROOT}/master/current.json",
+    "masterVersionsRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/master/versions",
+    "submissionInboxRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/inbox",
+    "submissionProcessedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/processed",
+    "submissionRejectedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/rejected",
+    "conflictOpenRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/open",
+    "conflictResolvedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/resolved",
+    "conflictArchiveRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/archive",
+    "lockRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/locks",
+    "backupRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/backups"
+  },
+  "application": {
+    "exportRoot": "${PORTAL_DATA_ROOT}/exports",
+    "logRoot": "${PORTAL_DATA_ROOT}/logs",
+    "tempRoot": "${PORTAL_DATA_ROOT}/temp",
+    "pipeVideoRoot": ""
+  },
+  "maintenance": {
+    "mapSourceRoot": ""
+  },
+  "externalServices": {
+    "cityworks": {
+      "inspectionUrlTemplate": "",
+      "workOrderUrlTemplate": "",
+      "investigationUrlTemplate": ""
+    },
+    "maps": {
+      "aerial2025ExportUrl": "",
+      "cltexVectorBasemapStyleUrl": "",
+      "cltexVectorTileUrl": "",
+      "ncOneMapImageryServiceRoot": "",
+      "ncOneMapAcquisitionMapServer": "",
+      "usgsTopoTileUrl": "",
+      "usgsImageryTopoTileUrl": "",
+      "glyphsUrl": "",
+      "googleStreetViewUrlTemplate": ""
+    }
+  }
+}

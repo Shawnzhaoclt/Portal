@@ -1,0 +1,92 @@
+{
+  "outputDatabase": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/portal_sources.duckdb",
+  "sqliteDatabase": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/portal_sources.sqlite3",
+  "sqliteManifest": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/portal_sources.current.json",
+  "sqliteVersionsDirectory": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/versions",
+  "sqliteKeepVersions": 3,
+  "syncLogsDirectory": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/logs",
+  "syncStatusFile": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/logs/portal-sync-status.json",
+  "logRetentionDays": 14,
+  "chunkSize": 50000,
+  "schedule": {
+    "allowedStartTime": "07:00",
+    "firstRunTime": "07:30",
+    "lastRunTime": "16:30",
+    "exitTime": "16:35",
+    "intervalMinutes": 5
+  },
+  "sources": [
+    {
+      "key": "cityworks",
+      "server": "myrs-cwdbprd-1",
+      "database": "swpt_cityworks_db",
+      "trustedConnection": true,
+      "schema": "azteca",
+      "tables": [
+        {
+          "source": "WORKORDER",
+          "target": "azteca_WORKORDER",
+          "indexes": [["WORKORDERID"], ["DESCRIPTION"]]
+        },
+        {
+          "source": "WOCUSTFIELD",
+          "target": "azteca_WOCUSTFIELD",
+          "indexes": [["WORKORDERID"], ["WORKORDERID", "CUSTFIELDID"]]
+        },
+        {
+          "source": "WORKORDERENTITY",
+          "target": "azteca_WORKORDERENTITY",
+          "indexes": [["WORKORDERID"], ["ENTITYUID"]]
+        },
+        {
+          "source": "INSPECTION",
+          "target": "azteca_INSPECTION",
+          "indexes": [["INSPECTIONID"], ["ENTITYUID"], ["STATUS"]]
+        },
+        {
+          "source": "ACTIVITYLINK",
+          "target": "azteca_ACTIVITYLINK",
+          "indexes": [["SOURCEACTIVITYID"], ["DESTACTIVITYID"]]
+        }
+      ]
+    },
+    {
+      "key": "itpipes",
+      "server": "",
+      "database": "CLTStormWater",
+      "trustedConnection": false,
+      "username": "",
+      "password": "",
+      "usernameEnvironmentVariable": "PORTAL_SYNC_ITPIPES_USER",
+      "passwordEnvironmentVariable": "PORTAL_SYNC_ITPIPES_PASSWORD",
+      "schema": "dbo",
+      "tables": [
+        {
+          "source": "ML",
+          "target": "ML",
+          "indexes": [["ML_ID"], ["ML_Name"]]
+        },
+        {
+          "source": "MLI",
+          "target": "MLI",
+          "indexes": [["MLI_ID"], ["ML_ID"], ["Inspection_Date"]]
+        },
+        {
+          "source": "MLO",
+          "target": "MLO",
+          "indexes": [["MLO_ID"], ["MLI_ID"]]
+        },
+        {
+          "source": "Media",
+          "target": "Media",
+          "indexes": [["Media_ID"]]
+        },
+        {
+          "source": "MLO_Media",
+          "target": "MLO_Media",
+          "indexes": [["MLO_ID"], ["Media_ID"]]
+        }
+      ]
+    }
+  ]
+}
