@@ -1,88 +1,91 @@
 {
-  "schemaVersion": 1,
-  "shared": {
-    "dataRoot": ""
-  },
-  "system": {
-    "database": "${PORTAL_APP_ROOT}/config/system.db",
-    "readOnly": true
-  },
-  "risk": {
-    "databases": {
-      "assetRisk": "${PORTAL_SHARED_DATA_ROOT}/intermediate/amteam/amteam.duckdb",
-      "mapRisk": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/staging/duckdb/stm_risk.duckdb",
-      "inventory": "${PORTAL_SHARED_DATA_ROOT}/intermediate/inventory/inventory.db",
-      "cityPipes": "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb"
-    },
-    "readOnly": true
-  },
-  "dataSources": {
-    "portalSources": {
-      "manifest": "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json",
-      "readOnly": true
-    },
-    "gisFacility": {
-      "database": "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
-      "readOnly": true
-    },
-    "spatialDataWarehouse": {
-      "database": "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb",
-      "readOnly": true
-    }
-  },
-  "maps": {
-    "runtimeRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles",
-    "pmtilesRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
-    "configurationRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/config",
-    "maplibreRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/maplibre",
-    "terrainRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/terrain",
-    "reportsRoot": "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
-    "readOnly": true
-  },
-  "business": {
-    "database": "${PORTAL_DATA_ROOT}/data/business.db",
-    "backupRoot": "${PORTAL_DATA_ROOT}/data/backups",
-    "inboxRoot": "${PORTAL_DATA_ROOT}/inbox",
-    "outboxRoot": "${PORTAL_DATA_ROOT}/outbox"
-  },
-  "businessSync": {
-    "networkRoot": "${PORTAL_SHARED_DATA_ROOT}/portal/data",
-    "masterManifest": "${PORTAL_BUSINESS_NETWORK_ROOT}/master/current.json",
-    "masterVersionsRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/master/versions",
-    "submissionInboxRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/inbox",
-    "submissionProcessedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/processed",
-    "submissionRejectedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/rejected",
-    "conflictOpenRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/open",
-    "conflictResolvedRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/resolved",
-    "conflictArchiveRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/archive",
-    "lockRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/locks",
-    "backupRoot": "${PORTAL_BUSINESS_NETWORK_ROOT}/backups"
-  },
-  "application": {
-    "exportRoot": "${PORTAL_DATA_ROOT}/exports",
-    "logRoot": "${PORTAL_DATA_ROOT}/logs",
-    "tempRoot": "${PORTAL_DATA_ROOT}/temp",
-    "pipeVideoRoot": ""
-  },
-  "maintenance": {
-    "mapSourceRoot": ""
-  },
-  "externalServices": {
-    "cityworks": {
-      "inspectionUrlTemplate": "",
-      "workOrderUrlTemplate": "",
-      "investigationUrlTemplate": ""
-    },
-    "maps": {
-      "aerial2025ExportUrl": "",
-      "cltexVectorBasemapStyleUrl": "",
-      "cltexVectorTileUrl": "",
-      "ncOneMapImageryServiceRoot": "",
-      "ncOneMapAcquisitionMapServer": "",
-      "usgsTopoTileUrl": "",
-      "usgsImageryTopoTileUrl": "",
-      "glyphsUrl": "",
-      "googleStreetViewUrlTemplate": ""
-    }
-  }
+    "schemaVersion":  1,
+    "shared":  {
+                   "dataRoot":  ""
+               },
+    "updates":  {
+                    "releaseRoot":  "G:/Strategic Planning/Planning/stm_risk_app"
+                },
+    "system":  {
+                   "database":  "${PORTAL_APP_ROOT}/config/system.db",
+                   "readOnly":  true
+               },
+    "risk":  {
+                 "databases":  {
+                                   "assetRisk":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/amteam/amteam.duckdb",
+                                   "mapRisk":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/staging/duckdb/stm_risk.duckdb",
+                                   "inventory":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/inventory/inventory.db",
+                                   "cityPipes":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb"
+                               },
+                 "readOnly":  true
+             },
+    "dataSources":  {
+                        "portalSources":  {
+                                              "manifest":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json",
+                                              "readOnly":  true
+                                          },
+                        "gisFacility":  {
+                                            "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                                            "readOnly":  true
+                                        },
+                        "spatialDataWarehouse":  {
+                                                     "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb",
+                                                     "readOnly":  true
+                                                 }
+                    },
+    "maps":  {
+                 "runtimeRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles",
+                 "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
+                 "configurationRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/config",
+                 "maplibreRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/maplibre",
+                 "terrainRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/terrain",
+                 "reportsRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
+                 "readOnly":  true
+             },
+    "business":  {
+                     "database":  "${PORTAL_DATA_ROOT}/data/stormwater.db",
+                     "backupRoot":  "${PORTAL_DATA_ROOT}/data/backups",
+                     "inboxRoot":  "${PORTAL_DATA_ROOT}/data/inbox",
+                     "outboxRoot":  "${PORTAL_DATA_ROOT}/data/outbox"
+                 },
+    "businessSync":  {
+                         "networkRoot":  "${PORTAL_SHARED_DATA_ROOT}/portal/data",
+                         "masterManifest":  "${PORTAL_BUSINESS_NETWORK_ROOT}/master/current.json",
+                         "masterVersionsRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/master/versions",
+                         "submissionInboxRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/inbox",
+                         "submissionProcessedRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/processed",
+                         "submissionRejectedRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/submissions/rejected",
+                         "conflictOpenRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/open",
+                         "conflictResolvedRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/resolved",
+                         "conflictArchiveRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/conflicts/archive",
+                         "lockRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/locks",
+                         "backupRoot":  "${PORTAL_BUSINESS_NETWORK_ROOT}/backups"
+                     },
+    "application":  {
+                        "exportRoot":  "${PORTAL_DATA_ROOT}/data/exports",
+                        "logRoot":  "${PORTAL_DATA_ROOT}/data/logs",
+                        "tempRoot":  "${PORTAL_DATA_ROOT}/data/temp",
+                        "pipeVideoRoot":  "P:\\Pipe_video\\IT Pipes\\mainline"
+                    },
+    "maintenance":  {
+                        "mapSourceRoot":  ""
+                    },
+    "externalServices":  {
+                             "cityworks":  {
+                                               "inspectionUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/InspectionEdit.aspx?InspectionId={id}",
+                                               "workOrderUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/WOGeneralEdit.aspx?WorkOrderId={id}",
+                                               "investigationUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/InspectionEdit.aspx?InspectionId={id}"
+                                           },
+                             "maps":  {
+                                          "aerial2025ExportUrl":  "https://meckaerial.mecklenburgcountync.gov/server/rest/services/aerial2025/MapServer/export?bbox={bbox-epsg-3857}\u0026bboxSR=3857\u0026imageSR=3857\u0026size=512,512\u0026format=png32\u0026transparent=false\u0026f=image",
+                                          "cltexVectorBasemapStyleUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/resources/styles/root.json",
+                                          "cltexVectorTileUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/tile/{z}/{y}/{x}.pbf",
+                                          "ncOneMapImageryServiceRoot":  "https://services.nconemap.gov/secure/rest/services/Imagery",
+                                          "ncOneMapAcquisitionMapServer":  "https://services.nconemap.gov/secure/rest/services/NC1Map_Ortho_Acquisition_Related/MapServer",
+                                          "usgsTopoTileUrl":  "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}",
+                                          "usgsImageryTopoTileUrl":  "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}",
+                                          "glyphsUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/resources/fonts/{fontstack}/{range}.pbf",
+                                          "googleStreetViewUrlTemplate":  "https://www.google.com/maps/@?api=1\u0026map_action=pano\u0026viewpoint={lat},{lng}"
+                                      }
+                         }
 }

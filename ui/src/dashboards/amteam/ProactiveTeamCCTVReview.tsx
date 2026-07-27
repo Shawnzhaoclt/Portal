@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import type { ButtonHTMLAttributes, CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
+import { Tooltip } from 'radix-ui'
 import { toast } from 'sonner'
 import {
   AlertCircle,
@@ -70,6 +71,30 @@ type SortState = {
 type ReportTableColumnKey = ReportField | 'operations'
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+type ReportActionButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
+  tooltip: string
+}
+
+function ReportActionButton({ children, tooltip, ...buttonProps }: ReportActionButtonProps) {
+  return (
+    <Tooltip.Root>
+      <Tooltip.Trigger asChild>
+        <span className="cctv-report-action-tooltip-trigger">
+          <button {...buttonProps} aria-label={tooltip}>
+            {children}
+          </button>
+        </span>
+      </Tooltip.Trigger>
+      <Tooltip.Portal>
+        <Tooltip.Content className="cctv-report-action-tooltip" side="top" sideOffset={7}>
+          {tooltip}
+          <Tooltip.Arrow className="cctv-report-action-tooltip-arrow" />
+        </Tooltip.Content>
+      </Tooltip.Portal>
+    </Tooltip.Root>
+  )
+}
 
 type SearchCandidate = {
   key: string
@@ -851,48 +876,49 @@ export default function ProactiveTeamCCTVReview() {
     const isReady = report.status === 'ready_to_review'
 
     return (
-      <div className="cctv-report-actions">
-        <button aria-label="View report" onClick={() => setWorkspaceModal({ mode: 'view', report })} title="View report" type="button">
-          <Eye size={15} />
-        </button>
+      <Tooltip.Provider delayDuration={250} skipDelayDuration={100}>
+        <div className="cctv-report-actions">
+          <ReportActionButton onClick={() => setWorkspaceModal({ mode: 'view', report })} tooltip="View report" type="button">
+            <Eye size={15} />
+          </ReportActionButton>
         {isPending ? (
           <>
-            <button aria-label="Edit report" onClick={() => setWorkspaceModal({ mode: 'edit', report })} title="Edit report" type="button">
+            <ReportActionButton onClick={() => setWorkspaceModal({ mode: 'edit', report })} tooltip="Edit report" type="button">
               <Edit3 size={15} />
-            </button>
-            <button aria-label="Submit to review" onClick={() => runStatusAction(report, 'submit_to_review')} title="Submit to review" type="button">
+            </ReportActionButton>
+            <ReportActionButton onClick={() => runStatusAction(report, 'submit_to_review')} tooltip="Submit to review" type="button">
               <Send size={15} />
-            </button>
+            </ReportActionButton>
           </>
         ) : null}
         {isReady ? (
           <>
-            <button aria-label="Return to edit" onClick={() => runStatusAction(report, 'return_to_edit')} title="Return to edit" type="button">
+            <ReportActionButton onClick={() => runStatusAction(report, 'return_to_edit')} tooltip="Return to edit" type="button">
               <RotateCcw size={15} />
-            </button>
-            <button aria-label="Complete review" onClick={() => runStatusAction(report, 'complete')} title="Complete review" type="button">
+            </ReportActionButton>
+            <ReportActionButton onClick={() => runStatusAction(report, 'complete')} tooltip="Complete review" type="button">
               <CheckCircle2 size={15} />
-            </button>
+            </ReportActionButton>
           </>
         ) : null}
-        <button
-          aria-label="Download report"
+        <ReportActionButton
           disabled={downloadingReportId === report.id}
           onClick={() => void downloadReport(report)}
-          title="Download report"
+          tooltip="Download report"
           type="button"
         >
           {downloadingReportId === report.id ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
-        </button>
-        <button aria-label="Report events" onClick={() => void openReportEvents(report)} title="Report events" type="button">
+        </ReportActionButton>
+        <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
           <History size={15} />
-        </button>
+        </ReportActionButton>
         {canDeleteReport(report) ? (
-          <button className="danger" aria-label="Delete report" onClick={() => void deleteReport(report)} title="Delete report" type="button">
+          <ReportActionButton className="danger" onClick={() => void deleteReport(report)} tooltip="Delete report" type="button">
             <Trash2 size={15} />
-          </button>
+          </ReportActionButton>
         ) : null}
-      </div>
+        </div>
+      </Tooltip.Provider>
     )
   }
 

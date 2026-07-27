@@ -5,8 +5,10 @@ __pycache__/
 
 # Logs
 *.log
-workstation-sync/logs/
-workstation-sync/sync.settings.json
+workstation-manager/sync/logs/
+workstation-manager/sync/sync.settings.json
+
+.docs/
 
 # Frontend dependencies and build output
 ui/node_modules/
@@ -21,6 +23,8 @@ ui/node_modules/.tmp/
 /python/portal/ipc/build/
 /python/portal/ipc/dist/
 /tmp/
+/updater-layout-validation/
+/${PORTAL_DATA_ROOT}/
 /${PORTAL_APP_ROOT}/
 /python/${PORTAL_DATA_ROOT}/
 

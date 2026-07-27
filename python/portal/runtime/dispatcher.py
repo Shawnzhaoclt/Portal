@@ -210,6 +210,9 @@ def dispatch_request(request: dict[str, Any]) -> dict[str, Any]:
     generators: list[Generator[Any, None, None]] = []
 
     try:
+        test_access = str(next((value for key, value in headers.items() if key.lower() == "x-portal-test-access"), "")).strip().lower()
+        if test_access in {"1", "true", "yes"} and method not in {"GET", "HEAD", "OPTIONS"}:
+            raise HTTPException(status_code=403, detail="Changes are disabled while testing access for another team.")
         route, path_values = _find_route(method, path)
         result, generators = _resolve_callable(
             route.endpoint,

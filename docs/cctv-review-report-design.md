@@ -113,7 +113,9 @@ This save should be transactional:
 
 If export file creation fails after the database save, the saved latest report state should remain. The audit event can record `export_failed` if failure tracking is needed.
 
-## Table Design
+## Legacy Table Design (Superseded)
+
+The relational design below is retained only as historical reference. It is not used by the desktop runtime. Do not create, query, or modify these tables for new report data.
 
 Table naming rule:
 
@@ -230,6 +232,30 @@ Suggested columns:
 
 This table supports the requirement to show who edited the report status and at what time. It can store a short optional user memo for the action, but should not store full modification content or page snapshots.
 
+## Coordinator-Backed Persistence
+
+The desktop report uses the Portal Data Coordinator for every writable report operation. It does not own physical `RPT5W1C0_*` tables.
+
+One logical report is stored as one coordinator entity:
+
+| Coordinator field | Value |
+| --- | --- |
+| `entity_type` | `RPT5W1C0.report` |
+| `entity_id` | `report_key` |
+| entity body | Current report metadata, latest pipe review state, and report event history |
+
+The `(entity_type, entity_id)` identity prevents duplicate report keys. The coordinator record revision provides optimistic-concurrency protection; its shared-repository protocol is the authoritative persistence path.
+
+The entity body has three sections:
+
+1. `report`: binding, inspection-date text, status, owner, submitter, reviewer, and timestamps.
+2. `pipes`: the latest saved pipe, distance-group, and observation review state. Source properties are re-read from the local CCTV source database by `ml_id`, `mli_id`, and stable observation keys.
+3. `events`: the report audit trail, including action, user, timestamp, status transition, and optional memo.
+
+Pipes with no observations remain in `pipes` so pipe-level input such as clogging is preserved. `Defects Scored 3+` is calculated from the current review state and not stored independently. An `mlo_id` is not assumed to be globally unique; saved observations retain a stable source observation key.
+
+All create, update, workflow, and delete actions must be committed as Data Coordinator mutations under its record lock. Direct SQL writes, route startup DDL, and independent report-table migrations are prohibited.
+
 ## Search Behavior
 
 The report list should support search and filters by:
@@ -257,21 +283,17 @@ When the user clicks `Generate Report`:
 2. Ask the user to enter an optional memo.
 3. Build `report_key` and `report_name`.
 4. Find existing report by `report_key`.
-5. If no existing report exists, insert `RPT5W1C0_reports`.
-6. If report exists with `status = pending`, update the same logical report.
+5. If no existing report entity exists, commit an `insert_entity` mutation for `RPT5W1C0.report` using `report_key` as the entity ID.
+6. If report exists with `status = pending`, update the same logical entity using its current coordinator revision.
 7. If report exists with `status = ready_to_review`, require the user to use `Back to Edit` before saving changes.
 8. If report exists with `status = completed`, block the save because completed reports are read-only.
 9. Set status to `pending`.
 10. Update `updated_by_user_id` and `updated_at`.
-11. Delete or replace latest child rows for the report.
-12. Insert latest rows into:
-   - `RPT5W1C0_pipes`
-   - `RPT5W1C0_distance_groups`
-   - `RPT5W1C0_observations`
-13. Insert a `report_saved` event with the optional memo.
-14. Generate the export file.
+11. Replace the entity's `pipes` section with the latest pipe, distance-group, and observation review state.
+12. Append a `report_saved` event with the optional memo to the entity's `events` section.
+13. Commit the report aggregate through the Data Coordinator, then generate the export file.
 
-This should be done in a transaction for the database save portion.
+The coordinator mutation is the atomic business-data save boundary.
 
 ## Review Flow
 

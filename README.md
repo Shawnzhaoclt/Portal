@@ -19,7 +19,7 @@ Portal keeps writable and workstation-specific data under `%LOCALAPPDATA%\Portal
 
 ```text
 config/          Application settings and the read-only system.db publication
-data/business.db Writable resource data, including CCTV review reports
+data/stormwater.db Writable resource data, including CCTV review reports
 exports/         User-generated documents and spreadsheets
 logs/            Application diagnostics
 inbox/ outbox/   Business database exchange packages
@@ -29,8 +29,9 @@ temp/            Disposable working files
 The authoritative source paths are declared in `config/portal.settings.json`. Large
 read-only DuckDB, PMTiles, map styles, sprites, and map configuration live under the
 configured shared data root and are never packaged with the application. The system
-database is read directly from portable `config/system.db`; `data/business.db` is
-copied to the user profile and is the only database writable at runtime.
+database is read directly from portable `config/system.db`. `stormwater.db` is also
+not packaged: a verified active `protocol-v1` snapshot is downloaded to the user
+profile on first launch and becomes the only database writable at runtime.
 
 ## Development
 

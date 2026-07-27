@@ -320,6 +320,27 @@
   justify-content: center;
 }
 
+.cctv-report-action-tooltip-trigger {
+  display: inline-flex;
+}
+
+.cctv-report-action-tooltip {
+  z-index: 2000;
+  max-width: 220px;
+  border: 1px solid #0e3e6c;
+  background: #153f69;
+  color: #fff;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  box-shadow: 0 3px 8px rgba(22, 52, 79, 0.24);
+}
+
+.cctv-report-action-tooltip-arrow {
+  fill: #153f69;
+}
+
 .cctv-report-actions button {
   width: 32px;
   min-width: 32px;

@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useState } from 'react'
-import type { KeyboardEvent } from 'react'
 import { toast } from 'sonner'
 import {
   ArrowDown,
@@ -12,6 +11,7 @@ import {
   ClipboardCheck,
   Download,
   ExternalLink,
+  RefreshCw,
   Search,
   X,
 } from 'lucide-react'
@@ -541,6 +541,22 @@ function hasActiveFilters(
   )
 }
 
+function activeFilterCount(
+  search: string,
+  numberFilters: ReturnType<typeof createEmptyNumberFilters>,
+  textFilters: ReturnType<typeof createEmptyTextFilters>,
+  categoryFilters: ReturnType<typeof createEmptyCategoryFilters>,
+  dateFilter: DateFilter,
+) {
+  return (
+    (search.trim() ? 1 : 0) +
+    Object.values(numberFilters).filter((filter) => filter.mode !== 'any' && Boolean(filter.from || filter.to)).length +
+    Object.values(textFilters).filter((value) => value.trim()).length +
+    Object.values(categoryFilters).filter(Boolean).length +
+    (dateFilter.mode !== 'any' && Boolean(dateFilter.from || dateFilter.to) ? 1 : 0)
+  )
+}
+
 function PlanningPendingAifQaTable() {
   const [rowsResponse, setRowsResponse] = useState<PendingAifResponse | null>(null)
   const [options, setOptions] = useState<PendingAifFilterOptions>({})
@@ -553,7 +569,7 @@ function PlanningPendingAifQaTable() {
   const [pageSize, setPageSize] = useState(50)
   const [page, setPage] = useState(1)
   const [sort, setSort] = useState(DEFAULT_SORT)
-  const [selectedRow, setSelectedRow] = useState<string | null>(null)
+  const [reloadToken, setReloadToken] = useState(0)
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -598,7 +614,6 @@ function PlanningPendingAifQaTable() {
       .then((response) => {
         if (cancelled) return
         setRowsResponse(response)
-        setSelectedRow(null)
       })
       .catch((requestError: unknown) => {
         if (!cancelled) setError(requestError instanceof Error ? requestError.message : String(requestError))
@@ -609,7 +624,7 @@ function PlanningPendingAifQaTable() {
     return () => {
       cancelled = true
     }
-  }, [categoryFilters, dateFilter, numberFilters, page, pageSize, search, sort, textFilters])
+  }, [categoryFilters, dateFilter, numberFilters, page, pageSize, reloadToken, search, sort, textFilters])
 
   useEffect(() => {
     const total = rowsResponse?.total ?? 0
@@ -624,6 +639,10 @@ function PlanningPendingAifQaTable() {
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const activeFilters = useMemo(
     () => hasActiveFilters(search, numberFilters, textFilters, categoryFilters, dateFilter),
+    [categoryFilters, dateFilter, numberFilters, search, textFilters],
+  )
+  const filterCount = useMemo(
+    () => activeFilterCount(search, numberFilters, textFilters, categoryFilters, dateFilter),
     [categoryFilters, dateFilter, numberFilters, search, textFilters],
   )
 
@@ -679,17 +698,6 @@ function PlanningPendingAifQaTable() {
 
   function moveToPage(nextPage: number) {
     setPage(Math.max(1, Math.min(pageCount, nextPage)))
-  }
-
-  function rowKey(row: PendingAifRow, index: number) {
-    return String(row.inspection_id ?? `${rowsResponse?.offset ?? 0}-${index}`)
-  }
-
-  function handleRowKeyDown(event: KeyboardEvent<HTMLTableRowElement>, key: string) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      setSelectedRow(key)
-    }
   }
 
   async function downloadAllRows() {
@@ -844,24 +852,35 @@ function PlanningPendingAifQaTable() {
     <div className="workbook-shell detail-mode portal-view-mode planning-aif-workbook">
       <main className="sheet-canvas planning-aif-canvas">
         {error ? <div className="error-banner">{error}</div> : null}
-        {loading ? <div className="loading-bar">Refreshing pending AIF records</div> : null}
 
         <section className="sheet-panel table-panel detail-panel planning-aif-panel">
-          <div className="panel-header">
+          <div className="panel-header planning-aif-header">
             <div>
               <ClipboardCheck size={18} />
-              <div>
-                <strong>Planning Pending AIF QA/QC</strong>
-                <span>Pending Asset Inspection Form records</span>
+              <div className="panel-title-copy">
+                <h2>Planning Pending AIF QA/QC</h2>
+                <p>Review pending Asset Inspection Forms and related Cityworks activity.</p>
               </div>
             </div>
-            <div className="planning-aif-total" aria-label={`${formatNumber(total)} pending AIF records`}>
-              <strong>{formatNumber(total)}</strong>
-              <span>Pending AIF</span>
+            <div className="planning-aif-header-actions">
+              <div className="planning-aif-total" aria-label={`${formatNumber(total)} pending AIF records`}>
+                <strong>{formatNumber(total)}</strong>
+                <span>Pending AIFs</span>
+              </div>
+              <button
+                className="planning-aif-icon-button"
+                type="button"
+                title="Refresh data"
+                aria-label="Refresh pending AIF data"
+                disabled={loading}
+                onClick={() => setReloadToken((current) => current + 1)}
+              >
+                <RefreshCw size={16} className={loading ? 'is-spinning' : undefined} />
+              </button>
             </div>
           </div>
 
-          <div className="detail-toolbar planning-aif-search-toolbar">
+          <div className="detail-toolbar planning-aif-toolbar">
             <form
               className="planning-aif-search"
               onSubmit={(event) => {
@@ -881,43 +900,44 @@ function PlanningPendingAifQaTable() {
                 Search
               </button>
             </form>
-          </div>
-
-          <div className="detail-toolbar">
-            <div className="records-per-page">
-              <span>Records per page</span>
-              <select
-                className="page-size-select"
-                value={pageSize}
-                onChange={(event) => {
-                  setPage(1)
-                  setPageSize(Number(event.target.value))
-                }}
-                aria-label="Records per page"
-              >
-                {PAGE_SIZE_OPTIONS.map((size) => (
-                  <option key={size} value={size}>
-                    {size}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="detail-toolbar-actions">
-              <span>
+            <div className="detail-toolbar-actions planning-aif-toolbar-actions">
+              <span className="table-result-range">
                 {formatNumber(firstRecord)}-{formatNumber(lastRecord)} of {formatNumber(total)}
               </span>
+              <div className="records-per-page">
+                <span>Rows</span>
+                <select
+                  className="page-size-select"
+                  value={pageSize}
+                  onChange={(event) => {
+                    setPage(1)
+                    setPageSize(Number(event.target.value))
+                  }}
+                  aria-label="Records per page"
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>
+                      {size}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <button className="export-button" type="button" disabled={total === 0 || exporting} onClick={downloadAllRows}>
                 <Download size={14} />
-                {exporting ? 'Preparing...' : 'Download Excel'}
+                {exporting ? 'Preparing...' : 'Export'}
               </button>
               <button className="clear-table-filters" type="button" disabled={!activeFilters} onClick={clearFilters}>
                 <X size={14} />
-                Clear column filters
+                Clear{filterCount > 0 ? ` (${filterCount})` : ''}
               </button>
             </div>
           </div>
 
-          <div className="table-wrap">
+          <div className="planning-aif-status-row" aria-live="polite">
+            <span>{loading ? 'Refreshing records...' : activeFilters ? `${filterCount} active filter${filterCount === 1 ? '' : 's'}` : 'All pending records'}</span>
+          </div>
+
+          <div className="table-wrap" aria-busy={loading}>
             <table className="detail-table planning-aif-table">
               <colgroup>
                 {PENDING_AIF_COLUMNS.map((column) => (
@@ -952,15 +972,9 @@ function PlanningPendingAifQaTable() {
               </thead>
               <tbody>
                 {rows.map((row, index) => {
-                  const key = rowKey(row, index)
+                  const key = String(row.inspection_id ?? `${rowsResponse?.offset ?? 0}-${index}`)
                   return (
-                    <tr
-                      className={selectedRow === key ? 'selected-row' : undefined}
-                      key={key}
-                      tabIndex={0}
-                      onClick={() => setSelectedRow(key)}
-                      onKeyDown={(event) => handleRowKeyDown(event, key)}
-                    >
+                    <tr key={key}>
                       {PENDING_AIF_COLUMNS.map((column) => {
                         const text = visibleCellText(row, column)
                         const href = visibleCellHref(row, column)
@@ -972,9 +986,9 @@ function PlanningPendingAifQaTable() {
                                 href={href}
                                 target="_blank"
                                 rel="noreferrer"
+                                title={`Open ${column.label} ${text} in Cityworks`}
                                 onClick={(event) => {
                                   event.preventDefault()
-                                  event.stopPropagation()
                                   void openExternalUrl(href).catch((error) => {
                                     toast.error(error instanceof Error ? error.message : 'Could not open the link.')
                                   })
@@ -994,8 +1008,9 @@ function PlanningPendingAifQaTable() {
                 })}
                 {rows.length === 0 ? (
                   <tr>
-                    <td className="empty-row" colSpan={PENDING_AIF_COLUMNS.length}>
-                      No pending AIF records match the current filters.
+                    <td className="empty-row planning-aif-empty-row" colSpan={PENDING_AIF_COLUMNS.length}>
+                      <Search size={18} aria-hidden="true" />
+                      <span>{loading ? 'Loading pending AIF records...' : 'No pending AIF records match the current filters.'}</span>
                     </td>
                   </tr>
                 ) : null}

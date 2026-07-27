@@ -79,6 +79,32 @@ struct DesktopStartupSession {
     session: serde_json::Value,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortalUpdateCheck {
+    available: bool,
+    current_version: String,
+    release_version: Option<String>,
+    message: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortalReleaseManifest {
+    schema_version: u32,
+    version: String,
+    update_mode: String,
+    payload: PortalReleasePayload,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PortalReleasePayload {
+    file: String,
+    sha256: String,
+    size: u64,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PythonHealth {
@@ -165,10 +191,11 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
     let worker = python_worker_path()?;
     let data_root = local_data_root()?;
     initialize_local_directories(&data_root)?;
-    initialize_local_business_database(&data_root)?;
-    let application_root = executable_root()?;
+    let application_root = installation_root()?;
     let system_database = system_database_path()?;
     let config_file = portal_config_path()?;
+    let business_database =
+        business_sync::local_business_database_path(&config_file, &application_root, &data_root)?;
     let windows_email = windows_user_email()?;
     let business_sync = business_sync::load_paths(&config_file, &application_root, &data_root)?;
     let mut command = Command::new(&worker);
@@ -180,10 +207,7 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
         .env("PORTAL_CONFIG_FILE", config_file)
         .env("PORTAL_WINDOWS_EMAIL", windows_email)
         .env("PORTAL_SYSTEM_DB", &system_database)
-        .env(
-            "PORTAL_BUSINESS_DB",
-            data_root.join("data").join("business.db"),
-        )
+        .env("PORTAL_BUSINESS_DB", business_database)
         .env("PORTAL_MANAGEMENT_DB", &system_database)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -319,6 +343,17 @@ fn file_protocol_response(
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("bytes="))
         .and_then(|value| value.split_once('-'));
+    // Media elements sometimes issue their initial metadata request without a
+    // Range header. Returning the whole file in that case turns a small video
+    // probe into a multi-hundred-megabyte SMB read. Supply a normal first range
+    // instead; Chromium will request subsequent ranges while it plays or seeks.
+    const INITIAL_MEDIA_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+    let is_media = envelope
+        .get("mediaType")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|media_type| {
+            media_type.starts_with("video/") || media_type.starts_with("audio/")
+        });
     let (start, end, status) = if let Some((start, end)) = range {
         let start = start
             .parse::<u64>()
@@ -332,6 +367,12 @@ fn file_protocol_response(
                 .min(file_size.saturating_sub(1))
         };
         (start, end.max(start), StatusCode::PARTIAL_CONTENT.as_u16())
+    } else if is_media && file_size > INITIAL_MEDIA_CHUNK_BYTES {
+        (
+            0,
+            INITIAL_MEDIA_CHUNK_BYTES - 1,
+            StatusCode::PARTIAL_CONTENT.as_u16(),
+        )
     } else {
         (0, file_size.saturating_sub(1), StatusCode::OK.as_u16())
     };
@@ -430,22 +471,24 @@ fn local_protocol_response(request: HttpRequest<Vec<u8>>) -> HttpResponse<Vec<u8
 fn local_data_root() -> Result<PathBuf, String> {
     let local_app_data = env::var_os("LOCALAPPDATA")
         .ok_or_else(|| "LOCALAPPDATA is not available for the current Windows user.".to_string())?;
-    Ok(PathBuf::from(local_app_data).join("Portal"))
+    Ok(PathBuf::from(local_app_data).join("StormWaterPortal"))
 }
 
 fn initialize_local_directories(root: &Path) -> Result<(), String> {
+    migrate_legacy_local_data(root)?;
+    cleanup_legacy_portable_payload(root);
     for directory in [
         root.to_path_buf(),
         root.join("config"),
-        root.join("cache"),
         root.join("data"),
         root.join("data").join("backups"),
-        root.join("downloads"),
-        root.join("exports"),
-        root.join("inbox"),
-        root.join("logs"),
-        root.join("outbox"),
-        root.join("temp"),
+        root.join("data").join("cache"),
+        root.join("data").join("downloads"),
+        root.join("data").join("exports"),
+        root.join("data").join("inbox"),
+        root.join("data").join("logs"),
+        root.join("data").join("outbox"),
+        root.join("data").join("temp"),
     ] {
         fs::create_dir_all(&directory).map_err(|error| {
             format!(
@@ -457,6 +500,90 @@ fn initialize_local_directories(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn migrate_legacy_local_data(root: &Path) -> Result<(), String> {
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA is not available for the current Windows user.".to_string())?;
+    fs::create_dir_all(root).map_err(|error| {
+        format!(
+            "Could not create Portal local root {}: {error}",
+            root.display()
+        )
+    })?;
+
+    let legacy_root = PathBuf::from(local_app_data).join("Portal");
+    if legacy_root.is_dir() && legacy_root != root {
+        migrate_directory_if_absent(&legacy_root.join("data"), &root.join("data"))?;
+        for name in [
+            "cache",
+            "downloads",
+            "exports",
+            "inbox",
+            "logs",
+            "outbox",
+            "temp",
+        ] {
+            migrate_directory_if_absent(&legacy_root.join(name), &root.join("data").join(name))?;
+        }
+    }
+
+    for name in [
+        "cache",
+        "downloads",
+        "exports",
+        "inbox",
+        "logs",
+        "outbox",
+        "temp",
+    ] {
+        migrate_directory_if_absent(&root.join(name), &root.join("data").join(name))?;
+    }
+    Ok(())
+}
+
+fn migrate_directory_if_absent(source: &Path, destination: &Path) -> Result<(), String> {
+    if !source.is_dir() || destination.exists() {
+        return Ok(());
+    }
+    let parent = destination.parent().ok_or_else(|| {
+        format!(
+            "Portal migration destination does not have a parent: {}",
+            destination.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    fs::rename(source, destination).map_err(|error| {
+        format!(
+            "Could not migrate Portal data {} to {}: {error}",
+            source.display(),
+            destination.display()
+        )
+    })
+}
+
+fn cleanup_legacy_portable_payload(root: &Path) {
+    let Ok(executable_directory) = executable_root() else {
+        return;
+    };
+    if executable_directory != root.join("app") || !root.join("app").join("Portal.exe").is_file() {
+        return;
+    }
+
+    for file in ["Portal.exe", "README.txt", "VERSION", "manifest.json"] {
+        let _ = fs::remove_file(root.join(file));
+    }
+    let legacy_runtime = root.join("runtime");
+    if legacy_runtime.is_dir() {
+        let _ = fs::remove_dir_all(legacy_runtime);
+    }
+    // Portable releases before 0.1.0 created this empty folder under the
+    // replaceable application payload. User-owned state is root\\data instead.
+    let legacy_application_data = root.join("app").join("data");
+    if legacy_application_data.is_dir() {
+        let _ = fs::remove_dir_all(legacy_application_data);
+    }
+}
+
 fn executable_root() -> Result<PathBuf, String> {
     env::current_exe()
         .map_err(|error| format!("Could not resolve Portal.exe: {error}"))?
@@ -465,23 +592,91 @@ fn executable_root() -> Result<PathBuf, String> {
         .ok_or_else(|| "Portal.exe does not have a parent directory.".to_string())
 }
 
+fn installation_root() -> Result<PathBuf, String> {
+    let executable_directory = executable_root()?;
+    if executable_directory
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("app"))
+    {
+        if let Some(parent) = executable_directory.parent() {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    Ok(executable_directory)
+}
+
 fn portal_config_path() -> Result<PathBuf, String> {
     if let Some(configured) = env::var_os("PORTAL_CONFIG_FILE") {
         let path = PathBuf::from(configured);
         if path.is_file() {
+            migrate_local_settings_paths(&path)?;
             return Ok(path);
         }
     }
-    let portable = executable_root()?
+    let installed = installation_root()?
         .join("config")
         .join("portal.settings.json");
-    if portable.is_file() {
-        return Ok(portable);
+    if installed.is_file() {
+        migrate_local_settings_paths(&installed)?;
+        return Ok(installed);
     }
     Err(
         "Portal settings were not found at config\\portal.settings.json beside Portal.exe."
             .to_string(),
     )
+}
+
+fn migrate_local_settings_paths(path: &Path) -> Result<(), String> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Could not read Portal settings at {}: {error}",
+            path.display()
+        )
+    })?;
+    let trimmed = contents.trim_start_matches(['\u{feff}', '\u{0000}', ' ', '\t', '\r', '\n']);
+    let mut settings: serde_json::Value = match serde_json::from_str(trimmed) {
+        Ok(value) => value,
+        Err(_) => return Ok(()),
+    };
+
+    let replacements = [
+        ("/business/inboxRoot", "${PORTAL_DATA_ROOT}/data/inbox"),
+        ("/business/outboxRoot", "${PORTAL_DATA_ROOT}/data/outbox"),
+        (
+            "/application/exportRoot",
+            "${PORTAL_DATA_ROOT}/data/exports",
+        ),
+        ("/application/logRoot", "${PORTAL_DATA_ROOT}/data/logs"),
+        ("/application/tempRoot", "${PORTAL_DATA_ROOT}/data/temp"),
+    ];
+    let mut changed = false;
+    for (pointer, replacement) in replacements {
+        if let Some(serde_json::Value::String(value)) = settings.pointer_mut(pointer) {
+            let legacy_value = match pointer {
+                "/business/inboxRoot" => "${PORTAL_DATA_ROOT}/inbox",
+                "/business/outboxRoot" => "${PORTAL_DATA_ROOT}/outbox",
+                "/application/exportRoot" => "${PORTAL_DATA_ROOT}/exports",
+                "/application/logRoot" => "${PORTAL_DATA_ROOT}/logs",
+                "/application/tempRoot" => "${PORTAL_DATA_ROOT}/temp",
+                _ => unreachable!(),
+            };
+            if value == legacy_value {
+                *value = replacement.to_string();
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let text = serde_json::to_string_pretty(&settings)
+            .map_err(|error| format!("Could not update Portal settings: {error}"))?;
+        fs::write(path, format!("{text}\n")).map_err(|error| {
+            format!(
+                "Could not update Portal settings at {}: {error}",
+                path.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 fn load_client_settings() -> Result<serde_json::Value, String> {
@@ -515,7 +710,7 @@ fn configured_shared_data_root(settings: &serde_json::Value) -> Result<PathBuf, 
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "Portal settings do not define shared.dataRoot.".to_string())?;
-    let application_root = executable_root()?.display().to_string();
+    let application_root = installation_root()?.display().to_string();
     let data_root = local_data_root()?.display().to_string();
     let expanded = raw_root
         .replace("${PORTAL_APP_ROOT}", &application_root)
@@ -526,6 +721,209 @@ fn configured_shared_data_root(settings: &serde_json::Value) -> Result<PathBuf, 
         ));
     }
     Ok(PathBuf::from(expanded))
+}
+
+fn configured_update_release_root(settings: &serde_json::Value) -> Result<Option<PathBuf>, String> {
+    let Some(raw_root) = settings
+        .pointer("/updates/releaseRoot")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let application_root = installation_root()?.display().to_string();
+    let data_root = local_data_root()?.display().to_string();
+    let shared_root = configured_shared_data_root(settings)?.display().to_string();
+    let expanded = raw_root
+        .replace("${PORTAL_APP_ROOT}", &application_root)
+        .replace("${PORTAL_DATA_ROOT}", &data_root)
+        .replace("${PORTAL_SHARED_DATA_ROOT}", &shared_root);
+    if expanded.contains("${") {
+        return Err(format!(
+            "The configured Portal update root contains an unresolved setting: {raw_root}"
+        ));
+    }
+    Ok(Some(PathBuf::from(expanded)))
+}
+
+fn parse_portal_release_manifest(path: &Path) -> Result<PortalReleaseManifest, String> {
+    let contents = fs::read_to_string(path).map_err(|error| {
+        format!(
+            "Could not read Portal release manifest {}: {error}",
+            path.display()
+        )
+    })?;
+    let manifest: PortalReleaseManifest =
+        serde_json::from_str(contents.trim_start_matches('\u{feff}'))
+            .map_err(|error| format!("Portal release manifest is invalid: {error}"))?;
+    if manifest.schema_version != 1 || manifest.version.trim().is_empty() {
+        return Err(
+            "Portal release manifest has an unsupported schema or empty version.".to_string(),
+        );
+    }
+    if !matches!(
+        manifest.update_mode.as_str(),
+        "system-db" | "portal-exe" | "full"
+    ) {
+        return Err("Portal release manifest has an unsupported updateMode.".to_string());
+    }
+    if manifest.payload.sha256.len() != 64
+        || !manifest
+            .payload
+            .sha256
+            .bytes()
+            .all(|value| value.is_ascii_hexdigit())
+    {
+        return Err(
+            "Portal release manifest contains an invalid payload SHA-256 value.".to_string(),
+        );
+    }
+    let payload = Path::new(&manifest.payload.file);
+    if payload.components().count() != 1 || payload.file_name().is_none() {
+        return Err(
+            "Portal release manifest payload.file must be a file name, not a path.".to_string(),
+        );
+    }
+    Ok(manifest)
+}
+
+fn version_components(value: &str) -> Option<Vec<u64>> {
+    let normalized = value
+        .trim()
+        .split_once('-')
+        .map_or(value.trim(), |(core, _)| core);
+    let values = normalized
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!values.is_empty()).then_some(values)
+}
+
+fn release_is_newer(candidate: &str, current: &str) -> bool {
+    let Some(mut candidate_parts) = version_components(candidate) else {
+        return false;
+    };
+    let Some(mut current_parts) = version_components(current) else {
+        return false;
+    };
+    let length = candidate_parts.len().max(current_parts.len());
+    candidate_parts.resize(length, 0);
+    current_parts.resize(length, 0);
+    candidate_parts > current_parts
+}
+
+fn installed_release_version() -> String {
+    let fallback = env!("CARGO_PKG_VERSION").to_string();
+    let Ok(root) = installation_root() else {
+        return fallback;
+    };
+    let state_path = root.join("config").join("update-state.json");
+    let Ok(contents) = fs::read_to_string(state_path) else {
+        return fallback;
+    };
+    let Some(version) = serde_json::from_str::<serde_json::Value>(&contents)
+        .ok()
+        .and_then(|value| value.get("version")?.as_str().map(str::to_string))
+    else {
+        return fallback;
+    };
+    if version_components(&version).is_some() {
+        version
+    } else {
+        fallback
+    }
+}
+
+fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest)>, String> {
+    let settings = load_client_settings()?;
+    let Some(release_root) = configured_update_release_root(&settings)? else {
+        return Ok(None);
+    };
+    if !release_root.is_dir() {
+        return Ok(None);
+    }
+    let manifest = parse_portal_release_manifest(&release_root.join("portal-release.json"))?;
+    let payload = release_root.join(&manifest.payload.file);
+    if !payload.is_file() {
+        return Err(format!(
+            "Portal release payload is missing: {}",
+            payload.display()
+        ));
+    }
+    let size = fs::metadata(&payload)
+        .map_err(|error| format!("Could not inspect Portal release payload: {error}"))?
+        .len();
+    if size != manifest.payload.size {
+        return Err("Portal release payload size does not match the release manifest.".to_string());
+    }
+    Ok(Some((release_root, manifest)))
+}
+
+#[tauri::command]
+fn check_portal_update() -> Result<PortalUpdateCheck, String> {
+    let current_version = installed_release_version();
+    let Some((_release_root, manifest)) = available_portal_update()? else {
+        return Ok(PortalUpdateCheck {
+            available: false,
+            current_version,
+            release_version: None,
+            message: "No Portal update release is available.".to_string(),
+        });
+    };
+    let available = release_is_newer(&manifest.version, &current_version);
+    Ok(PortalUpdateCheck {
+        available,
+        current_version,
+        release_version: Some(manifest.version.clone()),
+        message: if available {
+            format!("Portal {} is ready to install.", manifest.version)
+        } else {
+            "Portal is already up to date.".to_string()
+        },
+    })
+}
+
+#[tauri::command]
+fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
+    let Some((release_root, manifest)) = available_portal_update()? else {
+        return Err("No Portal update release is available.".to_string());
+    };
+    let current_version = installed_release_version();
+    if !release_is_newer(&manifest.version, &current_version) {
+        return Err("Portal is already up to date.".to_string());
+    }
+    let updater = executable_root()?.join("runtime").join("PortalUpdater.exe");
+    if !updater.is_file() {
+        return Err(
+            "The bundled Portal updater was not found under runtime\\PortalUpdater.exe."
+                .to_string(),
+        );
+    }
+    let temporary_updater = env::temp_dir().join(format!(
+        "PortalUpdater-{}-{}.exe",
+        std::process::id(),
+        manifest.version
+    ));
+    fs::copy(&updater, &temporary_updater)
+        .map_err(|error| format!("Could not prepare Portal updater: {error}"))?;
+    let mut command = Command::new(&temporary_updater);
+    command
+        .arg("--release-root")
+        .arg(&release_root)
+        .arg("--install-root")
+        .arg(installation_root()?)
+        .arg("--wait-pid")
+        .arg(std::process::id().to_string())
+        .arg("--restart");
+    #[cfg(target_os = "windows")]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+        .spawn()
+        .map_err(|error| format!("Could not start Portal updater: {error}"))?;
+    app.exit(0);
+    Ok(())
 }
 
 fn verify_shared_data_root(shared_root: &Path) -> Result<(), String> {
@@ -639,7 +1037,7 @@ fn system_database_path() -> Result<PathBuf, String> {
         }
     }
 
-    let portable = executable_root()?.join("config").join("system.db");
+    let portable = installation_root()?.join("config").join("system.db");
     if portable.is_file() {
         return Ok(portable);
     }
@@ -657,58 +1055,20 @@ fn system_database_path() -> Result<PathBuf, String> {
     Err("The read-only Portal system database was not found at config\\system.db.".to_string())
 }
 
-fn initialize_local_business_database(root: &Path) -> Result<(), String> {
-    let target = root.join("data").join("business.db");
-    if target.is_file() {
-        return Ok(());
-    }
-
-    let legacy = root
-        .join("data")
-        .join("business")
-        .join("portal_business.sqlite3");
-    if legacy.is_file() {
-        fs::copy(&legacy, &target).map_err(|error| {
-            format!(
-                "Could not migrate {} to {}: {error}",
-                legacy.display(),
-                target.display()
-            )
-        })?;
-        return Ok(());
-    }
-
-    let application_root = executable_root()?;
-    let config_file = portal_config_path()?;
-    if let Some(paths) = business_sync::load_paths(&config_file, &application_root, root)? {
-        if business_sync::initialize_from_master(&paths, &target)? {
-            return Ok(());
-        }
-    }
-
-    let seed = executable_root()?.join("data").join("business.db");
-    if seed.is_file() {
-        fs::copy(&seed, &target).map_err(|error| {
-            format!(
-                "Could not initialize {} from {}: {error}",
-                target.display(),
-                seed.display()
-            )
-        })?;
-    }
-    Ok(())
-}
-
 #[tauri::command]
 async fn business_sync_status() -> Result<business_sync::BusinessSyncStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let data_root = local_data_root()?;
-        let application_root = executable_root()?;
+        let application_root = installation_root()?;
         let config_file = portal_config_path()?;
         let paths = business_sync::load_paths(&config_file, &application_root, &data_root)?;
         Ok(business_sync::status(
             paths.as_ref(),
-            &data_root.join("data").join("business.db"),
+            &business_sync::local_business_database_path(
+                &config_file,
+                &application_root,
+                &data_root,
+            )?,
         ))
     })
     .await
@@ -769,8 +1129,8 @@ fn desktop_context() -> Result<DesktopContext, String> {
         user_domain: env::var("USERDOMAIN").unwrap_or_default(),
         device_name: env::var("COMPUTERNAME").unwrap_or_default(),
         data_root: data_root.display().to_string(),
-        cache_root: data_root.join("cache").display().to_string(),
-        log_root: data_root.join("logs").display().to_string(),
+        cache_root: data_root.join("data").join("cache").display().to_string(),
+        log_root: data_root.join("data").join("logs").display().to_string(),
         python_worker_available: python_worker_path().is_ok(),
     })
 }
@@ -802,6 +1162,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             desktop_startup_session,
             exit_application,
+            check_portal_update,
+            install_portal_update,
             desktop_context,
             client_settings,
             business_sync_status,

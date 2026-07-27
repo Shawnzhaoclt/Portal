@@ -14,6 +14,7 @@ import {
   Rows3,
   Search,
   Settings,
+  ShieldCheck,
   Star,
   UserRound,
   X,
@@ -34,6 +35,7 @@ import {
   fetchMe,
   fetchMyFeaturedResources,
   fetchMyResources,
+  fetchTeams,
   managementSessionTransferUrl,
   saveManagementToken,
   saveManagementUser,
@@ -44,6 +46,7 @@ import {
   type PortalFeaturedResourcesByCategory,
   type PortalResource as ManagedPortalResource,
   type PortalRole,
+  type PortalTeam,
   type PortalUser,
 } from './management/api'
 import ThemeToggle from './ThemeToggle'
@@ -82,6 +85,12 @@ import stmRiskMapThumb from './assets/portal-thumbnails/stm-risk-map.png'
 import stmRiskMapDarkThumb from './assets/portal-thumbnails/stm-risk-map-dark.png'
 import './HomePage.css'
 import { isDesktopRuntime } from './desktop/runtime'
+import {
+  clearPortalTestAccess,
+  savePortalTestAccess,
+  storedPortalTestAccess,
+  type PortalTestAccess,
+} from './desktop/request'
 
 type ResourceCategory = 'all' | 'dashboards' | 'maps' | 'tables' | 'datasets' | 'documents' | 'reports'
 type ResourceType = 'Dataset' | 'Document' | 'Map' | 'Dashboard' | 'Report' | 'Table'
@@ -116,6 +125,7 @@ type PortalResourceLaunchContext = {
   portal_permission_level: string
   portal_permission_types: string
   portal_permission_source: string
+  portal_test_access: string
 }
 
 type HomePageProps = {
@@ -625,6 +635,7 @@ function ResourceTypeIcon({ type }: { type: ResourceType }) {
 function resourceLaunchContext(
   user: PortalUser | null,
   resource: PortalResource,
+  testAccess: PortalTestAccess | null,
 ): PortalResourceLaunchContext | null {
   if (!user) return null
 
@@ -635,18 +646,19 @@ function resourceLaunchContext(
     portal_employeeid: user.employee_id,
     portal_first_name: user.first_name,
     portal_last_name: user.last_name,
-    portal_team_name: user.team_name ?? '',
+    portal_team_name: testAccess?.teamName ?? user.team_name ?? '',
     portal_is_manager: user.manager_user_id === user.id ? '1' : '0',
-    portal_user_role: roleText(user.selected_role),
+    portal_user_role: roleText(testAccess?.role ?? user.selected_role),
     portal_permission: permission?.permission ?? '',
     portal_permission_level: String(permission?.permission_level ?? 0),
     portal_permission_types: permission?.permission_types.join(',') ?? '',
     portal_permission_source: permission?.source ?? '',
+    portal_test_access: testAccess ? '1' : '0',
   }
 }
 
-function appendPortalUserContext(url: URL, user: PortalUser | null, resource: PortalResource) {
-  const context = resourceLaunchContext(user, resource)
+function appendPortalUserContext(url: URL, user: PortalUser | null, resource: PortalResource, testAccess: PortalTestAccess | null) {
+  const context = resourceLaunchContext(user, resource, testAccess)
   if (!context) return
 
   Object.entries(context).forEach(([key, value]) => {
@@ -654,13 +666,13 @@ function appendPortalUserContext(url: URL, user: PortalUser | null, resource: Po
   })
 }
 
-function resourcePopupUrl(resource: PortalResource, user: PortalUser | null) {
+function resourcePopupUrl(resource: PortalResource, user: PortalUser | null, testAccess: PortalTestAccess | null) {
   try {
     const url = new URL(resource.href, window.location.origin)
     if (resource.resourceId) {
       url.searchParams.set('portal_resource_id', resource.resourceId)
     }
-    appendPortalUserContext(url, user, resource)
+    appendPortalUserContext(url, user, resource, testAccess)
 
     if (url.origin === window.location.origin) {
       url.searchParams.set('embed', '1')
@@ -676,7 +688,7 @@ function resourcePopupUrl(resource: PortalResource, user: PortalUser | null) {
   }
 }
 
-function resourceHelpUrl(resource: PortalResource, user: PortalUser | null) {
+function resourceHelpUrl(resource: PortalResource, user: PortalUser | null, testAccess: PortalTestAccess | null) {
   if (!resource.helpUrl) return null
 
   try {
@@ -684,7 +696,7 @@ function resourceHelpUrl(resource: PortalResource, user: PortalUser | null) {
     if (resource.resourceId) {
       url.searchParams.set('portal_resource_id', resource.resourceId)
     }
-    appendPortalUserContext(url, user, resource)
+    appendPortalUserContext(url, user, resource, testAccess)
 
     if (url.origin === window.location.origin) {
       return `${url.pathname}${url.search}${url.hash}`
@@ -729,13 +741,15 @@ function ResourceCard({
 function ResourcePopup({
   resource,
   user,
+  testAccess,
   onClose,
 }: {
   resource: PortalResource
   user: PortalUser | null
+  testAccess: PortalTestAccess | null
   onClose: () => void
 }) {
-  const helpUrl = resourceHelpUrl(resource, user)
+  const helpUrl = resourceHelpUrl(resource, user, testAccess)
 
   return (
     <div
@@ -756,7 +770,7 @@ function ResourcePopup({
             </a>
           ) : null}
         </div>
-        <iframe src={resourcePopupUrl(resource, user)} title={resource.title} />
+        <iframe src={resourcePopupUrl(resource, user, testAccess)} title={resource.title} />
       </section>
     </div>
   )
@@ -782,13 +796,19 @@ function isManagementRole(role: PortalRole) {
 function AccountMenu({
   user,
   showSignOut,
+  testAccess,
   onSignOut,
   onSwitchRole,
+  onStartTestAccess,
+  onStopTestAccess,
 }: {
   user: PortalUser
   showSignOut: boolean
+  testAccess: PortalTestAccess | null
   onSignOut: () => void
   onSwitchRole: (role: PortalRole) => Promise<void>
+  onStartTestAccess: () => void
+  onStopTestAccess: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [switchingRole, setSwitchingRole] = useState<PortalRole | null>(null)
@@ -850,6 +870,19 @@ function AccountMenu({
               Portal Admin
             </a>
           ) : null}
+          {user.selected_role === 'system_admin' ? (
+            testAccess ? (
+              <button type="button" role="menuitem" onClick={() => { onStopTestAccess(); setOpen(false) }}>
+                <ShieldCheck size={16} />
+                Stop test access
+              </button>
+            ) : (
+              <button type="button" role="menuitem" onClick={() => { onStartTestAccess(); setOpen(false) }}>
+                <ShieldCheck size={16} />
+                Test access
+              </button>
+            )
+          ) : null}
           <a href={ACCOUNT_PROFILE_ROUTE} role="menuitem">
             <UserRound size={16} />
             Profile
@@ -870,6 +903,65 @@ function AccountMenu({
   )
 }
 
+function TestAccessDialog({
+  teams,
+  current,
+  loading,
+  error,
+  onClose,
+  onStart,
+}: {
+  teams: PortalTeam[]
+  current: PortalTestAccess | null
+  loading: boolean
+  error: string
+  onClose: () => void
+  onStart: (value: PortalTestAccess) => void
+}) {
+  const [teamId, setTeamId] = useState<number | null>(current?.teamId ?? null)
+  const [role, setRole] = useState<PortalRole>(current?.role ?? 'user')
+  const selectedTeam = teams.find((team) => team.id === teamId) ?? null
+
+  return (
+    <div className="home-test-access-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="home-test-access-dialog" role="dialog" aria-modal="true" aria-labelledby="test-access-title">
+        <div className="home-test-access-title-row">
+          <div>
+            <span>System Admin</span>
+            <h2 id="test-access-title">Test access</h2>
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close test access" title="Close">
+            <X size={21} />
+          </button>
+        </div>
+        <p>Preview the portal as a selected team and role. Your Windows account remains the audit identity, and changes are disabled.</p>
+        <label>
+          Team
+          <select value={teamId ?? ''} disabled={loading} onChange={(event) => setTeamId(event.target.value ? Number(event.target.value) : null)}>
+            <option value="">Select team</option>
+            {teams.filter((team) => team.is_active).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
+        </label>
+        <label>
+          Effective role
+          <select value={role} disabled={loading} onChange={(event) => setRole(event.target.value as PortalRole)}>
+            <option value="user">User</option>
+            <option value="admin">Admin</option>
+            <option value="system_admin">System Admin</option>
+          </select>
+        </label>
+        {error ? <div className="home-test-access-error">{error}</div> : null}
+        <div className="home-test-access-actions">
+          <button type="button" onClick={onClose}>Cancel</button>
+          <button type="button" disabled={!selectedTeam || loading} onClick={() => selectedTeam && onStart({ teamId: selectedTeam.id, teamName: selectedTeam.name, role })}>
+            Start test access
+          </button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const desktopRuntime = isDesktopRuntime()
   const [activeCategory, setActiveCategory] = useState<ResourceCategory>('all')
@@ -881,6 +973,11 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [accessibleManagedResources, setAccessibleManagedResources] = useState<ManagedPortalResource[]>([])
   const [portalUser, setPortalUser] = useState<PortalUser | null>(() => storedManagementUser())
   const [popupResource, setPopupResource] = useState<PortalResource | null>(null)
+  const [testAccess, setTestAccess] = useState<PortalTestAccess | null>(() => storedPortalTestAccess())
+  const [testAccessDialogOpen, setTestAccessDialogOpen] = useState(false)
+  const [testTeams, setTestTeams] = useState<PortalTeam[]>([])
+  const [testTeamsLoading, setTestTeamsLoading] = useState(false)
+  const [testTeamsError, setTestTeamsError] = useState('')
 
   useEffect(() => {
     if (!storedManagementToken()) return
@@ -925,7 +1022,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     return () => {
       cancelled = true
     }
-  }, [desktopRuntime])
+  }, [desktopRuntime, testAccess?.role, testAccess?.teamId])
 
   useEffect(() => {
     if (!popupResource) return
@@ -944,6 +1041,8 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   }, [popupResource])
 
   function handlePortalSignOut() {
+    clearPortalTestAccess()
+    setTestAccess(null)
     clearManagementToken()
     setPortalUser(null)
     setAccessibleManagedResources([])
@@ -966,6 +1065,8 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   }
 
   async function handlePortalRoleSwitch(role: PortalRole) {
+    clearPortalTestAccess()
+    setTestAccess(null)
     const response = await switchRole(role)
     saveManagementToken(response.token, role)
     const switchedUser = { ...response.user, selected_role: role }
@@ -996,6 +1097,29 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       setDefaultFeaturedResourcesByCategory({})
       setDefaultConfiguredFeaturedCategories([])
     }
+  }
+
+  function handleOpenTestAccess() {
+    if (portalUser?.selected_role !== 'system_admin') return
+    setTestAccessDialogOpen(true)
+    setTestTeamsError('')
+    if (testTeams.length || testTeamsLoading) return
+    setTestTeamsLoading(true)
+    fetchTeams()
+      .then((response) => setTestTeams(response.teams))
+      .catch((error) => setTestTeamsError(error instanceof Error ? error.message : 'Could not load portal teams.'))
+      .finally(() => setTestTeamsLoading(false))
+  }
+
+  function handleStartTestAccess(value: PortalTestAccess) {
+    savePortalTestAccess(value)
+    setTestAccess(value)
+    setTestAccessDialogOpen(false)
+  }
+
+  function handleStopTestAccess() {
+    clearPortalTestAccess()
+    setTestAccess(null)
   }
 
   const catalogResources = useMemo(() => DASHBOARD_CATALOG.map(catalogResource), [])
@@ -1140,8 +1264,11 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
               <AccountMenu
                 user={portalUser}
                 showSignOut={!desktopRuntime}
+                testAccess={testAccess}
                 onSignOut={handlePortalSignOut}
                 onSwitchRole={handlePortalRoleSwitch}
+                onStartTestAccess={handleOpenTestAccess}
+                onStopTestAccess={handleStopTestAccess}
               />
             ) : desktopRuntime ? null : (
               <a href={PORTAL_LOGIN_ROUTE}>
@@ -1155,6 +1282,14 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           </div>
         </div>
       </header>
+
+      {testAccess ? (
+        <section className="home-test-access-banner" aria-label="Test access is active">
+          <ShieldCheck size={18} />
+          <span>Testing access as <strong>{roleText(testAccess.role)}</strong> for <strong>{testAccess.teamName}</strong>. Changes are disabled.</span>
+          <button type="button" onClick={handleStopTestAccess}>Stop testing</button>
+        </section>
+      ) : null}
 
       <section className="home-hero">
         <div className="home-hero-content">
@@ -1248,7 +1383,17 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           ) : null}
         </section>
       </section>
-      {popupResource ? <ResourcePopup resource={popupResource} user={portalUser} onClose={() => setPopupResource(null)} /> : null}
+      {popupResource ? <ResourcePopup resource={popupResource} user={portalUser} testAccess={testAccess} onClose={() => setPopupResource(null)} /> : null}
+      {testAccessDialogOpen ? (
+        <TestAccessDialog
+          teams={testTeams}
+          current={testAccess}
+          loading={testTeamsLoading}
+          error={testTeamsError}
+          onClose={() => setTestAccessDialogOpen(false)}
+          onStart={handleStartTestAccess}
+        />
+      ) : null}
     </main>
   )
 }

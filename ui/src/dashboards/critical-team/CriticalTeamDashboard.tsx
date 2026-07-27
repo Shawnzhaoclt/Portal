@@ -27,6 +27,7 @@ import {
   ClipboardList,
   Database,
   Download,
+  ExternalLink,
   Filter,
   FilePenLine,
   Gauge,
@@ -1085,6 +1086,20 @@ function chartBarSegmentLabels(
       return value > 0 ? [segment] : []
     })
   })
+}
+
+function activeDetailFilterCount(filters: DetailColumnFilters) {
+  return (
+    DETAIL_NUMBER_COLUMN_KEYS.filter((column) => {
+      const filter = filters.numbers[column]
+      return filter.mode !== 'any' && Boolean(filter.from || filter.to)
+    }).length +
+    Object.values(filters.categories).filter((values) => values.length > 0).length +
+    DETAIL_DATE_COLUMN_KEYS.filter((column) => {
+      const filter = filters.dates[column]
+      return filter.mode !== 'any' && Boolean(filter.from || filter.to)
+    }).length
+  )
 }
 
 function makeOverviewTrendOption(
@@ -3451,21 +3466,10 @@ function DetailTable({
   const lastRecord = total === 0 ? 0 : Math.min((details?.offset ?? 0) + rows.length, total)
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const activeColumnFilters = hasActiveDetailFilters(columnFilters)
-  const [selectedDetailRow, setSelectedDetailRow] = useState<string | null>(null)
-
-  useEffect(() => {
-    setSelectedDetailRow(null)
-  }, [details?.offset, pageSize, sort.column, sort.direction, columnFilters])
+  const filterCount = activeDetailFilterCount(columnFilters)
 
   function moveToPage(nextPage: number) {
     onPageChange(Math.max(1, Math.min(pageCount, nextPage)))
-  }
-
-  function handleDetailRowKeyDown(event: KeyboardEvent<HTMLTableRowElement>, rowKey: string) {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault()
-      setSelectedDetailRow(rowKey)
-    }
   }
 
   function renderColumnFilter(column: (typeof DETAIL_COLUMNS)[number]) {
@@ -3509,11 +3513,17 @@ function DetailTable({
   }
 
   return (
-    <section className="sheet-panel table-panel detail-panel">
-      <PanelHeader icon={<ClipboardList size={18} />} title="Work Order Detail" meta={`${formatNumber(details?.total)} rows`} />
-      <div className="detail-toolbar">
-        <div className="records-per-page">
-          <span>Records per page</span>
+    <section className="sheet-panel table-panel detail-panel work-order-detail-panel">
+      <PanelHeader icon={<ClipboardList size={18} />} title="Work Order Detail" description="Review operational Cityworks work orders, risk, ownership, and milestone dates." meta={`${formatNumber(total)} work orders`} />
+      <div className="detail-toolbar work-order-detail-toolbar">
+        <div className="work-order-detail-summary" aria-live="polite">
+          <strong>{formatNumber(firstRecord)}-{formatNumber(lastRecord)}</strong>
+          <span>of {formatNumber(total)}</span>
+          {loading ? <span className="table-loading-status">Refreshing...</span> : null}
+        </div>
+        <div className="detail-toolbar-actions">
+          <div className="records-per-page">
+            <span>Rows</span>
           <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))}>
             <SelectTrigger size="sm" className="page-size-select" aria-label="Records per page">
               <SelectValue />
@@ -3526,11 +3536,7 @@ function DetailTable({
               ))}
             </SelectContent>
           </Select>
-        </div>
-        <div className="detail-toolbar-actions">
-          <span>
-            {formatNumber(firstRecord)}-{formatNumber(lastRecord)} of {formatNumber(total)}
-          </span>
+          </div>
           <Button
             variant="outline"
             size="sm"
@@ -3540,7 +3546,7 @@ function DetailTable({
             onClick={onDownloadAllRows}
           >
             <Download size={14} />
-            {exporting ? 'Preparing...' : 'Download Excel'}
+            {exporting ? 'Preparing...' : 'Export'}
           </Button>
           <Button
             variant="outline"
@@ -3551,11 +3557,14 @@ function DetailTable({
             onClick={onClearColumnFilters}
           >
             <X size={14} />
-            Clear column filters
+            Clear{filterCount > 0 ? ` (${filterCount})` : ''}
           </Button>
         </div>
       </div>
-      <div className="table-wrap">
+      <div className="work-order-filter-status">
+        {activeColumnFilters ? `${filterCount} active filter${filterCount === 1 ? '' : 's'}` : 'All work orders'}
+      </div>
+      <div className="table-wrap" aria-busy={loading}>
         <table className="detail-table">
           <colgroup>
             {DETAIL_COLUMNS.map((column) => (
@@ -3612,13 +3621,7 @@ function DetailTable({
             {rows.map((row, index) => {
               const rowKey = `${row.workorder_id ?? `${details?.offset ?? 0}-${index}`}`
               return (
-                <tr
-                  className={selectedDetailRow === rowKey ? 'selected-row' : undefined}
-                  key={rowKey}
-                  tabIndex={0}
-                  onClick={() => setSelectedDetailRow(rowKey)}
-                  onKeyDown={(event) => handleDetailRowKeyDown(event, rowKey)}
-                >
+                <tr key={rowKey}>
                   {DETAIL_COLUMNS.map((column) => {
                     const text = valueText(row[column.key], column.key)
                     const href = column.key === 'workorder_id' ? workOrderHref(row) : null
@@ -3630,15 +3633,16 @@ function DetailTable({
                             href={href}
                             target="_blank"
                             rel="noreferrer"
+                            title={`Open Work Order ${text} in Cityworks`}
                             onClick={(event) => {
                               event.preventDefault()
-                              event.stopPropagation()
                               void openExternalUrl(href).catch((error) => {
                                 toast.error(error instanceof Error ? error.message : 'Could not open the link.')
                               })
                             }}
                           >
                             {text}
+                            <ExternalLink size={12} aria-hidden="true" />
                           </a>
                         ) : (
                           text
@@ -3652,7 +3656,8 @@ function DetailTable({
             {rows.length === 0 ? (
               <tr>
                 <td className="empty-row" colSpan={DETAIL_COLUMNS.length}>
-                  {loading ? 'Loading work orders from Cityworks...' : 'No work orders match the current filters.'}
+                  <Search size={18} aria-hidden="true" />
+                  <span>{loading ? 'Loading work orders...' : 'No work orders match the current filters.'}</span>
                 </td>
               </tr>
             ) : null}

@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$PythonExecutable
+    [string]$PythonExecutable,
+    [string]$Version
 )
 
 $ErrorActionPreference = "Stop"
@@ -14,6 +15,13 @@ $tauriRoot = Join-Path $projectRoot "src-tauri"
 $pythonIpcRoot = Join-Path $projectRoot "python\portal\ipc"
 $pythonDataRoot = Join-Path $projectRoot "python\portal\data"
 $cargo = Join-Path $env:USERPROFILE ".cargo\bin\cargo.exe"
+
+if (-not $Version) {
+    $Version = (Get-Content -LiteralPath (Join-Path $tauriRoot "tauri.conf.json") -Raw | ConvertFrom-Json).version
+}
+if ($Version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
+    throw "Version must be a semantic version, for example 0.2.0."
+}
 
 if (-not $PythonExecutable) {
     $portalCondaPython = Join-Path $env:USERPROFILE "AppData\Local\miniconda3\envs\portal\python.exe"
@@ -78,7 +86,6 @@ if (Test-Path -LiteralPath $pythonLibraryBin -PathType Container) {
 
 $legacySeed = Join-Path $pythonDataRoot "portal_management.sqlite3"
 $systemSeed = Join-Path $pythonDataRoot "portal_system.sqlite3"
-$businessSeed = Join-Path $pythonDataRoot "portal_business.sqlite3"
 if (-not (Test-Path -LiteralPath $legacySeed -PathType Leaf)) {
     throw "The source management database seed was not found at $legacySeed."
 }
@@ -86,8 +93,7 @@ Push-Location (Join-Path $projectRoot "python")
 try {
     & $PythonExecutable -m portal.app.business.seed `
         --source $legacySeed `
-        --system $systemSeed `
-        --business $businessSeed
+        --system $systemSeed
     if ($LASTEXITCODE -ne 0) { throw "Desktop database seed separation failed." }
 }
 finally {
@@ -109,7 +115,6 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
     --collect-submodules portal `
     --add-data "$projectRoot\python\portal\app\config;portal\app\config" `
     --add-data "$systemSeed;portal\data" `
-    --add-data "$businessSeed;portal\data" `
     --add-data "$projectRoot\python\portal\environment.yml;portal" `
     --add-data "$uiRoot\src\resources;portal\resource_metadata" `
     (Join-Path $pythonIpcRoot "portal_worker.py")
@@ -119,6 +124,8 @@ Write-Host "[3/4] Building Tauri host..."
 & $cargo build `
     --release `
     --features custom-protocol `
+    --bin Portal `
+    --bin PortalUpdater `
     --manifest-path (Join-Path $tauriRoot "Cargo.toml")
 if ($LASTEXITCODE -ne 0) { throw "Tauri build failed." }
 
@@ -136,16 +143,18 @@ if (Test-Path -LiteralPath $OutputDirectory -PathType Container) {
 }
 $configOutput = Join-Path $OutputDirectory "config"
 $runtimeOutput = Join-Path $OutputDirectory "runtime"
-$dataOutput = Join-Path $OutputDirectory "data"
 New-Item -ItemType Directory -Force -Path `
-    $OutputDirectory, $configOutput, $runtimeOutput, `
-    $dataOutput | Out-Null
+    $OutputDirectory, $configOutput, $runtimeOutput | Out-Null
 
 $portalExecutable = Join-Path $tauriRoot "target\release\Portal.exe"
+$portalUpdaterExecutable = Join-Path $tauriRoot "target\release\PortalUpdater.exe"
 $pythonWorkerDirectory = Join-Path $pythonDist "portal-python"
 $pythonWorker = Join-Path $pythonWorkerDirectory "portal-python.exe"
 if (-not (Test-Path -LiteralPath $portalExecutable -PathType Leaf)) {
     throw "Portal.exe was not produced at $portalExecutable."
+}
+if (-not (Test-Path -LiteralPath $portalUpdaterExecutable -PathType Leaf)) {
+    throw "PortalUpdater.exe was not produced at $portalUpdaterExecutable."
 }
 if (-not (Test-Path -LiteralPath $pythonWorkerDirectory -PathType Container) -or -not (Test-Path -LiteralPath $pythonWorker -PathType Leaf)) {
     throw "portal-python.exe was not produced at $pythonWorker."
@@ -153,6 +162,7 @@ if (-not (Test-Path -LiteralPath $pythonWorkerDirectory -PathType Container) -or
 
 Copy-Item -LiteralPath $portalExecutable -Destination (Join-Path $OutputDirectory "Portal.exe") -Force
 Copy-Item -LiteralPath $pythonWorkerDirectory -Destination (Join-Path $runtimeOutput "portal-python") -Recurse -Force
+Copy-Item -LiteralPath $portalUpdaterExecutable -Destination (Join-Path $runtimeOutput "PortalUpdater.exe") -Force
 $settingsOutput = Join-Path $configOutput "portal.settings.json"
 if ($null -ne $existingSettings) {
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
@@ -164,22 +174,22 @@ if ($null -ne $existingSettings) {
 $packagedSystemDatabase = Join-Path $configOutput "system.db"
 Copy-Item -LiteralPath $systemSeed -Destination $packagedSystemDatabase -Force
 Set-ItemProperty -LiteralPath $packagedSystemDatabase -Name IsReadOnly -Value $true
-Copy-Item -LiteralPath $businessSeed -Destination (Join-Path $dataOutput "business.db") -Force
 
-$version = "0.1.0"
+$version = $Version
 Set-Content -LiteralPath (Join-Path $OutputDirectory "VERSION") -Value $version -Encoding ascii
 @"
 Storm Water Asset Intelligence Portal Desktop $version
 
 Run Portal.exe from this local folder. No local service or installer is required.
-Writable application data is stored under %LOCALAPPDATA%\Portal. Published SQLite
+Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. Published SQLite
 source snapshots, read-only risk DuckDB files, PMTiles, map styles, and map
 configuration are loaded from the shared data root in config\portal.settings.json
 and are not included in this portable folder.
 
-Business master versions, submissions, and conflict packages use the businessSync
-network root in config\portal.settings.json. Portal.exe never opens a writable SQLite
-connection on that network share. A published master is copied locally on first use.
+Business snapshots, submissions, and conflict packages use the businessSync network
+root in config\portal.settings.json. Portal.exe never opens a writable SQLite
+connection on that network share. The active shared protocol snapshot is verified and
+copied locally on first use; no business database is included in this portable folder.
 
 The desktop application uses Tauri IPC and local Python commands. It does not start
 FastAPI, expose REST endpoints, or require a localhost service.

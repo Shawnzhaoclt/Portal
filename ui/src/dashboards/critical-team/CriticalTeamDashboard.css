@@ -827,7 +827,9 @@ table {
 
 .detail-table .detail-table-link {
   display: inline-flex;
+  align-items: center;
   justify-content: center;
+  gap: 4px;
   max-width: 100%;
 }
 
@@ -1050,6 +1052,71 @@ tbody tr:hover {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.work-order-detail-toolbar {
+  margin-bottom: 0;
+  border-top: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
+  padding: 8px 0;
+}
+
+.work-order-detail-summary {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--panel-muted);
+  font-size: 12px;
+  font-weight: 760;
+}
+
+.work-order-detail-summary strong {
+  color: var(--panel-text);
+}
+
+.table-loading-status {
+  margin-left: 6px;
+  color: var(--accent);
+}
+
+.work-order-filter-status {
+  display: flex;
+  min-height: 30px;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--panel-muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.work-order-detail-panel .detail-table tbody tr {
+  height: 36px;
+}
+
+.work-order-detail-panel .detail-table thead tr:first-child th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.work-order-detail-panel .detail-table thead .column-filter-row th {
+  position: sticky;
+  top: 32px;
+  z-index: 2;
+}
+
+.work-order-detail-panel .empty-row {
+  height: 120px;
+}
+
+.work-order-detail-panel .empty-row > svg,
+.work-order-detail-panel .empty-row > span {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.work-order-detail-panel .empty-row > svg {
+  margin-right: 8px;
 }
 
 .records-per-page,

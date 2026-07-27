@@ -7,15 +7,17 @@ const STARTUP_MESSAGES = [
   'Checking shared data',
   'Identifying your Windows account',
   'Loading your profile and permissions',
+  'Synchronizing local business data',
 ]
 
 type DesktopStartupSplashProps = {
   error?: string
+  message?: string
   onExit?: () => void
   onRetry?: () => void
 }
 
-export default function DesktopStartupSplash({ error, onExit, onRetry }: DesktopStartupSplashProps) {
+export default function DesktopStartupSplash({ error, message, onExit, onRetry }: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
 
   useEffect(() => {
@@ -50,7 +52,7 @@ export default function DesktopStartupSplash({ error, onExit, onRetry }: Desktop
           <>
             <LoaderCircle className="desktop-startup-spinner" aria-hidden="true" />
             <h2>Starting Portal</h2>
-            <p>{STARTUP_MESSAGES[messageIndex]}...</p>
+            <p>{message ?? `${STARTUP_MESSAGES[messageIndex]}...`}</p>
             <div className="desktop-startup-progress" aria-hidden="true">
               <span />
             </div>

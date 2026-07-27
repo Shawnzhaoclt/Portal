@@ -15,7 +15,7 @@ read-only system publication or a writable business database.
 3. **Map data** contains PMTiles, styles, sprites, symbols, and JSON/TOML map
    configuration. These files are immutable application inputs.
 4. **Business data** contains user-created or updated workflow records. Each resource
-   owns tables in `business.db`; this is the only general-purpose database
+   owns tables in `stormwater.db`; this is the only general-purpose database
    the desktop runtime may modify.
 5. **Application configuration** contains source paths and workstation settings. It
    never contains business records.
@@ -32,8 +32,7 @@ Portal-Desktop\
   config\
     portal.settings.json
     system.db                     # read-only system publication
-  data\
-    business.db                   # writable seed
+  data\                           # empty at distribution time
   README.txt
   VERSION
   manifest.json
@@ -44,7 +43,7 @@ The per-user working structure is:
 ```text
 %LOCALAPPDATA%\Portal\
   data\
-    business.db                   # writable working database
+    stormwater.db                 # writable working database
     backups\
   exports\
   inbox\
@@ -60,7 +59,7 @@ and the per-user working folder:
 G:\Strategic Planning\Planning\stm_risk_data\portal\data\
   master\
     current.json                 # atomically published pointer
-    versions\business_NNNNNN.db  # immutable SQLite snapshots
+    versions\stormwater_NNNNNN.db  # immutable SQLite snapshots
   submissions\
     inbox\
     processed\
@@ -118,12 +117,14 @@ or `%LOCALAPPDATA%\Portal`.
 
 At build time, the former combined `portal_management.sqlite3` seed is separated:
 all `SYS_*` tables are published from `portal_system.sqlite3`, while the `RPT5W1C0_*`
-tables are published from `portal_business.sqlite3`. Portable packaging renames these
-files to `config/system.db` and `data/business.db`. Business rows retain user IDs but
-resolve display names from the attached read-only system database, avoiding duplicated
-user and team records. Portable packaging renames the system publication to
-`config/system.db` is read without making a per-user copy; `data/business.db` is copied
-to the user profile before it is opened for writes.
+tables are registered in the business schema catalog. Portable packaging includes only
+the system publication as `config/system.db`; it never includes `stormwater.db`.
+On first launch, Portal verifies the immutable snapshot referenced by
+`businessSync.networkRoot\protocol-v1\snapshots\current.json`, verifies its SHA-256
+digest, and installs it as the local `%LOCALAPPDATA%\Portal\data\stormwater.db`
+replica. Business rows retain user IDs but resolve display names from the attached
+read-only system database, avoiding duplicated user and team records. Portal refuses
+to create a blank business database when the shared snapshot is unavailable or invalid.
 
 ### SQLite Protection Policy
 
@@ -133,7 +134,7 @@ application writes, and the release manifest records its SHA-256 digest. Approve
 distributions should also be code-signed and installed or extracted into a folder whose
 Windows ACL permits modification only by authorized maintainers.
 
-`business.db` cannot use a fixed release checksum because legitimate workflow actions
+`stormwater.db` cannot use a fixed release checksum because legitimate workflow actions
 change it. Protect it with user-scoped Windows permissions, transactional writes, audit
 events, integrity checks, and tested backups. Encryption at rest requires a deliberate
 migration to SQLite SEE or SQLCipher in every database client used by the application,
@@ -535,7 +536,7 @@ The selected role must control elevated behavior. Merely having an admin role on
 %LOCALAPPDATA%\Portal\
   config\
   data\
-    business.db
+    stormwater.db
     backups\
   cache\
     media\

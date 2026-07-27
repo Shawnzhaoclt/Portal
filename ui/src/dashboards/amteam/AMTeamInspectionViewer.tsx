@@ -329,7 +329,7 @@ function localMediaUrl(mediaRoot: string, relativePath: string) {
   if (!mediaRoot || !relativePath) return ''
   const cleanRoot = mediaRoot.replace(/[\\/]+$/, '')
   const cleanRelativePath = relativePath.replace(/^[\\/]+/, '')
-  return fileUrlFromWindowsPath(`${cleanRoot}/${cleanRelativePath}`)
+  return fileUrlFromWindowsPath(`${cleanRoot}\\${cleanRelativePath.replace(/\//g, '\\')}`)
 }
 
 function relativePathFromMediaApiUrl(url: string) {

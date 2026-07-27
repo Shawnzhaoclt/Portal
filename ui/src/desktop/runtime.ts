@@ -49,6 +49,13 @@ export type DesktopStartupSession<TUser = unknown> = {
   }
 }
 
+export type PortalUpdateCheck = {
+  available: boolean
+  currentVersion: string
+  releaseVersion: string | null
+  message: string
+}
+
 export function isDesktopRuntime() {
   return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__)
 }
@@ -66,6 +73,16 @@ export async function startDesktopSession<TUser>() {
 export async function exitDesktopApplication() {
   if (!isDesktopRuntime()) return
   await invoke('exit_application')
+}
+
+export async function checkPortalUpdate() {
+  if (!isDesktopRuntime()) throw new Error('Portal updates are available only inside Tauri.')
+  return invoke<PortalUpdateCheck>('check_portal_update')
+}
+
+export async function installPortalUpdate() {
+  if (!isDesktopRuntime()) throw new Error('Portal updates are available only inside Tauri.')
+  await invoke('install_portal_update')
 }
 
 export async function checkPythonWorker() {

@@ -18,9 +18,10 @@ from portal.app.dashboards.critical_team import router as critical_team_router
 from portal.app.dashboards.gis import router as gis_router
 from portal.app.dashboards.planning import router as planning_router
 from portal.app.resources.maps.stm_risk_map import router as map_tiles_router
-from portal.app.resources.reports.proactive_team_cctv_review import ensure_report_schema, router as cctv_review_report_router
+from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
 from portal.app.diagnostics.routes import router as diagnostics_router
 from portal.app.management import router as management_router
+from portal.app.sync.routes import router as sync_router
 from portal.app.management.seed import initialize_management_database
 
 app = LocalApplication(
@@ -39,12 +40,12 @@ app.include_router(map_tiles_router)
 app.include_router(cctv_review_report_router)
 app.include_router(diagnostics_router)
 app.include_router(management_router)
+app.include_router(sync_router)
 
 
 @app.on_event("startup")
 def startup() -> None:
     initialize_management_database()
-    ensure_report_schema()
 
 
 @app.get("/")

@@ -30,14 +30,56 @@ dist\Portal-Desktop\
   config\
     portal.settings.json
     system.db
-  data\
-    business.db
   README.txt
   VERSION
   manifest.json
 ```
 
 Client computers extract the folder locally and run `Portal.exe`. No installer, Python runtime, Conda environment, local service, or administrator access is required.
+
+## Shared Release Distribution
+
+Publish portable releases to the shared release folder with an explicitly selected
+update type. The publisher never guesses the type from the changed files.
+
+```powershell
+# First release or any mixed/runtime/structural change. The portable folder's
+# VERSION must already be 0.2.0.
+.\desktop\scripts\publish-portable-release.ps1 -UpdateMode full
+
+# Read-only system publication only. No Portal rebuild is required.
+.\desktop\scripts\publish-portable-release.ps1 -UpdateMode system-db -ReleaseVersion 0.2.1
+
+# Portal host executable only.
+.\desktop\scripts\publish-portable-release.ps1 -UpdateMode portal-exe -ReleaseVersion 0.2.2
+```
+
+The release path comes from `updates.releaseRoot` in
+`config\portal.settings.json`; the standard shared folder is
+`G:\Strategic Planning\Planning\stm_risk_app`. Every release uses a newer
+semantic version. For targeted updates, provide it with `-ReleaseVersion`; for a
+full release it must equal the package `VERSION`.
+
+`full` publishes a complete ZIP and refreshes `portal-bootstrap.json`. New users
+run `Download-Portal.bat` from the shared release folder; it installs to
+`%LOCALAPPDATA%\StormWaterPortal\app` and creates a Desktop shortcut. The bootstrap
+manifest is intentionally always a full release.
+
+`system-db` replaces only `config\system.db`. `portal-exe` replaces only
+`Portal.exe`. Both publish `portal-release.json` without replacing the bootstrap
+bundle. A Python runtime update, any change that requires multiple files, or a
+folder-structure change must use `full`.
+
+Every release mode preserves `%LOCALAPPDATA%\StormWaterPortal\data` exactly as it
+is. Full releases replace only `%LOCALAPPDATA%\StormWaterPortal\app`; they discard
+any legacy `app\data` folder and never package or overwrite the user-owned data
+directory.
+
+On startup, Portal checks the current `portal-release.json` after validating the
+shared data drive. When its version is newer, Portal closes itself, starts the
+bundled updater, applies the selected payload, and restarts. The updater records
+the applied release in `config\update-state.json`, so an already applied
+database-only release is not offered again.
 
 The portable folder intentionally excludes DuckDB, PMTiles, map styles, sprites, and
 map configuration. Those immutable inputs are read from the `shared.dataRoot` path in
@@ -53,9 +95,8 @@ G:\Strategic Planning\Planning\stm_risk_data\
     build\maplibre\
 ```
 
-Use `maintenance\publish_reference_data.ps1` on the build/maintenance workstation to
-publish the current map artifacts. A UNC path can replace `G:` for clients that do not
-share the same mapped-drive configuration.
+Reference data is published by the workstation data-build process. A UNC path can
+replace `G:` for clients that do not share the same mapped-drive configuration.
 
 `Portal.exe` owns the WebView2 window, Tauri commands, local application directories,
 the authenticated desktop session, and the `portal-data` protocol. It owns one
@@ -66,41 +107,40 @@ one-file extraction delay during startup, while keeping the worker warm avoids
 repeating Python import cost for every table or dashboard request.
 
 The read-only system publication is opened directly from portable `config\system.db`.
-On first use, only the business database seed is copied to
-`%LOCALAPPDATA%\Portal\data\business.db`. A legacy
-`data\business\portal_business.sqlite3` is copied forward automatically when present.
+No business database is packaged. On first use, Portal verifies the active shared
+protocol snapshot and copies it to `%LOCALAPPDATA%\StormWaterPortal\data\stormwater.db`.
+If the shared snapshot is unavailable or invalid, Portal stops rather than creating a
+blank or seed database. Legacy `business.db` and
+`data\business\portal_business.sqlite3` files are renamed forward automatically when present.
 All resources use the single portable `config\portal.settings.json` file. Do not create
-workstation override copies under `%LOCALAPPDATA%`; edit the portable file when a
+workstation override copies under `%LOCALAPPDATA%\StormWaterPortal\config`; edit the portable file when a
 deployment path or external service changes.
 
 ## Network Business Publication
 
 `businessSync.networkRoot` points to the exchange area used by desktop clients and the
-merge station. The default is:
+merge station. The active local-replica source is
+`protocol-v1\snapshots\current.json`; its referenced immutable SQLite snapshot is
+verified before being copied to a new client. The default protocol layout is:
 
 ```text
 G:\Strategic Planning\Planning\stm_risk_data\portal\data\
-  master\
-    current.json
-    versions\
-  submissions\
-    inbox\
-    processed\
-    rejected\
-  conflicts\
-    open\
-    resolved\
-    archive\
-  locks\
-  backups\
+  protocol-v1\
+    snapshots\
+      current.json
+      snapshot-<id>-<sha256>.db
+    membership\
+    users\
+    coordination\
+    audit\
 ```
 
 Clients never open a writable SQLite connection on this share. If a workstation has
-no local `business.db`, `Portal.exe` checks `master\current.json`, verifies the
-published file and optional SHA-256 digest, and copies it to the local data folder.
-An existing local database is never replaced during application startup. If no master
-has been published or the share is offline, the packaged seed is used for a new local
-database.
+no local `stormwater.db`, `Portal.exe` checks `protocol-v1\snapshots\current.json`,
+verifies the published snapshot and required SHA-256 digest, then copies it to the
+local data folder. An existing local database is never replaced during application
+startup. If no active snapshot has been published or the share is offline, Portal does
+not start a new business database.
 
 The version manifest format is:
 
@@ -108,7 +148,7 @@ The version manifest format is:
 {
   "schemaVersion": 1,
   "databaseVersion": "000001",
-  "databaseFile": "business_000001.db",
+  "databaseFile": "stormwater_000001.db",
   "sha256": "lowercase SHA-256 digest",
   "publishedAt": "2026-07-20T20:00:00Z",
   "publishedBy": "maintenance-station"
@@ -116,5 +156,5 @@ The version manifest format is:
 ```
 
 `databaseFile` is relative to `master\versions` and cannot contain `..`. A successful
-first download writes `%LOCALAPPDATA%\Portal\data\master-source.json` so later
+first download writes `%LOCALAPPDATA%\StormWaterPortal\data\master-source.json` so later
 submission and merge logic can identify the workstation's base version.

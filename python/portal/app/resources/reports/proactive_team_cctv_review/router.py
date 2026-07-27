@@ -1,27 +1,27 @@
 from __future__ import annotations
 
+import copy
+import hashlib
 import re
 from typing import Any, Literal
 
 from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from portal.app.business.database import business_engine, get_business_db
+from portal.app.management.database import get_db
 from portal.app.management.models import User
 from portal.app.management.router import get_current_user
 from portal.app.management.security import utc_now_text
 from portal.app.management.services import ADMIN_ROLES, selected_user_role
+from portal.app.sync.errors import LockTimeout, RevisionChanged, SharedRootUnavailable, SnapshotRequired, SyncError
+from portal.app.sync.models import Identity, Mutation
+from portal.app.sync.runtime import current_coordinator
 
 
 RESOURCE_ID = "RPT5W1C0"
-REPORTS_TABLE = f"{RESOURCE_ID}_reports"
-PIPES_TABLE = f"{RESOURCE_ID}_pipes"
-DISTANCE_GROUPS_TABLE = f"{RESOURCE_ID}_distance_groups"
-OBSERVATIONS_TABLE = f"{RESOURCE_ID}_observations"
-EVENTS_TABLE = f"{RESOURCE_ID}_report_events"
+ENTITY_TYPE = f"{RESOURCE_ID}.report"
 
 router = APIRouter(tags=["cctv-review-report"])
 
@@ -67,469 +67,217 @@ class ReportSaveRequest(BaseModel):
     pipes: list[ReportPipeSaveRequest]
 
 
-def ensure_report_schema() -> None:
-    with business_engine.begin() as connection:
-        connection.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{REPORTS_TABLE}" (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    report_key TEXT NOT NULL UNIQUE,
-                    report_name TEXT NOT NULL,
-                    binding_type TEXT NOT NULL CHECK (binding_type IN ('address', 'project_title')),
-                    binding_text TEXT NOT NULL,
-                    inspection_date_text TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('pending', 'ready_to_review', 'completed')),
-                    created_by_user_id INTEGER,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    updated_by_user_id INTEGER,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    submitted_by_user_id INTEGER,
-                    submitted_at TEXT,
-                    reviewed_by_user_id INTEGER,
-                    reviewed_at TEXT
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{PIPES_TABLE}" (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    report_id INTEGER NOT NULL,
-                    ml_id TEXT NOT NULL,
-                    mli_id TEXT NOT NULL,
-                    clogging_percent INTEGER NOT NULL DEFAULT 0,
-                    clogging_comment TEXT,
-                    clogging_frame_seconds REAL,
-                    FOREIGN KEY(report_id) REFERENCES "{REPORTS_TABLE}" (id) ON DELETE CASCADE
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{DISTANCE_GROUPS_TABLE}" (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    pipe_review_id INTEGER NOT NULL,
-                    distance_key TEXT NOT NULL,
-                    distance_feet REAL,
-                    am_score INTEGER,
-                    defect_comment TEXT,
-                    no_am_score_ge_3_confirmed INTEGER NOT NULL DEFAULT 0,
-                    FOREIGN KEY(pipe_review_id) REFERENCES "{PIPES_TABLE}" (id) ON DELETE CASCADE
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{OBSERVATIONS_TABLE}" (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    distance_group_id INTEGER NOT NULL,
-                    mlo_id TEXT,
-                    source_observation_key TEXT NOT NULL,
-                    defect_role TEXT NOT NULL CHECK (defect_role IN ('none', 'major', 'other')),
-                    is_extensive INTEGER NOT NULL DEFAULT 0,
-                    selected_picture_file_name TEXT,
-                    FOREIGN KEY(distance_group_id) REFERENCES "{DISTANCE_GROUPS_TABLE}" (id) ON DELETE CASCADE
-                )
-                """
-            )
-        )
-        connection.execute(
-            text(
-                f"""
-                CREATE TABLE IF NOT EXISTS "{EVENTS_TABLE}" (
-                    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-                    report_id INTEGER NOT NULL,
-                    event_type TEXT NOT NULL CHECK (
-                        event_type IN (
-                            'report_saved',
-                            'submitted_to_review',
-                            'returned_to_edit',
-                            'completed',
-                            'export_generated',
-                            'export_failed'
-                        )
-                    ),
-                    event_by_user_id INTEGER NOT NULL,
-                    event_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    from_status TEXT,
-                    to_status TEXT,
-                    memo TEXT,
-                    FOREIGN KEY(report_id) REFERENCES "{REPORTS_TABLE}" (id) ON DELETE CASCADE
-                )
-                """
-            )
-        )
-        connection.execute(text(f'CREATE UNIQUE INDEX IF NOT EXISTS "ux_{REPORTS_TABLE}_report_key" ON "{REPORTS_TABLE}" (report_key)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{REPORTS_TABLE}_binding" ON "{REPORTS_TABLE}" (binding_type, binding_text)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{REPORTS_TABLE}_inspection_date_text" ON "{REPORTS_TABLE}" (inspection_date_text)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{REPORTS_TABLE}_status" ON "{REPORTS_TABLE}" (status)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{REPORTS_TABLE}_updated_at" ON "{REPORTS_TABLE}" (updated_at)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{PIPES_TABLE}_report_id" ON "{PIPES_TABLE}" (report_id)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{DISTANCE_GROUPS_TABLE}_pipe_review_id" ON "{DISTANCE_GROUPS_TABLE}" (pipe_review_id)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{OBSERVATIONS_TABLE}_distance_group_id" ON "{OBSERVATIONS_TABLE}" (distance_group_id)'))
-        connection.execute(text(f'CREATE INDEX IF NOT EXISTS "ix_{EVENTS_TABLE}_report_id" ON "{EVENTS_TABLE}" (report_id)'))
-
-        _migrate_legacy_report_data(connection)
-
-        report_rows = connection.execute(
-            text(f'SELECT id, report_key, report_name FROM "{REPORTS_TABLE}"')
-        ).mappings().all()
-        for row in report_rows:
-            report_id = int(row["id"])
-            current_key = str(row["report_key"] or "")
-            normalized_key = _normalize_report_key(current_key)
-            current_name = str(row["report_name"] or "")
-            normalized_name = _normalize_report_key(current_name) or normalized_key
-
-            key_can_be_updated = bool(normalized_key and normalized_key != current_key)
-            if key_can_be_updated:
-                duplicate = connection.execute(
-                    text(f'SELECT id FROM "{REPORTS_TABLE}" WHERE report_key = :report_key AND id <> :report_id LIMIT 1'),
-                    {"report_key": normalized_key, "report_id": report_id},
-                ).first()
-                key_can_be_updated = duplicate is None
-
-            if key_can_be_updated:
-                connection.execute(
-                    text(f'UPDATE "{REPORTS_TABLE}" SET report_key = :report_key, report_name = :report_name WHERE id = :report_id'),
-                    {"report_key": normalized_key, "report_name": normalized_name, "report_id": report_id},
-                )
-            elif normalized_name and normalized_name != current_name:
-                connection.execute(
-                    text(f'UPDATE "{REPORTS_TABLE}" SET report_name = :report_name WHERE id = :report_id'),
-                    {"report_name": normalized_name, "report_id": report_id},
-                )
-
-
-def _migrate_legacy_report_data(connection) -> None:
-    attached = {str(row[1]) for row in connection.exec_driver_sql("PRAGMA database_list").fetchall()}
-    if "system" not in attached:
-        return
-    legacy_tables = {
-        str(row[0])
-        for row in connection.exec_driver_sql(
-            "SELECT name FROM system.sqlite_schema WHERE type = 'table'"
-        ).fetchall()
-    }
-    if REPORTS_TABLE not in legacy_tables:
-        return
-    if int(connection.exec_driver_sql(f'SELECT COUNT(*) FROM "{REPORTS_TABLE}"').scalar() or 0) > 0:
-        return
-
-    for table_name in (REPORTS_TABLE, PIPES_TABLE, DISTANCE_GROUPS_TABLE, OBSERVATIONS_TABLE, EVENTS_TABLE):
-        if table_name not in legacy_tables:
-            continue
-        columns = [
-            str(row[1])
-            for row in connection.exec_driver_sql(f'PRAGMA table_info("{table_name}")').fetchall()
-        ]
-        legacy_columns = {
-            str(row[1])
-            for row in connection.exec_driver_sql(f'PRAGMA system.table_info("{table_name}")').fetchall()
-        }
-        shared_columns = [column for column in columns if column in legacy_columns]
-        if not shared_columns:
-            continue
-        quoted_columns = ", ".join(f'"{column}"' for column in shared_columns)
-        connection.exec_driver_sql(
-            f'INSERT OR IGNORE INTO "{table_name}" ({quoted_columns}) '
-            f'SELECT {quoted_columns} FROM system."{table_name}"'
-        )
-
-
-def _display_name(first_name: str | None, last_name: str | None) -> str | None:
-    name = f"{first_name or ''} {last_name or ''}".strip()
-    return name or None
-
-
 def _normalize_report_key(value: str) -> str:
     compact = re.sub(r"\s*@\s*", "@", value.strip())
     compact = re.sub(r"\s*-\s*", "-", compact)
     return re.sub(r"\s+", "", compact)
 
 
-def _report_row(row: Any, can_delete: bool | None = None) -> dict[str, Any]:
-    report = {
-        "id": row.id,
-        "report_key": row.report_key,
-        "report_name": row.report_name,
-        "binding_type": row.binding_type,
-        "binding_text": row.binding_text,
-        "inspection_date_text": row.inspection_date_text,
-        "status": row.status,
-        "created_by_user_id": row.created_by_user_id,
-        "created_by_name": _display_name(row.created_first_name, row.created_last_name),
-        "created_at": row.created_at,
-        "updated_by_user_id": row.updated_by_user_id,
-        "updated_by_name": _display_name(row.updated_first_name, row.updated_last_name),
-        "updated_at": row.updated_at,
-        "submitted_by_user_id": row.submitted_by_user_id,
-        "submitted_by_name": _display_name(row.submitted_first_name, row.submitted_last_name),
-        "submitted_at": row.submitted_at,
-        "reviewed_by_user_id": row.reviewed_by_user_id,
-        "reviewed_by_name": _display_name(row.reviewed_first_name, row.reviewed_last_name),
-        "reviewed_at": row.reviewed_at,
-    }
-    if can_delete is not None:
-        report["can_delete"] = can_delete
-    return report
+def _report_id(report_key: str) -> int:
+    # A stable JavaScript-safe identifier lets the existing client keep numeric report URLs.
+    return int.from_bytes(hashlib.sha256(report_key.encode("utf-8")).digest()[:6], "big")
 
 
-def _event_row(row: Any) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "report_id": row.report_id,
-        "event_type": row.event_type,
-        "event_by_user_id": row.event_by_user_id,
-        "event_by_name": _display_name(row.event_first_name, row.event_last_name),
-        "event_at": row.event_at,
-        "from_status": row.from_status,
-        "to_status": row.to_status,
-        "memo": row.memo,
-    }
+def _display_name(user: User) -> str:
+    return f"{user.first_name} {user.last_name}".strip() or user.email
 
 
-def _saved_observation_row(row: Any) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "distance_group_id": row.distance_group_id,
-        "mlo_id": row.mlo_id,
-        "source_observation_key": row.source_observation_key,
-        "defect_role": row.defect_role,
-        "is_extensive": bool(row.is_extensive),
-        "selected_picture_file_name": row.selected_picture_file_name,
-    }
+def _sync_error(error: SyncError) -> None:
+    if isinstance(error, RevisionChanged):
+        status = 409
+    elif isinstance(error, LockTimeout):
+        status = 423
+    elif isinstance(error, (SharedRootUnavailable, SnapshotRequired)):
+        status = 503
+    else:
+        status = 422
+    raise HTTPException(
+        status_code=status,
+        detail={"code": error.code, "message": str(error), "details": error.details},
+    )
 
 
-def _saved_distance_group_row(row: Any, observations: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "pipe_review_id": row.pipe_review_id,
-        "distance_key": row.distance_key,
-        "distance_feet": row.distance_feet,
-        "am_score": row.am_score,
-        "defect_comment": row.defect_comment,
-        "no_am_score_ge_3_confirmed": bool(row.no_am_score_ge_3_confirmed),
-        "observations": observations,
-    }
+def _coordinator(user: User):
+    try:
+        return current_coordinator(
+            Identity(user_id=str(user.id), employee_number=str(user.employee_id), email=str(user.email))
+        )
+    except SyncError as error:
+        _sync_error(error)
 
 
-def _saved_pipe_row(row: Any, distance_groups: list[dict[str, Any]]) -> dict[str, Any]:
-    return {
-        "id": row.id,
-        "report_id": row.report_id,
-        "ml_id": row.ml_id,
-        "mli_id": row.mli_id,
-        "clogging_percent": row.clogging_percent,
-        "clogging_comment": row.clogging_comment,
-        "clogging_frame_seconds": row.clogging_frame_seconds,
-        "distance_groups": distance_groups,
-    }
+def _entity_values(entity: dict[str, object] | None) -> dict[str, Any] | None:
+    if not entity or bool(entity.get("deleted")):
+        return None
+    values = entity.get("values")
+    return dict(values) if isinstance(values, dict) else None
 
 
-def _select_report_row(db: Session, report_id: int) -> Any:
-    return db.execute(
-        text(
-            f"""
-            SELECT
-                r.*,
-                created.first_name AS created_first_name,
-                created.last_name AS created_last_name,
-                updated.first_name AS updated_first_name,
-                updated.last_name AS updated_last_name,
-                submitted.first_name AS submitted_first_name,
-                submitted.last_name AS submitted_last_name,
-                reviewed.first_name AS reviewed_first_name,
-                reviewed.last_name AS reviewed_last_name
-            FROM "{REPORTS_TABLE}" r
-            LEFT JOIN system.SYS_USERS created ON created.id = r.created_by_user_id
-            LEFT JOIN system.SYS_USERS updated ON updated.id = r.updated_by_user_id
-            LEFT JOIN system.SYS_USERS submitted ON submitted.id = r.submitted_by_user_id
-            LEFT JOIN system.SYS_USERS reviewed ON reviewed.id = r.reviewed_by_user_id
-            WHERE r.id = :report_id
-            """
-        ),
-        {"report_id": report_id},
-    ).mappings().first()
+def _entities(user: User) -> list[dict[str, object]]:
+    coordinator = _coordinator(user)
+    return coordinator.list_entities(ENTITY_TYPE)
 
 
-def _is_manager_or_admin(db: Session, user: User) -> bool:
-    if selected_user_role(user) in ADMIN_ROLES:
-        return True
-    managed_team = db.execute(
-        text("SELECT id FROM system.SYS_TEAMS WHERE manager_user_id = :user_id LIMIT 1"),
-        {"user_id": user.id},
-    ).scalar()
-    return managed_team is not None
+def _find_by_report_id(user: User, report_id: int) -> tuple[dict[str, object], dict[str, Any]] | None:
+    for entity in _entities(user):
+        values = _entity_values(entity)
+        report = values.get("report") if values else None
+        if isinstance(report, dict) and int(report.get("id", -1)) == report_id:
+            return entity, values
+    return None
 
 
 def _manager_can_delete_report(db: Session, user: User, created_by_user_id: int | None) -> bool:
     if created_by_user_id is None:
         return False
-    creator_team_manager_id = db.execute(
+    manager_id = db.execute(
         text(
             """
             SELECT team.manager_user_id
-            FROM system.SYS_USERS creator
-            INNER JOIN system.SYS_TEAMS team ON team.id = creator.team_id
+            FROM SYS_USERS creator
+            INNER JOIN SYS_TEAMS team ON team.id = creator.team_id
             WHERE creator.id = :created_by_user_id
             """
         ),
         {"created_by_user_id": created_by_user_id},
     ).scalar()
-    if creator_team_manager_id is None:
-        return False
-    return int(creator_team_manager_id) == user.id
+    return manager_id is not None and int(manager_id) == user.id
 
 
-def _can_delete_report(db: Session, user: User, row: Any) -> bool:
+def _is_manager_or_admin(db: Session, user: User) -> bool:
     if selected_user_role(user) in ADMIN_ROLES:
         return True
-    if str(row.status) != "pending":
-        return False
-    if row.created_by_user_id == user.id:
+    return db.execute(
+        text("SELECT 1 FROM SYS_TEAMS WHERE manager_user_id = :user_id LIMIT 1"),
+        {"user_id": user.id},
+    ).scalar() is not None
+
+
+def _can_delete_report(db: Session, user: User, report: dict[str, Any]) -> bool:
+    if selected_user_role(user) in ADMIN_ROLES:
         return True
-    return _manager_can_delete_report(db, user, row.created_by_user_id)
+    if report.get("status") != "pending":
+        return False
+    if report.get("created_by_user_id") == user.id:
+        return True
+    return _manager_can_delete_report(db, user, report.get("created_by_user_id"))
 
 
-def _delete_report_related_rows(db: Session, report_id: int) -> dict[str, int]:
-    observations_result = db.execute(
-        text(
-            f"""
-            DELETE FROM "{OBSERVATIONS_TABLE}"
-            WHERE distance_group_id IN (
-                SELECT dg.id
-                FROM "{DISTANCE_GROUPS_TABLE}" dg
-                INNER JOIN "{PIPES_TABLE}" p ON p.id = dg.pipe_review_id
-                WHERE p.report_id = :report_id
+def _report_row(values: dict[str, Any], can_delete: bool | None = None) -> dict[str, Any]:
+    report = dict(values["report"])
+    if can_delete is not None:
+        report["can_delete"] = can_delete
+    return report
+
+
+def _saved_pipes(pipes: list[ReportPipeSaveRequest], report_id: int) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for pipe_index, pipe in enumerate(pipes, start=1):
+        pipe_id = pipe_index
+        groups: list[dict[str, Any]] = []
+        for group_index, group in enumerate(pipe.distance_groups, start=1):
+            group_id = pipe_id * 10_000 + group_index
+            observations = [
+                {
+                    "id": group_id * 10_000 + observation_index,
+                    "distance_group_id": group_id,
+                    "mlo_id": observation.mlo_id,
+                    "source_observation_key": observation.source_observation_key,
+                    "defect_role": observation.defect_role,
+                    "is_extensive": observation.is_extensive,
+                    "selected_picture_file_name": observation.selected_picture_file_name,
+                }
+                for observation_index, observation in enumerate(group.observations, start=1)
+            ]
+            groups.append(
+                {
+                    "id": group_id,
+                    "pipe_review_id": pipe_id,
+                    "distance_key": group.distance_key,
+                    "distance_feet": group.distance_feet,
+                    "am_score": group.am_score,
+                    "defect_comment": group.defect_comment,
+                    "no_am_score_ge_3_confirmed": group.no_am_score_ge_3_confirmed,
+                    "observations": observations,
+                }
             )
-            """
-        ),
-        {"report_id": report_id},
-    )
-    distance_groups_result = db.execute(
-        text(
-            f"""
-            DELETE FROM "{DISTANCE_GROUPS_TABLE}"
-            WHERE pipe_review_id IN (
-                SELECT id FROM "{PIPES_TABLE}" WHERE report_id = :report_id
-            )
-            """
-        ),
-        {"report_id": report_id},
-    )
-    pipes_result = db.execute(text(f'DELETE FROM "{PIPES_TABLE}" WHERE report_id = :report_id'), {"report_id": report_id})
-    events_result = db.execute(text(f'DELETE FROM "{EVENTS_TABLE}" WHERE report_id = :report_id'), {"report_id": report_id})
-    report_result = db.execute(text(f'DELETE FROM "{REPORTS_TABLE}" WHERE id = :report_id'), {"report_id": report_id})
+        result.append(
+            {
+                "id": pipe_id,
+                "report_id": report_id,
+                "ml_id": pipe.ml_id,
+                "mli_id": pipe.mli_id,
+                "clogging_percent": pipe.clogging_percent,
+                "clogging_comment": pipe.clogging_comment,
+                "clogging_frame_seconds": pipe.clogging_frame_seconds,
+                "distance_groups": groups,
+            }
+        )
+    return result
+
+
+def _event(
+    events: list[dict[str, Any]],
+    report_id: int,
+    user: User,
+    event_type: str,
+    from_status: str | None,
+    to_status: str | None,
+    memo: str | None,
+) -> dict[str, Any]:
     return {
-        "observations": max(observations_result.rowcount or 0, 0),
-        "distance_groups": max(distance_groups_result.rowcount or 0, 0),
-        "pipes": max(pipes_result.rowcount or 0, 0),
-        "events": max(events_result.rowcount or 0, 0),
-        "reports": max(report_result.rowcount or 0, 0),
+        "id": len(events) + 1,
+        "report_id": report_id,
+        "event_type": event_type,
+        "event_by_user_id": user.id,
+        "event_by_name": _display_name(user),
+        "event_at": utc_now_text(),
+        "from_status": from_status,
+        "to_status": to_status,
+        "memo": memo,
     }
+
+
+def _commit(user: User, mutation: Mutation) -> None:
+    try:
+        _coordinator(user).commit([mutation])
+    except SyncError as error:
+        _sync_error(error)
 
 
 @router.get("/api/reports/proactive-team-cctv-review/reports")
 def list_reports(
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    db: Session = Depends(get_db),
     limit: int = Query(default=500, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    ensure_report_schema()
-    rows = db.execute(
-        text(
-            f"""
-            SELECT
-                r.*,
-                created.first_name AS created_first_name,
-                created.last_name AS created_last_name,
-                updated.first_name AS updated_first_name,
-                updated.last_name AS updated_last_name,
-                submitted.first_name AS submitted_first_name,
-                submitted.last_name AS submitted_last_name,
-                reviewed.first_name AS reviewed_first_name,
-                reviewed.last_name AS reviewed_last_name
-            FROM "{REPORTS_TABLE}" r
-            LEFT JOIN system.SYS_USERS created ON created.id = r.created_by_user_id
-            LEFT JOIN system.SYS_USERS updated ON updated.id = r.updated_by_user_id
-            LEFT JOIN system.SYS_USERS submitted ON submitted.id = r.submitted_by_user_id
-            LEFT JOIN system.SYS_USERS reviewed ON reviewed.id = r.reviewed_by_user_id
-            ORDER BY r.updated_at DESC, r.id DESC
-            LIMIT :limit OFFSET :offset
-            """
-        ),
-        {"limit": limit, "offset": offset},
-    ).mappings().all()
-    total = db.execute(text(f'SELECT COUNT(*) FROM "{REPORTS_TABLE}"')).scalar_one()
-    return {"reports": [_report_row(row, can_delete=_can_delete_report(db, current_user, row)) for row in rows], "total": int(total)}
+    reports: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for entity in _entities(current_user):
+        values = _entity_values(entity)
+        if values and isinstance(values.get("report"), dict):
+            reports.append((dict(values["report"]), values))
+    reports.sort(key=lambda item: (str(item[0].get("updated_at") or ""), int(item[0].get("id") or 0)), reverse=True)
+    page = reports[offset : offset + limit]
+    return {
+        "reports": [_report_row(values, _can_delete_report(db, current_user, report)) for report, values in page],
+        "total": len(reports),
+    }
 
 
 @router.get("/api/reports/proactive-team-cctv-review/reports/{report_id}")
 def get_report_detail(
     report_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    ensure_report_schema()
-    report = _select_report_row(db, report_id)
-    if report is None:
+    found = _find_by_report_id(current_user, report_id)
+    if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
-
-    pipe_rows = db.execute(
-        text(
-            f"""
-            SELECT *
-            FROM "{PIPES_TABLE}"
-            WHERE report_id = :report_id
-            ORDER BY id ASC
-            """
-        ),
-        {"report_id": report_id},
-    ).mappings().all()
-
-    pipes: list[dict[str, Any]] = []
-    for pipe in pipe_rows:
-        distance_rows = db.execute(
-            text(
-                f"""
-                SELECT *
-                FROM "{DISTANCE_GROUPS_TABLE}"
-                WHERE pipe_review_id = :pipe_review_id
-                ORDER BY id ASC
-                """
-            ),
-            {"pipe_review_id": pipe.id},
-        ).mappings().all()
-
-        distance_groups: list[dict[str, Any]] = []
-        for distance_group in distance_rows:
-            observation_rows = db.execute(
-                text(
-                    f"""
-                    SELECT *
-                    FROM "{OBSERVATIONS_TABLE}"
-                    WHERE distance_group_id = :distance_group_id
-                    ORDER BY id ASC
-                    """
-                ),
-                {"distance_group_id": distance_group.id},
-            ).mappings().all()
-            distance_groups.append(_saved_distance_group_row(distance_group, [_saved_observation_row(row) for row in observation_rows]))
-
-        pipes.append(_saved_pipe_row(pipe, distance_groups))
-
+    _entity, values = found
     return {
-        "report": _report_row(report, can_delete=_can_delete_report(db, current_user, report)),
-        "pipes": pipes,
+        "report": _report_row(values, _can_delete_report(db, current_user, dict(values["report"]))),
+        "pipes": values.get("pipes", []),
     }
 
 
@@ -537,284 +285,139 @@ def get_report_detail(
 def save_report(
     payload: ReportSaveRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    ensure_report_schema()
     report_key = _normalize_report_key(payload.report_key)
     report_name = _normalize_report_key(payload.report_name) or report_key
     binding_text = payload.binding_text.strip()
     inspection_date_text = payload.inspection_date_text.strip()
-    if not report_key:
-        raise HTTPException(status_code=400, detail="Report key is required.")
-    if not report_name:
-        raise HTTPException(status_code=400, detail="Report name is required.")
-    if not binding_text:
-        raise HTTPException(status_code=400, detail="Report binding text is required.")
-    if not inspection_date_text:
-        raise HTTPException(status_code=400, detail="Inspection date text is required.")
+    if not report_key or not report_name or not binding_text or not inspection_date_text:
+        raise HTTPException(status_code=400, detail="Report key, name, binding text, and inspection date are required.")
     if not payload.pipes:
         raise HTTPException(status_code=400, detail="At least one reviewed pipe is required.")
 
+    coordinator = _coordinator(current_user)
+    existing = coordinator.get_entity(ENTITY_TYPE, report_key)
+    existing_values = _entity_values(existing)
+    created = existing_values is None
     now = utc_now_text()
-    report = db.execute(
-        text(f'SELECT id, status FROM "{REPORTS_TABLE}" WHERE report_key = :report_key'),
-        {"report_key": report_key},
-    ).mappings().first()
-    created = report is None
-
-    try:
-        if report is None:
-            db.execute(
-                text(
-                    f"""
-                    INSERT INTO "{REPORTS_TABLE}" (
-                        report_key, report_name, binding_type, binding_text, inspection_date_text,
-                        status, created_by_user_id, created_at, updated_by_user_id, updated_at
-                    )
-                    VALUES (
-                        :report_key, :report_name, :binding_type, :binding_text, :inspection_date_text,
-                        'pending', :user_id, :now, :user_id, :now
-                    )
-                    """
-                ),
-                {
-                    "report_key": report_key,
-                    "report_name": report_name,
-                    "binding_type": payload.binding_type,
-                    "binding_text": binding_text,
-                    "inspection_date_text": inspection_date_text,
-                    "user_id": current_user.id,
-                    "now": now,
-                },
-            )
-            report_id = int(db.execute(text("SELECT last_insert_rowid()")).scalar_one())
-            from_status = None
-            to_status = "pending"
-        else:
-            report_id = int(report["id"])
-            from_status = str(report["status"])
-            if from_status == "ready_to_review":
-                raise HTTPException(status_code=400, detail="Return the report to edit before saving changes.")
-            if from_status == "completed":
-                raise HTTPException(status_code=400, detail="Completed reports cannot be edited.")
-
-            db.execute(
-                text(
-                    f"""
-                    UPDATE "{REPORTS_TABLE}"
-                    SET report_name = :report_name,
-                        binding_type = :binding_type,
-                        binding_text = :binding_text,
-                        inspection_date_text = :inspection_date_text,
-                        status = 'pending',
-                        updated_by_user_id = :user_id,
-                        updated_at = :now
-                    WHERE id = :report_id
-                    """
-                ),
-                {
-                    "report_name": report_name,
-                    "binding_type": payload.binding_type,
-                    "binding_text": binding_text,
-                    "inspection_date_text": inspection_date_text,
-                    "user_id": current_user.id,
-                    "now": now,
-                    "report_id": report_id,
-                },
-            )
-            to_status = "pending"
-
-        db.execute(
-            text(
-                f"""
-                DELETE FROM "{OBSERVATIONS_TABLE}"
-                WHERE distance_group_id IN (
-                    SELECT dg.id
-                    FROM "{DISTANCE_GROUPS_TABLE}" dg
-                    INNER JOIN "{PIPES_TABLE}" p ON p.id = dg.pipe_review_id
-                    WHERE p.report_id = :report_id
-                )
-                """
-            ),
-            {"report_id": report_id},
-        )
-        db.execute(
-            text(
-                f"""
-                DELETE FROM "{DISTANCE_GROUPS_TABLE}"
-                WHERE pipe_review_id IN (
-                    SELECT id FROM "{PIPES_TABLE}" WHERE report_id = :report_id
-                )
-                """
-            ),
-            {"report_id": report_id},
-        )
-        db.execute(text(f'DELETE FROM "{PIPES_TABLE}" WHERE report_id = :report_id'), {"report_id": report_id})
-
-        for pipe in payload.pipes:
-            pipe_result = db.execute(
-                text(
-                    f"""
-                    INSERT INTO "{PIPES_TABLE}" (
-                        report_id, ml_id, mli_id, clogging_percent, clogging_comment, clogging_frame_seconds
-                    )
-                    VALUES (
-                        :report_id, :ml_id, :mli_id, :clogging_percent, :clogging_comment, :clogging_frame_seconds
-                    )
-                    """
-                ),
-                {
-                    "report_id": report_id,
-                    "ml_id": pipe.ml_id,
-                    "mli_id": pipe.mli_id,
-                    "clogging_percent": pipe.clogging_percent,
-                    "clogging_comment": pipe.clogging_comment,
-                    "clogging_frame_seconds": pipe.clogging_frame_seconds,
-                },
-            )
-            pipe_review_id = int(pipe_result.lastrowid or db.execute(text("SELECT last_insert_rowid()")).scalar_one())
-
-            for distance_group in pipe.distance_groups:
-                distance_result = db.execute(
-                    text(
-                        f"""
-                        INSERT INTO "{DISTANCE_GROUPS_TABLE}" (
-                            pipe_review_id, distance_key, distance_feet, am_score, defect_comment, no_am_score_ge_3_confirmed
-                        )
-                        VALUES (
-                            :pipe_review_id, :distance_key, :distance_feet, :am_score, :defect_comment, :no_am_score_ge_3_confirmed
-                        )
-                        """
-                    ),
-                    {
-                        "pipe_review_id": pipe_review_id,
-                        "distance_key": distance_group.distance_key,
-                        "distance_feet": distance_group.distance_feet,
-                        "am_score": distance_group.am_score,
-                        "defect_comment": distance_group.defect_comment,
-                        "no_am_score_ge_3_confirmed": 1 if distance_group.no_am_score_ge_3_confirmed else 0,
-                    },
-                )
-                distance_group_id = int(distance_result.lastrowid or db.execute(text("SELECT last_insert_rowid()")).scalar_one())
-
-                for observation in distance_group.observations:
-                    db.execute(
-                        text(
-                            f"""
-                            INSERT INTO "{OBSERVATIONS_TABLE}" (
-                                distance_group_id, mlo_id, source_observation_key, defect_role, is_extensive, selected_picture_file_name
-                            )
-                            VALUES (
-                                :distance_group_id, :mlo_id, :source_observation_key, :defect_role, :is_extensive, :selected_picture_file_name
-                            )
-                            """
-                        ),
-                        {
-                            "distance_group_id": distance_group_id,
-                            "mlo_id": observation.mlo_id,
-                            "source_observation_key": observation.source_observation_key,
-                            "defect_role": observation.defect_role,
-                            "is_extensive": 1 if observation.is_extensive else 0,
-                            "selected_picture_file_name": observation.selected_picture_file_name,
-                        },
-                    )
-
-        db.execute(
-            text(
-                f"""
-                INSERT INTO "{EVENTS_TABLE}" (
-                    report_id, event_type, event_by_user_id, event_at, from_status, to_status, memo
-                )
-                VALUES (
-                    :report_id, 'report_saved', :user_id, :now, :from_status, :to_status, :memo
-                )
-                """
-            ),
+    report_id = _report_id(report_key)
+    if created:
+        report = {
+            "id": report_id,
+            "report_key": report_key,
+            "report_name": report_name,
+            "binding_type": payload.binding_type,
+            "binding_text": binding_text,
+            "inspection_date_text": inspection_date_text,
+            "status": "pending",
+            "created_by_user_id": current_user.id,
+            "created_by_name": _display_name(current_user),
+            "created_at": now,
+            "updated_by_user_id": current_user.id,
+            "updated_by_name": _display_name(current_user),
+            "updated_at": now,
+            "submitted_by_user_id": None,
+            "submitted_by_name": None,
+            "submitted_at": None,
+            "reviewed_by_user_id": None,
+            "reviewed_by_name": None,
+            "reviewed_at": None,
+        }
+        events: list[dict[str, Any]] = []
+        base_revision = None
+        operation_type = "insert_entity"
+        from_status = None
+    else:
+        report = copy.deepcopy(dict(existing_values["report"]))
+        from_status = str(report.get("status") or "pending")
+        if from_status == "ready_to_review":
+            raise HTTPException(status_code=400, detail="Return the report to edit before saving changes.")
+        if from_status == "completed":
+            raise HTTPException(status_code=400, detail="Completed reports cannot be edited.")
+        report.update(
             {
-                "report_id": report_id,
-                "user_id": current_user.id,
-                "now": now,
-                "from_status": from_status,
-                "to_status": to_status,
-                "memo": payload.memo,
-            },
+                "report_name": report_name,
+                "binding_type": payload.binding_type,
+                "binding_text": binding_text,
+                "inspection_date_text": inspection_date_text,
+                "status": "pending",
+                "updated_by_user_id": current_user.id,
+                "updated_by_name": _display_name(current_user),
+                "updated_at": now,
+            }
         )
-        db.commit()
-    except IntegrityError as error:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(error.orig)) from error
+        events = copy.deepcopy(list(existing_values.get("events") or []))
+        base_revision = str(existing["record_revision"])
+        operation_type = "update_entity"
 
-    saved_report = _select_report_row(db, report_id)
-    if saved_report is None:
-        raise HTTPException(status_code=404, detail="Saved report was not found.")
-    return {"ok": True, "created": created, "report": _report_row(saved_report, can_delete=_can_delete_report(db, current_user, saved_report))}
+    events.append(_event(events, report_id, current_user, "report_saved", from_status, "pending", payload.memo))
+    values = {"report": report, "pipes": _saved_pipes(payload.pipes, report_id), "events": events}
+    _commit(
+        current_user,
+        Mutation(
+            entity_type=ENTITY_TYPE,
+            entity_id=report_key,
+            operation_type=operation_type,
+            base_record_revision=base_revision,
+            values=values,
+        ),
+    )
+    return {"ok": True, "created": created, "report": _report_row(values, _can_delete_report(db, current_user, report))}
 
 
 @router.delete("/api/reports/proactive-team-cctv-review/reports/{report_id}")
 def delete_report(
     report_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    ensure_report_schema()
-    report = db.execute(
-        text(
-            f"""
-            SELECT id, report_key, report_name, status, created_by_user_id
-            FROM "{REPORTS_TABLE}"
-            WHERE id = :report_id
-            """
-        ),
-        {"report_id": report_id},
-    ).mappings().first()
-    if report is None:
+    found = _find_by_report_id(current_user, report_id)
+    if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
-
-    is_admin_session = selected_user_role(current_user) in ADMIN_ROLES
-    is_pending = str(report["status"]) == "pending"
-    is_owner = report["created_by_user_id"] == current_user.id
-    is_creator_manager = _manager_can_delete_report(db, current_user, report["created_by_user_id"])
-    if not is_admin_session:
-        if not is_pending:
-            raise HTTPException(status_code=403, detail="Only administrators can delete reports that are not pending.")
-        if not is_owner and not is_creator_manager:
-            raise HTTPException(status_code=403, detail="Only the owner or a manager can delete this pending report.")
-
-    deleted_counts = _delete_report_related_rows(db, report_id)
-    db.commit()
-    return {"ok": True, "report_id": report_id, "deleted": deleted_counts}
+    entity, values = found
+    report = dict(values["report"])
+    if not _can_delete_report(db, current_user, report):
+        raise HTTPException(status_code=403, detail="Only the owner, the owner's manager, or an administrator can delete this report.")
+    _commit(
+        current_user,
+        Mutation(
+            entity_type=ENTITY_TYPE,
+            entity_id=str(entity["entity_id"]),
+            operation_type="delete_entity",
+            base_record_revision=str(entity["record_revision"]),
+        ),
+    )
+    pipes = list(values.get("pipes") or [])
+    return {
+        "ok": True,
+        "report_id": report_id,
+        "deleted": {
+            "reports": 1,
+            "pipes": len(pipes),
+            "distance_groups": sum(len(pipe.get("distance_groups") or []) for pipe in pipes if isinstance(pipe, dict)),
+            "observations": sum(
+                len(group.get("observations") or [])
+                for pipe in pipes if isinstance(pipe, dict)
+                for group in pipe.get("distance_groups") or []
+                if isinstance(group, dict)
+            ),
+            "events": len(values.get("events") or []),
+        },
+    }
 
 
 @router.get("/api/reports/proactive-team-cctv-review/reports/{report_id}/events")
 def list_report_events(
     report_id: int,
-    _current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
-    ensure_report_schema()
-    report_exists = db.execute(
-        text(f'SELECT id FROM "{REPORTS_TABLE}" WHERE id = :report_id'),
-        {"report_id": report_id},
-    ).first()
-    if report_exists is None:
+    found = _find_by_report_id(current_user, report_id)
+    if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
-
-    rows = db.execute(
-        text(
-            f"""
-            SELECT
-                e.*,
-                event_user.first_name AS event_first_name,
-                event_user.last_name AS event_last_name
-            FROM "{EVENTS_TABLE}" e
-            LEFT JOIN system.SYS_USERS event_user ON event_user.id = e.event_by_user_id
-            WHERE e.report_id = :report_id
-            ORDER BY e.event_at DESC, e.id DESC
-            """
-        ),
-        {"report_id": report_id},
-    ).mappings().all()
-    return {"events": [_event_row(row) for row in rows], "total": len(rows)}
+    events = list(found[1].get("events") or [])
+    events.sort(key=lambda event: (str(event.get("event_at") or ""), int(event.get("id") or 0)), reverse=True)
+    return {"events": events, "total": len(events)}
 
 
 @router.patch("/api/reports/proactive-team-cctv-review/reports/{report_id}/status")
@@ -822,77 +425,45 @@ def update_report_status(
     report_id: int,
     payload: ReportStatusActionRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_business_db),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    ensure_report_schema()
-    report = db.execute(
-        text(f'SELECT id, status FROM "{REPORTS_TABLE}" WHERE id = :report_id'),
-        {"report_id": report_id},
-    ).mappings().first()
-    if report is None:
+    found = _find_by_report_id(current_user, report_id)
+    if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
-
-    from_status = str(report["status"])
+    entity, current = found
+    values = copy.deepcopy(current)
+    report = dict(values["report"])
+    from_status = str(report.get("status") or "pending")
     now = utc_now_text()
-    action = payload.action
-    event_type = ""
-    to_status = from_status
-    extra_updates = ""
-
-    if action == "submit_to_review":
+    if payload.action == "submit_to_review":
         if from_status != "pending":
             raise HTTPException(status_code=400, detail="Only pending reports can be submitted to review.")
-        to_status = "ready_to_review"
-        event_type = "submitted_to_review"
-        extra_updates = ", submitted_by_user_id = :user_id, submitted_at = :now"
-    elif action == "return_to_edit":
+        to_status, event_type = "ready_to_review", "submitted_to_review"
+        report.update({"submitted_by_user_id": current_user.id, "submitted_by_name": _display_name(current_user), "submitted_at": now})
+    elif payload.action == "return_to_edit":
         if from_status != "ready_to_review":
             raise HTTPException(status_code=400, detail="Only ready-to-review reports can be returned to edit.")
-        to_status = "pending"
-        event_type = "returned_to_edit"
-        extra_updates = ", submitted_by_user_id = NULL, submitted_at = NULL, reviewed_by_user_id = NULL, reviewed_at = NULL"
-    elif action == "complete":
+        to_status, event_type = "pending", "returned_to_edit"
+        report.update({"submitted_by_user_id": None, "submitted_by_name": None, "submitted_at": None, "reviewed_by_user_id": None, "reviewed_by_name": None, "reviewed_at": None})
+    else:
         if from_status != "ready_to_review":
             raise HTTPException(status_code=400, detail="Only ready-to-review reports can be completed.")
         if not _is_manager_or_admin(db, current_user):
             raise HTTPException(status_code=403, detail="Only a manager or administrator can complete a report.")
-        to_status = "completed"
-        event_type = "completed"
-        extra_updates = ", reviewed_by_user_id = :user_id, reviewed_at = :now"
-
-    db.execute(
-        text(
-            f"""
-            UPDATE "{REPORTS_TABLE}"
-            SET status = :to_status,
-                updated_by_user_id = :user_id,
-                updated_at = :now
-                {extra_updates}
-            WHERE id = :report_id
-            """
+        to_status, event_type = "completed", "completed"
+        report.update({"reviewed_by_user_id": current_user.id, "reviewed_by_name": _display_name(current_user), "reviewed_at": now})
+    report.update({"status": to_status, "updated_by_user_id": current_user.id, "updated_by_name": _display_name(current_user), "updated_at": now})
+    events = list(values.get("events") or [])
+    events.append(_event(events, report_id, current_user, event_type, from_status, to_status, payload.memo))
+    values.update({"report": report, "events": events})
+    _commit(
+        current_user,
+        Mutation(
+            entity_type=ENTITY_TYPE,
+            entity_id=str(entity["entity_id"]),
+            operation_type="update_entity",
+            base_record_revision=str(entity["record_revision"]),
+            values=values,
         ),
-        {"to_status": to_status, "user_id": current_user.id, "now": now, "report_id": report_id},
     )
-    db.execute(
-        text(
-            f"""
-            INSERT INTO "{EVENTS_TABLE}" (
-                report_id, event_type, event_by_user_id, event_at, from_status, to_status, memo
-            )
-            VALUES (
-                :report_id, :event_type, :user_id, :now, :from_status, :to_status, :memo
-            )
-            """
-        ),
-        {
-            "report_id": report_id,
-            "event_type": event_type,
-            "user_id": current_user.id,
-            "now": now,
-            "from_status": from_status,
-            "to_status": to_status,
-            "memo": payload.memo,
-        },
-    )
-    db.commit()
     return {"ok": True, "report_id": report_id, "from_status": from_status, "to_status": to_status}

@@ -3,7 +3,13 @@ import { createRoot } from 'react-dom/client'
 import { Toaster } from 'sonner'
 import './index.css'
 import DesktopStartupSplash from './desktop/DesktopStartupSplash'
-import { exitDesktopApplication, isDesktopRuntime, startDesktopSession } from './desktop/runtime'
+import {
+  checkPortalUpdate,
+  exitDesktopApplication,
+  installPortalUpdate,
+  isDesktopRuntime,
+  startDesktopSession,
+} from './desktop/runtime'
 import { initializeClientSettings } from './desktop/settings'
 import {
   clearManagementToken,
@@ -55,6 +61,17 @@ async function bootstrap() {
       if (!session.token) throw new Error('Desktop sign-in did not return a Portal session token.')
       saveManagementToken(session.token, session.user.selected_role)
       saveManagementUser(session.user)
+      const update = await checkPortalUpdate()
+      if (update.available) {
+        root.render(
+          <StrictMode>
+            <DesktopStartupSplash message={`Updating Portal to ${update.releaseVersion}...`} />
+          </StrictMode>,
+        )
+        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+        await installPortalUpdate()
+        return
+      }
     } catch (error) {
       renderStartupError(error)
       return

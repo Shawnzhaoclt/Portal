@@ -4,6 +4,41 @@ import { isDesktopRuntime } from './runtime'
 
 const DESKTOP_DATA_ORIGIN = 'http://portal-data.localhost'
 
+export type PortalTestAccess = {
+  teamId: number
+  teamName: string
+  role: 'user' | 'admin' | 'system_admin'
+}
+
+const PORTAL_TEST_ACCESS_KEY = 'portal_test_access'
+
+export function storedPortalTestAccess(): PortalTestAccess | null {
+  const raw = window.sessionStorage.getItem(PORTAL_TEST_ACCESS_KEY)
+  if (!raw) return null
+  try {
+    const value = JSON.parse(raw) as Partial<PortalTestAccess>
+    if (
+      typeof value.teamId === 'number' &&
+      typeof value.teamName === 'string' &&
+      (value.role === 'user' || value.role === 'admin' || value.role === 'system_admin')
+    ) {
+      return value as PortalTestAccess
+    }
+  } catch {
+    // Ignore stale or malformed session data.
+  }
+  window.sessionStorage.removeItem(PORTAL_TEST_ACCESS_KEY)
+  return null
+}
+
+export function savePortalTestAccess(value: PortalTestAccess) {
+  window.sessionStorage.setItem(PORTAL_TEST_ACCESS_KEY, JSON.stringify(value))
+}
+
+export function clearPortalTestAccess() {
+  window.sessionStorage.removeItem(PORTAL_TEST_ACCESS_KEY)
+}
+
 type LocalResponse<T> = {
   status: number
   kind: 'json' | 'file' | 'binary' | 'error'
@@ -53,6 +88,12 @@ export async function portalRequest<T>(path: string, options: RequestInit = {}):
 
   const url = new URL(path, 'https://portal.local')
   const headers = Object.fromEntries(new Headers(options.headers).entries())
+  const testAccess = storedPortalTestAccess()
+  if (testAccess) {
+    headers['X-Portal-Test-Access'] = '1'
+    headers['X-Portal-Test-Team-Id'] = String(testAccess.teamId)
+    headers['X-Portal-Test-Role'] = testAccess.role
+  }
   const response = await invoke<LocalResponse<T>>('python_request', {
     request: {
       method: String(options.method ?? 'GET').toUpperCase(),
