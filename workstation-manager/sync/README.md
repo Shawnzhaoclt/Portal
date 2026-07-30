@@ -84,6 +84,17 @@ run, active snapshot timestamp and size, and the latest result. Its run table su
 a selected date, defaults to today, and refreshes automatically. Plain-text logs remain
 available through **Open logs**.
 
+### Batch launcher
+
+`start-source-sync.bat` is provided for an administrator or Task Scheduler task that
+needs to start the source-data scheduler without opening the Workstation Manager. It
+reads `pythonExecutable` from `sync.settings.json` (or `PORTAL_SYNC_PYTHON` when set),
+checks that the runtime can import `pyodbc`, and launches the normal scheduled worker.
+The worker's named Windows mutex still prevents a second scheduler from running.
+
+Double-click the batch file or use it as the Program/script in a Task Scheduler action.
+Monitor and stop the process from **Source Data** in Portal Workstation Manager.
+
 For command-line diagnostics, run one immediate sync with:
 
 ```bat

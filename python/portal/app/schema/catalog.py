@@ -219,7 +219,10 @@ def register_business_schema(system_database: Path, business_database: Path) -> 
     system_database = system_database.resolve()
     system_database.parent.mkdir(parents=True, exist_ok=True)
 
-    with sqlite3.connect(system_database) as connection:
+    # sqlite3 connection context managers commit or roll back, but they do not
+    # close the Windows file handle.  The catalog is later reopened read-only by
+    # the schema manager, so explicitly close it once registration is complete.
+    with closing(sqlite3.connect(system_database)) as connection:
         connection.execute("PRAGMA foreign_keys=ON")
         _create_registry_tables(connection)
         connection.execute("BEGIN IMMEDIATE")
@@ -325,6 +328,7 @@ def register_business_schema(system_database: Path, business_database: Path) -> 
             """,
             (BASELINE_MIGRATION_ID, SCHEMA_RELEASE_ID, BASELINE_HANDLER, _handler_checksum(BASELINE_HANDLER)),
         )
+        connection.commit()
 
     return {
         "release_id": SCHEMA_RELEASE_ID,

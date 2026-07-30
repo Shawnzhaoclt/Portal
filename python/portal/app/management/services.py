@@ -241,18 +241,17 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
         permission_mask |= PERMISSION_TYPES["view"]
         sources.append("public")
 
-    test_access = getattr(user, "_portal_test_access", None)
-    active_role = test_access["role"] if test_access else selected_user_role(user)
+    active_role = selected_user_role(user)
     if active_role == ROLE_SYSTEM_ADMIN:
         return permission_result(ALL_PERMISSION_MASK, ["system_admin"])
 
     if active_role == ROLE_ADMIN:
         return permission_result(ALL_PERMISSION_MASK, ["portal_admin"])
 
-    effective_team_id = test_access["team_id"] if test_access else user.team_id
-    team_permission_scopes = [(team_ancestor_ids(db, effective_team_id), "team")]
-    if not test_access:
-        team_permission_scopes.append((managed_team_scope_ids(db, user), "managed_team"))
+    team_permission_scopes = [
+        (team_ancestor_ids(db, user.team_id), "team"),
+        (managed_team_scope_ids(db, user), "managed_team"),
+    ]
     for team_ids, team_source in team_permission_scopes:
         if not team_ids:
             continue
@@ -266,14 +265,12 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
             permission_mask |= team_permission
             sources.append(team_source)
 
-    direct_permission = 0
-    if not test_access:
-        direct_permission = combine_permission_masks(db.scalars(
-            select(ResourcePermission.permission_level).where(
-                ResourcePermission.resource_id == resource.resource_id,
-                ResourcePermission.user_id == user.id,
-            )
-        ).all())
+    direct_permission = combine_permission_masks(db.scalars(
+        select(ResourcePermission.permission_level).where(
+            ResourcePermission.resource_id == resource.resource_id,
+            ResourcePermission.user_id == user.id,
+        )
+    ).all())
     if direct_permission:
         permission_mask |= direct_permission
         sources.append("user")

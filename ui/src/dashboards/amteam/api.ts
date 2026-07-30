@@ -1,4 +1,5 @@
 import type {
+  AmTeamObservationBatchResponse,
   AmTeamInspectionSearchResponse,
   AmTeamInspectionResponse,
   AmTeamObservationResponse,
@@ -40,10 +41,7 @@ export function fetchAmTeamInspections(mlId: string) {
   return apiGet<AmTeamInspectionResponse>(`/api/amteam/pipes/${encodeURIComponent(mlId)}/inspections`)
 }
 
-export async function fetchAmTeamObservations(mliId: string) {
-  const response = await apiGet<AmTeamObservationResponse>(
-    `/api/amteam/inspections/${encodeURIComponent(mliId)}/observations`,
-  )
+function normalizeObservationResponse(response: AmTeamObservationResponse): AmTeamObservationResponse {
   const mapAsset = (asset: AmTeamObservationResponse['media']['snapshots'][number]) => ({
     ...asset,
     url: portalDataUrl(asset.url),
@@ -62,4 +60,26 @@ export async function fetchAmTeamObservations(mliId: string) {
       image_urls: row.image_urls.map(portalDataUrl),
     })),
   }
+}
+
+export async function fetchAmTeamObservations(mliId: string) {
+  const response = await apiGet<AmTeamObservationResponse>(
+    `/api/amteam/inspections/${encodeURIComponent(mliId)}/observations`,
+  )
+  return normalizeObservationResponse(response)
+}
+
+export async function fetchAmTeamObservationsBatch(mliIds: string[]) {
+  const uniqueIds = [...new Set(mliIds.map((value) => value.trim()).filter(Boolean))]
+  if (!uniqueIds.length) return {} as Record<string, AmTeamObservationResponse>
+
+  const params = new URLSearchParams()
+  uniqueIds.forEach((mliId) => params.append('mli_id', mliId))
+  const response = await apiGet<AmTeamObservationBatchResponse>('/api/amteam/inspections/observations', params)
+  return Object.fromEntries(
+    Object.entries(response.rows).map(([mliId, observationResponse]) => [
+      mliId,
+      normalizeObservationResponse(observationResponse),
+    ]),
+  )
 }

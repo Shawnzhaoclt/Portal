@@ -59,7 +59,7 @@ class SchemaManager:
         """Register an existing compatible database at the current baseline release."""
         self._recover_if_needed()
         release = self._active_release()
-        with self._exclusive_lock(), sqlite3.connect(self.business_database) as connection:
+        with self._exclusive_lock(), contextlib.closing(sqlite3.connect(self.business_database)) as connection:
             self._prepare_connection(connection)
             self._create_local_state_tables(connection)
             state = self._state(connection)
@@ -70,8 +70,10 @@ class SchemaManager:
                 self._write_state(connection, release, "healthy", None)
                 self._record_history(connection, migration, None, release["release_id"], "installed", {"mode": "baseline"})
                 connection.commit()
-                return self.status()
-            return self.status()
+        # The database connection and schema lock must be released before status
+        # opens the file again.  This matters on Windows, where an early status
+        # read can keep a temporary migration candidate locked during cleanup.
+        return self.status()
 
     def status(self) -> dict[str, Any]:
         self._recover_if_needed()
@@ -82,7 +84,7 @@ class SchemaManager:
                 "installed_release_id": None,
                 "rollback_available": self.previous_database.is_file(),
             }
-        with sqlite3.connect(self.business_database) as connection:
+        with contextlib.closing(sqlite3.connect(self.business_database)) as connection:
             self._prepare_connection(connection)
             self._create_local_state_tables(connection)
             state = self._state(connection)
@@ -96,7 +98,7 @@ class SchemaManager:
     def validate(self, target_release_id: str | None = None) -> dict[str, Any]:
         self._recover_if_needed()
         target = self._release(target_release_id) if target_release_id else self._active_release()
-        with sqlite3.connect(self.business_database) as connection:
+        with contextlib.closing(sqlite3.connect(self.business_database)) as connection:
             self._prepare_connection(connection)
             self._create_local_state_tables(connection)
             state = self._state(connection)
@@ -129,7 +131,7 @@ class SchemaManager:
         with self._exclusive_lock():
             candidate = self._copy_to_candidate()
             try:
-                with sqlite3.connect(candidate) as connection:
+                with contextlib.closing(sqlite3.connect(candidate)) as connection:
                     self._prepare_connection(connection)
                     self._create_local_state_tables(connection)
                     current = self._state(connection)
@@ -169,7 +171,7 @@ class SchemaManager:
         return self.status()
 
     def _active_release(self) -> dict[str, Any]:
-        with _readonly_connection(self.system_database) as connection:
+        with contextlib.closing(_readonly_connection(self.system_database)) as connection:
             row = connection.execute(
                 "SELECT release_id, schema_version, catalog_hash FROM SYS_SCHEMA_RELEASES WHERE status = 'active' ORDER BY schema_version DESC LIMIT 1"
             ).fetchone()
@@ -180,7 +182,7 @@ class SchemaManager:
     def _release(self, release_id: str | None) -> dict[str, Any]:
         if release_id is None:
             raise SchemaManagerError("A target schema release is required.")
-        with _readonly_connection(self.system_database) as connection:
+        with contextlib.closing(_readonly_connection(self.system_database)) as connection:
             row = connection.execute(
                 "SELECT release_id, schema_version, catalog_hash FROM SYS_SCHEMA_RELEASES WHERE release_id = ?", (release_id,)
             ).fetchone()
@@ -215,7 +217,7 @@ class SchemaManager:
         return path
 
     def _migrations(self, where: str, values: tuple[Any, ...]) -> list[Migration]:
-        with _readonly_connection(self.system_database) as connection:
+        with contextlib.closing(_readonly_connection(self.system_database)) as connection:
             rows = connection.execute(
                 "SELECT migration_id, from_release_id, to_release_id, migration_order, migration_kind, handler_name, spec_json, handler_checksum, destructive "
                 f"FROM SYS_SCHEMA_MIGRATIONS WHERE active = 1 AND {where} ORDER BY migration_order, migration_id",
@@ -309,7 +311,7 @@ class SchemaManager:
         foreign_keys = connection.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_keys:
             raise SchemaManagerError(f"SQLite foreign key check failed for {len(foreign_keys)} row(s).")
-        with _readonly_connection(self.system_database) as catalog:
+        with contextlib.closing(_readonly_connection(self.system_database)) as catalog:
             expected_tables = catalog.execute(
                 "SELECT table_id, physical_table FROM SYS_SCHEMA_TABLES WHERE release_id = ? AND active = 1 ORDER BY dependency_order", (release_id,)
             ).fetchall()
@@ -342,7 +344,7 @@ class SchemaManager:
         return {"quick_check": quick_check, "foreign_key_errors": 0, "tables": len(expected_tables), "fields": len(expected_fields), "indexes": len(expected_indexes)}
 
     def _physical_fingerprint(self, connection: sqlite3.Connection, release_id: str) -> str:
-        with _readonly_connection(self.system_database) as catalog:
+        with contextlib.closing(_readonly_connection(self.system_database)) as catalog:
             tables = [row[0] for row in catalog.execute("SELECT physical_table FROM SYS_SCHEMA_TABLES WHERE release_id = ? AND active = 1 ORDER BY dependency_order", (release_id,))]
         entries = []
         for table in tables:
@@ -353,7 +355,7 @@ class SchemaManager:
 
     def _copy_to_candidate(self) -> Path:
         candidate = self.business_database.with_name(f"{self.business_database.name}.{uuid.uuid4().hex}.migrating")
-        with sqlite3.connect(self.business_database) as source, sqlite3.connect(candidate) as target:
+        with contextlib.closing(sqlite3.connect(self.business_database)) as source, contextlib.closing(sqlite3.connect(candidate)) as target:
             source.backup(target)
         return candidate
 

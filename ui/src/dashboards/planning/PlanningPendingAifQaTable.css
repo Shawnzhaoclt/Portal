@@ -91,7 +91,7 @@
 
 .planning-aif-search {
   display: grid;
-  grid-template-columns: auto minmax(240px, 460px) auto;
+  grid-template-columns: auto minmax(260px, 1fr);
   align-items: center;
   gap: 8px;
   min-width: 0;
@@ -124,10 +124,6 @@
   color: var(--panel-muted);
 }
 
-.planning-aif-search-button {
-  height: 34px;
-}
-
 .planning-aif-toolbar-actions {
   flex: 0 1 auto;
   justify-content: flex-end;
@@ -144,7 +140,7 @@
 }
 
 .planning-aif-table {
-  min-width: 1540px;
+  min-width: 1713px;
 }
 
 .planning-aif-table th,
@@ -167,6 +163,44 @@
   position: sticky;
   top: 33px;
   z-index: 2;
+}
+
+.planning-aif-table th:nth-child(1),
+.planning-aif-table td:nth-child(1) {
+  position: sticky;
+  left: 0;
+}
+
+.planning-aif-table th:nth-child(2),
+.planning-aif-table td:nth-child(2) {
+  position: sticky;
+  left: 132px;
+}
+
+.planning-aif-table th:nth-child(3),
+.planning-aif-table td:nth-child(3) {
+  position: sticky;
+  left: 272px;
+}
+
+.planning-aif-table thead th:nth-child(-n + 3) {
+  z-index: 5;
+}
+
+.planning-aif-table tbody td:nth-child(-n + 3) {
+  z-index: 1;
+}
+
+.planning-aif-table tbody tr:nth-child(odd) td:nth-child(-n + 3) {
+  background: #ffffff;
+}
+
+.planning-aif-table tbody tr:nth-child(even) td:nth-child(-n + 3) {
+  background: #f8fbfd;
+}
+
+.planning-aif-table tbody tr:hover td:nth-child(-n + 3) {
+  background: #edf7f9;
 }
 
 .planning-aif-table .sort-button,
@@ -224,6 +258,20 @@
   outline-offset: 2px;
 }
 
+.planning-aif-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 21px;
+  padding: 0 7px;
+  border: 1px solid #e5c780;
+  color: #6f4d00;
+  background: #fff8e8;
+  font-size: 11px;
+  font-weight: 850;
+  letter-spacing: 0;
+  line-height: 1;
+}
+
 .planning-aif-empty-row {
   height: 120px;
 }
@@ -255,6 +303,26 @@
 .planning-aif-panel .clear-table-filters:disabled {
   cursor: not-allowed;
   opacity: 0.52;
+}
+
+.planning-aif-filter-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  border: 1px solid var(--button-border);
+  border-radius: 0;
+  padding: 0 11px;
+  color: var(--accent);
+  background: var(--button-bg);
+  font-weight: 800;
+}
+
+.planning-aif-filter-button:hover,
+.planning-aif-filter-button.is-active {
+  border-color: var(--accent);
+  background: var(--row-hover);
 }
 
 @media (max-width: 1100px) {

@@ -19,6 +19,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import {
   fetchAmTeamObservations,
+  fetchAmTeamObservationsBatch,
   fetchAmTeamPipeGroups,
   fetchAmTeamPipes,
 } from './api'
@@ -1439,16 +1440,25 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
   const snapshotSelections: Record<string, string> = {}
   const extensiveDefectSelections: Record<string, boolean> = {}
 
-  for (const savedPipe of detail.pipes) {
+  const savedPipeContexts = detail.pipes.flatMap((savedPipe) => {
     const pipeId = recordId(savedPipe.ml_id)
     const group = pipeGroupsById.get(pipeId)
-    if (!group) continue
+    if (!group) return []
 
-    const observationResponse = await fetchAmTeamObservations(savedPipe.mli_id)
     const inspection = group.inspections.find((candidate) => recordId(candidate.mli_id) === savedPipe.mli_id)
       ?? inspectionForDate(group, selectedInspectionDateKey)
       ?? group.inspections[0]
-    if (!inspection) continue
+    if (!inspection) return []
+
+    return [{ savedPipe, pipeId, group, inspection }]
+  })
+  const observationResponses = await fetchAmTeamObservationsBatch(
+    savedPipeContexts.map(({ savedPipe }) => savedPipe.mli_id),
+  )
+
+  for (const { savedPipe, pipeId, group, inspection } of savedPipeContexts) {
+    const observationResponse = observationResponses[savedPipe.mli_id]
+    if (!observationResponse) continue
 
     visiblePipeGroups.push(group)
     pipeObservationCache[pipeId] = {

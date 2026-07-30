@@ -117,11 +117,13 @@ class Request:
         self,
         *,
         app: LocalApplication,
+        method: str = "GET",
         path: str,
         headers: dict[str, str] | None = None,
         query: dict[str, Any] | None = None,
     ) -> None:
         self.app = app
+        self.method = str(method).upper()
         self.headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
         self.query_params = query or {}
         self.url = URL(f"tauri://localhost{path}")

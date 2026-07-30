@@ -16,6 +16,7 @@ use std::os::windows::process::CommandExt;
 use std::ffi::c_void;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const SOURCE_SYNC_TASK_NAME: &str = "StormWater Portal Source Data Sync";
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +46,10 @@ struct SyncRun {
 struct SyncStatus {
     scheduler_running: bool,
     start_allowed: bool,
+    scheduled_task_registered: bool,
+    scheduled_task_name: String,
+    scheduled_task_time: String,
+    scheduled_task_state: String,
     status_text: String,
     next_run_text: String,
     published_database: String,
@@ -647,6 +652,77 @@ fn scheduler_running(paths: &SyncPaths) -> bool {
         .unwrap_or_else(scheduler_mutex_held)
 }
 
+fn source_schedule_state() -> String {
+    let output = run_hidden(
+        "schtasks.exe",
+        &[
+            "/Query".to_string(),
+            "/TN".to_string(),
+            SOURCE_SYNC_TASK_NAME.to_string(),
+            "/FO".to_string(),
+            "LIST".to_string(),
+        ],
+    );
+    let Ok(output) = output else {
+        return "Not registered".to_string();
+    };
+    if output.to_lowercase().contains("running") {
+        "Running".to_string()
+    } else {
+        "Ready".to_string()
+    }
+}
+
+fn source_schedule_registered() -> bool {
+    source_schedule_state() != "Not registered"
+}
+
+fn set_source_schedule(paths: &SyncPaths, enabled: bool) -> Result<(), String> {
+    if !enabled {
+        if source_schedule_registered() {
+            run_hidden(
+                "schtasks.exe",
+                &[
+                    "/Delete".to_string(),
+                    "/TN".to_string(),
+                    SOURCE_SYNC_TASK_NAME.to_string(),
+                    "/F".to_string(),
+                ],
+            )?;
+        }
+        return Ok(());
+    }
+
+    let launcher = paths
+        .sync_script
+        .parent()
+        .ok_or_else(|| "The source sync directory could not be resolved.".to_string())?
+        .join("start-source-sync.bat");
+    if !launcher.is_file() {
+        return Err(format!("The source sync launcher was not found: {}", launcher.display()));
+    }
+    // `cmd /c "\"path\""` is not a valid Task Scheduler action on every
+    // Windows build. Calling the batch file explicitly keeps the task command
+    // unambiguous and preserves the launcher's exit code.
+    let task_command = format!("cmd.exe /d /c call \"{}\"", launcher.display());
+    run_hidden(
+        "schtasks.exe",
+        &[
+            "/Create".to_string(),
+            "/TN".to_string(),
+            SOURCE_SYNC_TASK_NAME.to_string(),
+            "/SC".to_string(),
+            "DAILY".to_string(),
+            "/ST".to_string(),
+            format_clock(paths.allowed_start_minute),
+            "/TR".to_string(),
+            task_command,
+            "/F".to_string(),
+        ],
+    )?;
+    Ok(())
+}
+
 struct SourceCommand {
     executable: String,
     arguments: Vec<String>,
@@ -836,6 +912,84 @@ fn schema_task(task: &str, confirmation: Option<&str>) -> Result<Value, String> 
         .ok_or_else(|| "The schema coordinator returned no result.".to_string())
 }
 
+fn maintenance_task(
+    task: &str,
+    confirmation: Option<&str>,
+    selected_date: Option<&str>,
+    network_root: Option<&str>,
+) -> Result<Value, String> {
+    maintenance_task_with_extra(task, confirmation, selected_date, network_root, &[])
+}
+
+fn maintenance_task_with_extra(
+    task: &str,
+    confirmation: Option<&str>,
+    selected_date: Option<&str>,
+    network_root: Option<&str>,
+    extra_arguments: &[(&str, String)],
+) -> Result<Value, String> {
+    let paths = repository_paths()?;
+    let runner = paths
+        .runner
+        .parent()
+        .ok_or_else(|| "The coordinator directory could not be resolved.".to_string())?
+        .join("maintenance_runner.py");
+    if !runner.is_file() {
+        return Err(format!(
+            "The workstation maintenance coordinator was not found: {}",
+            runner.display()
+        ));
+    }
+    if !paths.portal_settings.is_file() {
+        return Err(format!(
+            "The Portal settings file was not found: {}",
+            paths.portal_settings.display()
+        ));
+    }
+    let command = coordinator_command(&paths)?;
+    let mut arguments = command.arguments;
+    arguments.extend([
+        runner.display().to_string(),
+        "--task".to_string(),
+        task.to_string(),
+        "--portal-settings".to_string(),
+        paths.portal_settings.display().to_string(),
+    ]);
+    if let Some(confirmation) = confirmation {
+        arguments.push("--confirmation".to_string());
+        arguments.push(confirmation.to_string());
+    }
+    if let Some(selected_date) = selected_date {
+        arguments.push("--selected-date".to_string());
+        arguments.push(selected_date.to_string());
+    }
+    if let Some(network_root) = network_root {
+        arguments.push("--network-root".to_string());
+        arguments.push(network_root.to_string());
+    }
+    for (flag, value) in extra_arguments {
+        arguments.push((*flag).to_string());
+        arguments.push(value.clone());
+    }
+    let output = run_hidden(&command.executable, &arguments).map_err(|error| coordinator_error(&error))?;
+    let payload = output
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .ok_or_else(|| "The workstation maintenance coordinator returned an invalid response.".to_string())?;
+    if payload.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("The workstation maintenance task failed.")
+            .to_string());
+    }
+    payload
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "The workstation maintenance coordinator returned no result.".to_string())
+}
+
 fn local_time_minutes() -> Option<u16> {
     local_time_seconds().map(|seconds| (seconds / 60) as u16)
 }
@@ -995,14 +1149,20 @@ fn sync_status(selected_date: String) -> Result<SyncStatus, String> {
     let paths = sync_paths()?;
     let running = scheduler_running(&paths);
     let start_allowed = scheduler_start_allowed(&paths);
+    let scheduled_task_state = source_schedule_state();
+    let scheduled_task_registered = scheduled_task_state != "Not registered";
     let runs = read_runs(&paths.run_history, &selected_date);
     let latest_result = runs
         .first()
-        .map(|run| format!("{} - {}", run.status, run.finished_at))
+        .map(|run| run.status.clone())
         .unwrap_or_else(|| "No runs recorded".to_string());
     Ok(SyncStatus {
         scheduler_running: running,
         start_allowed,
+        scheduled_task_registered,
+        scheduled_task_name: SOURCE_SYNC_TASK_NAME.to_string(),
+        scheduled_task_time: format!("Daily {} local time", format_clock(paths.allowed_start_minute)),
+        scheduled_task_state,
         status_text: if running { "RUNNING" } else { "STOPPED" }.to_string(),
         next_run_text: next_scheduled_run(&paths)
             .map(|time| {
@@ -1060,6 +1220,18 @@ fn start_scheduler() -> Result<(), String> {
         .map_err(|error| format!("Could not start the registered source scheduler: {error}"))?;
     drop(child);
     Ok(())
+}
+
+#[tauri::command]
+fn enable_source_scheduler_schedule() -> Result<(), String> {
+    let paths = sync_paths()?;
+    set_source_schedule(&paths, true)
+}
+
+#[tauri::command]
+fn disable_source_scheduler_schedule() -> Result<(), String> {
+    let paths = sync_paths()?;
+    set_source_schedule(&paths, false)
 }
 
 #[tauri::command]
@@ -1144,8 +1316,125 @@ fn migrate_schema(confirmation: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-fn rollback_schema(confirmation: String) -> Result<Value, String> {
-    schema_task("schema.rollback", Some(&confirmation))
+fn maintenance_snapshot_status() -> Result<Value, String> {
+    maintenance_task("snapshot.status", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_validate() -> Result<Value, String> {
+    maintenance_task("snapshot.validate", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_publish(confirmation: String) -> Result<Value, String> {
+    maintenance_task("snapshot.publish", Some(&confirmation), None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_retention_plan() -> Result<Value, String> {
+    maintenance_task("snapshot.retention-plan", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_retention_apply(confirmation: String) -> Result<Value, String> {
+    maintenance_task("snapshot.retention.apply", Some(&confirmation), None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_retention_schedule_status() -> Result<Value, String> {
+    maintenance_task("snapshot.retention.schedule.status", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_retention_schedule_enable() -> Result<Value, String> {
+    maintenance_task("snapshot.retention.schedule.enable", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_retention_schedule_disable() -> Result<Value, String> {
+    maintenance_task("snapshot.retention.schedule.disable", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_nightly_run() -> Result<Value, String> {
+    maintenance_task("snapshot.nightly.run", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_nightly_schedule_status() -> Result<Value, String> {
+    maintenance_task("snapshot.nightly.schedule.status", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_nightly_schedule_enable() -> Result<Value, String> {
+    maintenance_task("snapshot.nightly.schedule.enable", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_snapshot_nightly_schedule_disable() -> Result<Value, String> {
+    maintenance_task("snapshot.nightly.schedule.disable", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_backup_status() -> Result<Value, String> {
+    maintenance_task("backup.status", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_backup_verify() -> Result<Value, String> {
+    maintenance_task("backup.verify", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_backup_restore_active(confirmation: String) -> Result<Value, String> {
+    maintenance_task("backup.restore-active", Some(&confirmation), None, None)
+}
+
+#[tauri::command]
+fn maintenance_conflict_list() -> Result<Value, String> {
+    maintenance_task("conflict.list", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_conflict_export() -> Result<Value, String> {
+    maintenance_task("conflict.export", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_log_list(selected_date: String) -> Result<Value, String> {
+    maintenance_task("log.list", None, Some(&selected_date), None)
+}
+
+#[tauri::command]
+fn maintenance_activity_list(selected_date: String) -> Result<Value, String> {
+    maintenance_task("activity.list", None, Some(&selected_date), None)
+}
+
+#[tauri::command]
+fn maintenance_settings_status() -> Result<Value, String> {
+    maintenance_task("settings.status", None, None, None)
+}
+
+#[tauri::command]
+fn maintenance_update_network_root(network_root: String) -> Result<Value, String> {
+    maintenance_task("settings.update-network-root", None, None, Some(&network_root))
+}
+
+#[tauri::command]
+fn maintenance_update_retention_policy(
+    operation_online_days: i64,
+    verified_snapshot_count: i64,
+) -> Result<Value, String> {
+    maintenance_task_with_extra(
+        "settings.update-retention-policy",
+        None,
+        None,
+        None,
+        &[
+            ("--operation-online-days", operation_online_days.to_string()),
+            ("--verified-snapshot-count", verified_snapshot_count.to_string()),
+        ],
+    )
 }
 
 #[tauri::command]
@@ -1153,10 +1442,40 @@ fn open_path(path: String) -> Result<(), String> {
     if path.trim().is_empty() {
         return Err("No path was supplied.".to_string());
     }
-    let result = Command::new("explorer.exe")
-        .arg(path)
+    let candidate = PathBuf::from(&path);
+    if !candidate.exists() {
+        return Err(format!("The configured path is not available: {}", candidate.display()));
+    }
+    let resolved = candidate
+        .canonicalize()
+        .map_err(|error| format!("Could not resolve {}: {error}", candidate.display()))?;
+    let mut command = Command::new("explorer.exe");
+    if resolved.is_file() {
+        command.arg("/select,").arg(&resolved);
+    } else {
+        command.arg(&resolved);
+    }
+    let result = command
         .spawn()
         .map_err(|error| format!("Could not open the path: {error}"))?;
+    drop(result);
+    Ok(())
+}
+
+#[tauri::command]
+fn open_file_location(path: String) -> Result<(), String> {
+    if path.trim().is_empty() {
+        return Err("No file path was supplied.".to_string());
+    }
+    let candidate = PathBuf::from(&path);
+    if !candidate.is_file() {
+        return Err(format!("The file is not available: {}", candidate.display()));
+    }
+    let result = Command::new("explorer.exe")
+        .arg("/select,")
+        .arg(&candidate)
+        .spawn()
+        .map_err(|error| format!("Could not open Explorer for the file: {error}"))?;
     drop(result);
     Ok(())
 }
@@ -1168,6 +1487,8 @@ pub fn run() {
             sync_status,
             start_scheduler,
             stop_scheduler,
+            enable_source_scheduler_schedule,
+            disable_source_scheduler_schedule,
             repository_status,
             validate_repository,
             bootstrap_repository,
@@ -1178,8 +1499,30 @@ pub fn run() {
             plan_schema,
             initialize_schema,
             migrate_schema,
-            rollback_schema,
-            open_path
+            maintenance_snapshot_status,
+            maintenance_snapshot_validate,
+            maintenance_snapshot_publish,
+            maintenance_snapshot_retention_plan,
+            maintenance_snapshot_retention_apply,
+            maintenance_snapshot_retention_schedule_status,
+            maintenance_snapshot_retention_schedule_enable,
+            maintenance_snapshot_retention_schedule_disable,
+            maintenance_snapshot_nightly_run,
+            maintenance_snapshot_nightly_schedule_status,
+            maintenance_snapshot_nightly_schedule_enable,
+            maintenance_snapshot_nightly_schedule_disable,
+            maintenance_backup_status,
+            maintenance_backup_verify,
+            maintenance_backup_restore_active,
+            maintenance_conflict_list,
+            maintenance_conflict_export,
+            maintenance_log_list,
+            maintenance_activity_list,
+            maintenance_settings_status,
+            maintenance_update_network_root,
+            maintenance_update_retention_policy,
+            open_path,
+            open_file_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running Portal Workstation Manager");

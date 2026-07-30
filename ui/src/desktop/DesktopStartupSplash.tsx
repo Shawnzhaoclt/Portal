@@ -13,20 +13,21 @@ const STARTUP_MESSAGES = [
 type DesktopStartupSplashProps = {
   error?: string
   message?: string
+  maintenance?: boolean
   onExit?: () => void
   onRetry?: () => void
 }
 
-export default function DesktopStartupSplash({ error, message, onExit, onRetry }: DesktopStartupSplashProps) {
+export default function DesktopStartupSplash({ error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
 
   useEffect(() => {
-    if (error) return
+    if (error || maintenance) return
     const timer = window.setInterval(() => {
       setMessageIndex((current) => Math.min(current + 1, STARTUP_MESSAGES.length - 1))
     }, 1800)
     return () => window.clearInterval(timer)
-  }, [error])
+  }, [error, maintenance])
 
   return (
     <main className="desktop-startup-screen">
@@ -34,7 +35,20 @@ export default function DesktopStartupSplash({ error, message, onExit, onRetry }
         <img className="desktop-startup-logo" src={stormwaterLogo} alt="Charlotte-Mecklenburg Storm Water Services" />
         <div className="desktop-startup-rule" />
         <h1>Storm Water Asset Intelligence Portal</h1>
-        {error ? (
+        {maintenance ? (
+          <>
+            <AlertTriangle className="desktop-startup-maintenance-icon" aria-hidden="true" />
+            <h2>System under maintenance</h2>
+            <p className="desktop-startup-maintenance-message">
+              {message ?? 'The Portal is under maintenance daily from 8:00 PM through 5:00 AM. Please try again after 5:00 AM.'}
+            </p>
+            <div className="desktop-startup-actions">
+              <button onClick={onExit} type="button">
+                <LogOut size={18} /> Exit
+              </button>
+            </div>
+          </>
+        ) : error ? (
           <>
             <AlertTriangle className="desktop-startup-error-icon" aria-hidden="true" />
             <h2>Portal could not start</h2>

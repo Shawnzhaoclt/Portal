@@ -25,6 +25,7 @@ export type CriticalTeamSourceResponse = {
     source_tables: string
     row_count: number
     imported_at_utc: string
+    published_at_utc?: string | null
   }
   columns: Array<{ name: string; data_type: string; ordinal_position: number }>
   sheets: Record<string, CriticalTeamSheetConfig>
@@ -44,7 +45,8 @@ export type CriticalTeamSummaryResponse = {
 export type CriticalTeamOverviewPoint = {
   month_start: string
   month_label: string
-  count_value: number
+  self_count: number
+  other_count: number
 }
 
 export type CriticalTeamOverviewSeries = {
@@ -71,16 +73,31 @@ export type CriticalTeamOverviewResponse = {
     date_to: string
     submit_to: string[]
   }
-  metrics: CriticalTeamOverviewMetrics
+  metrics: {
+    self: CriticalTeamOverviewMetrics
+    total: CriticalTeamOverviewMetrics
+  }
   totals: {
-    all_time_started_projects: number
-    all_time_scheduled_inspections: number
-    all_time_future_inspection_scheduled: number
-    all_time_inspection_in_progress: number
-    all_time_on_hold: number
-    all_time_ready_for_review: number
-    all_time_revisions_required: number
-    all_time_review_complete: number
+    self: {
+      all_time_started_projects: number
+      all_time_scheduled_inspections: number
+      all_time_future_inspection_scheduled: number
+      all_time_inspection_in_progress: number
+      all_time_on_hold: number
+      all_time_ready_for_review: number
+      all_time_revisions_required: number
+      all_time_review_complete: number
+    }
+    total: {
+      all_time_started_projects: number
+      all_time_scheduled_inspections: number
+      all_time_future_inspection_scheduled: number
+      all_time_inspection_in_progress: number
+      all_time_on_hold: number
+      all_time_ready_for_review: number
+      all_time_revisions_required: number
+      all_time_review_complete: number
+    }
   }
   series: CriticalTeamOverviewSeries[]
 }
@@ -108,6 +125,7 @@ export type CriticalTeamSheetRow = {
 export type CriticalTeamSheetResponse = {
   sheet_id: string
   sheet: CriticalTeamSheetConfig
+  comparison_mode: boolean
   rows: CriticalTeamSheetRow[]
 }
 

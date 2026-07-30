@@ -13,6 +13,7 @@ import {
   ExternalLink,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   X,
 } from 'lucide-react'
 import '../critical-team/CriticalTeamDashboard.css'
@@ -29,6 +30,7 @@ type PendingAifResponse = {
   total: number
   limit: number
   offset: number
+  source_published_at_utc?: string | null
   rows: PendingAifRow[]
 }
 
@@ -59,17 +61,17 @@ type PendingAifColumn = {
 }
 
 const PENDING_AIF_COLUMNS: PendingAifColumn[] = [
-  { key: 'inspection_id', label: 'Inspection ID', width: '9%', type: 'number', link: true },
-  { key: 'asset_id', label: 'Asset ID', width: '10%', type: 'text' },
-  { key: 'inspection_date', label: 'Inspection Date', width: '12%', type: 'date' },
-  { key: 'inspection_by', label: 'Inspection By', width: '11%', type: 'category' },
-  { key: 'inspection_status', label: 'Inspection Status', width: '10%', type: 'category' },
-  { key: 'submit_to', label: 'Submit To', width: '11%', type: 'category' },
-  { key: 'team', label: 'Team', width: '11%', type: 'category' },
-  { key: 'related_workorder_id', label: 'WorkOrder ID', width: '11%', type: 'number', link: true },
-  { key: 'critical_team_status', label: 'Critical Team Status', width: '11%', type: 'category' },
-  { key: 'investigation_id', label: 'Investigation ID', width: '9%', type: 'number', link: true },
-  { key: 'investigation_status', label: 'Investigation Status', width: '10%', type: 'category' },
+  { key: 'inspection_id', label: 'Inspection ID', width: '132px', type: 'number', link: true },
+  { key: 'asset_id', label: 'Asset ID', width: '140px', type: 'text' },
+  { key: 'inspection_date', label: 'Inspection Date', width: '148px', type: 'date' },
+  { key: 'inspection_by', label: 'Inspection By', width: '164px', type: 'category' },
+  { key: 'inspection_status', label: 'Inspection Status', width: '160px', type: 'category' },
+  { key: 'submit_to', label: 'Submit To', width: '160px', type: 'category' },
+  { key: 'team', label: 'Team', width: '160px', type: 'category' },
+  { key: 'related_workorder_id', label: 'WorkOrder ID', width: '140px', type: 'number', link: true },
+  { key: 'critical_team_status', label: 'Critical Team Status', width: '184px', type: 'category' },
+  { key: 'investigation_id', label: 'Investigation ID', width: '140px', type: 'number', link: true },
+  { key: 'investigation_status', label: 'Investigation Status', width: '185px', type: 'category' },
 ]
 
 const NUMBER_FILTER_KEYS = ['inspection_id', 'related_workorder_id', 'investigation_id'] as const
@@ -169,6 +171,21 @@ function fetchPendingAifRows({
 function formatNumber(value: number | null | undefined) {
   if (value === null || value === undefined || Number.isNaN(value)) return '-'
   return new Intl.NumberFormat().format(value)
+}
+
+function formatSourceTimestamp(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(date)
 }
 
 function cellText(value: CellValue, column: PendingAifColumn) {
@@ -569,6 +586,7 @@ function PlanningPendingAifQaTable() {
   const [pageSize, setPageSize] = useState(50)
   const [page, setPage] = useState(1)
   const [sort, setSort] = useState(DEFAULT_SORT)
+  const [showFilters, setShowFilters] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
   const [loading, setLoading] = useState(false)
   const [exporting, setExporting] = useState(false)
@@ -627,6 +645,14 @@ function PlanningPendingAifQaTable() {
   }, [categoryFilters, dateFilter, numberFilters, page, pageSize, reloadToken, search, sort, textFilters])
 
   useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setPage(1)
+      setSearch(searchDraft)
+    }, 280)
+    return () => window.clearTimeout(timer)
+  }, [searchDraft])
+
+  useEffect(() => {
     const total = rowsResponse?.total ?? 0
     const pageCount = Math.max(1, Math.ceil(total / pageSize))
     if (page > pageCount) setPage(pageCount)
@@ -637,6 +663,7 @@ function PlanningPendingAifQaTable() {
   const firstRecord = total === 0 ? 0 : (rowsResponse?.offset ?? 0) + 1
   const lastRecord = total === 0 ? 0 : Math.min((rowsResponse?.offset ?? 0) + rows.length, total)
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
+  const sourceTimestamp = formatSourceTimestamp(rowsResponse?.source_published_at_utc)
   const activeFilters = useMemo(
     () => hasActiveFilters(search, numberFilters, textFilters, categoryFilters, dateFilter),
     [categoryFilters, dateFilter, numberFilters, search, textFilters],
@@ -859,7 +886,7 @@ function PlanningPendingAifQaTable() {
               <ClipboardCheck size={18} />
               <div className="panel-title-copy">
                 <h2>Planning Pending AIF QA/QC</h2>
-                <p>Review pending Asset Inspection Forms and related Cityworks activity.</p>
+                <p>{sourceTimestamp ? `Last available data: ${sourceTimestamp}. ${formatNumber(total)} pending AIF records.` : `Review ${formatNumber(total)} pending Asset Inspection Forms and related Cityworks activity.`}</p>
               </div>
             </div>
             <div className="planning-aif-header-actions">
@@ -881,14 +908,7 @@ function PlanningPendingAifQaTable() {
           </div>
 
           <div className="detail-toolbar planning-aif-toolbar">
-            <form
-              className="planning-aif-search"
-              onSubmit={(event) => {
-                event.preventDefault()
-                setPage(1)
-                setSearch(searchDraft)
-              }}
-            >
+            <label className="planning-aif-search">
               <Search size={16} />
               <input
                 value={searchDraft}
@@ -896,11 +916,17 @@ function PlanningPendingAifQaTable() {
                 placeholder="Search inspection, asset, team, workorder, investigator"
                 aria-label="Search pending AIF records"
               />
-              <button className="export-button planning-aif-search-button" type="submit">
-                Search
-              </button>
-            </form>
+            </label>
             <div className="detail-toolbar-actions planning-aif-toolbar-actions">
+              <button
+                className={showFilters ? 'planning-aif-filter-button is-active' : 'planning-aif-filter-button'}
+                type="button"
+                aria-expanded={showFilters}
+                onClick={() => setShowFilters((current) => !current)}
+              >
+                <SlidersHorizontal size={14} />
+                Filters{filterCount > 0 ? ` (${filterCount})` : ''}
+              </button>
               <span className="table-result-range">
                 {formatNumber(firstRecord)}-{formatNumber(lastRecord)} of {formatNumber(total)}
               </span>
@@ -964,11 +990,13 @@ function PlanningPendingAifQaTable() {
                     </th>
                   ))}
                 </tr>
-                <tr className="column-filter-row">
-                  {PENDING_AIF_COLUMNS.map((column) => (
-                    <th key={column.key}>{renderColumnFilter(column)}</th>
-                  ))}
-                </tr>
+                {showFilters ? (
+                  <tr className="column-filter-row">
+                    {PENDING_AIF_COLUMNS.map((column) => (
+                      <th key={column.key}>{renderColumnFilter(column)}</th>
+                    ))}
+                  </tr>
+                ) : null}
               </thead>
               <tbody>
                 {rows.map((row, index) => {
@@ -997,6 +1025,8 @@ function PlanningPendingAifQaTable() {
                                 {text}
                                 <ExternalLink size={12} aria-hidden="true" />
                               </a>
+                            ) : column.key === 'inspection_status' && text !== '-' ? (
+                              <span className="planning-aif-status-badge">{text}</span>
                             ) : (
                               text
                             )}

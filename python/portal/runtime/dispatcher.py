@@ -75,6 +75,7 @@ def _resolve_callable(
     callable_: Any,
     *,
     app: Any,
+    method: str,
     path: str,
     path_values: dict[str, str],
     query: dict[str, Any],
@@ -97,6 +98,7 @@ def _resolve_callable(
             value, nested_generators = _resolve_callable(
                 default.callable,
                 app=app,
+                method=method,
                 path=path,
                 path_values=path_values,
                 query=query,
@@ -112,7 +114,7 @@ def _resolve_callable(
             kwargs[name] = value
             continue
         if annotation is Request or name == "request":
-            kwargs[name] = Request(app=app, path=path, headers=headers, query=query)
+            kwargs[name] = Request(app=app, method=method, path=path, headers=headers, query=query)
             continue
         if name in path_values:
             kwargs[name] = _coerce_scalar(path_values[name], annotation)
@@ -217,6 +219,7 @@ def dispatch_request(request: dict[str, Any]) -> dict[str, Any]:
         result, generators = _resolve_callable(
             route.endpoint,
             app=app,
+            method=method,
             path=path,
             path_values=path_values,
             query=query,

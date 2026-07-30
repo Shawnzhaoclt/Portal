@@ -270,6 +270,25 @@ class LocalStore:
             )
         return entities > 0 or pending > 0
 
+    def has_pending_outbox(self) -> bool:
+        """Return whether this device has work not proven present in a snapshot.
+
+        A workstation may replace a local replica only when its formal outbox is
+        terminal.  This is intentionally conservative: a published package is
+        still retained until the client has synchronized it and installed a
+        snapshot that explicitly covers it.
+        """
+        self.initialize()
+        with closing(self.connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*)
+                FROM sw_sync_outbox_transaction
+                WHERE state NOT IN ('applied', 'voided')
+                """
+            ).fetchone()
+        return bool(row and int(row[0]))
+
     def outbox_rows(self, states: Sequence[str] | None = None) -> list[dict[str, object]]:
         self.initialize()
         with closing(self.connect()) as connection:

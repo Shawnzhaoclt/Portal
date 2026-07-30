@@ -1,4 +1,4 @@
-"""GUI-facing task boundary for Portal local database schema maintenance."""
+"""GUI-facing task boundary for shared Portal schema publication."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ for _candidate in (_RUNNER_DIRECTORY / "python", _RUNNER_DIRECTORY.parent.parent
         sys.path.insert(0, str(_candidate))
         break
 
-from portal.app.schema.manager import SchemaManager
+from portal.app.schema.shared_publisher import SharedSchemaPublisher
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -40,33 +40,24 @@ def _expand(value: str, *, settings_path: Path, data_root: str) -> Path:
     return candidate if candidate.is_absolute() else (settings_path.parent / candidate).resolve()
 
 
-def _configured_databases(settings_path: Path) -> tuple[Path, Path]:
+def _configured_paths(settings_path: Path) -> tuple[Path, Path]:
     settings = _read_json(settings_path)
     data_root = str(settings.get("shared", {}).get("dataRoot", "")).strip()
     system_database = str(settings.get("system", {}).get("database", "")).strip()
-    business_database = str(settings.get("business", {}).get("database", "")).strip()
-    if not data_root or not system_database or not business_database:
-        raise ValueError("Portal settings must define shared.dataRoot, system.database, and business.database.")
+    network_root = str(settings.get("businessSync", {}).get("networkRoot", "")).strip()
+    if not data_root or not system_database or not network_root:
+        raise ValueError("Portal settings must define shared.dataRoot, system.database, and businessSync.networkRoot.")
     return (
         _expand(system_database, settings_path=settings_path, data_root=data_root),
-        _expand(business_database, settings_path=settings_path, data_root=data_root),
+        _expand(network_root, settings_path=settings_path, data_root=data_root),
     )
-
-
-def _response(manager: SchemaManager, result: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "system_database": str(manager.system_database),
-        "business_database": str(manager.business_database),
-        **manager.status(),
-        **result,
-    }
 
 
 def _arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Portal Workstation Manager schema task runner")
     parser.add_argument(
         "--task",
-        choices=("schema.status", "schema.validate", "schema.plan", "schema.initialize", "schema.migrate", "schema.rollback"),
+        choices=("schema.status", "schema.validate", "schema.plan", "schema.initialize", "schema.migrate"),
         required=True,
     )
     parser.add_argument("--portal-settings", type=Path, required=True)
@@ -77,27 +68,19 @@ def _arguments() -> argparse.Namespace:
 def main() -> int:
     args = _arguments()
     try:
-        system_database, business_database = _configured_databases(args.portal_settings)
-        manager = SchemaManager(system_database, business_database)
+        system_database, network_root = _configured_paths(args.portal_settings)
+        publisher = SharedSchemaPublisher(system_database, network_root)
         if args.task == "schema.status":
-            result = manager.status()
+            result = publisher.status()
         elif args.task == "schema.validate":
-            result = manager.validate()
+            result = publisher.validate()
         elif args.task == "schema.plan":
-            result = manager.plan()
+            result = publisher.plan()
         elif args.task == "schema.initialize":
-            if args.confirmation.strip() != str(business_database):
-                raise ValueError("Type the configured local business database path exactly to initialize it.")
-            result = manager.initialize()
-        elif args.task == "schema.migrate":
-            if args.confirmation.strip() != str(business_database):
-                raise ValueError("Type the configured local business database path exactly to apply migrations.")
-            result = manager.migrate()
+            result = publisher.publish("baseline", args.confirmation)
         else:
-            if args.confirmation.strip() != str(business_database):
-                raise ValueError("Type the configured local business database path exactly to restore the previous copy.")
-            result = manager.rollback()
-        print(json.dumps({"ok": True, "result": _response(manager, result)}, ensure_ascii=False))
+            result = publisher.publish("migration", args.confirmation)
+        print(json.dumps({"ok": True, "result": result}, ensure_ascii=False))
         return 0
     except Exception as error:
         print(json.dumps({"ok": False, "error": str(error)}, ensure_ascii=False), file=sys.stderr)

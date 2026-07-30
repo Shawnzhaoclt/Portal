@@ -93,9 +93,20 @@
   color: #b42318;
 }
 
+.desktop-startup-maintenance-icon {
+  width: 32px;
+  height: 32px;
+  margin-top: 28px;
+  color: #a15c00;
+}
+
 .desktop-startup-error {
   max-width: 560px;
   white-space: pre-line;
+}
+
+.desktop-startup-maintenance-message {
+  max-width: 480px;
 }
 
 .desktop-startup-actions {

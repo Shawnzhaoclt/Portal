@@ -39,6 +39,11 @@ function renderStartupError(error: unknown) {
   )
 }
 
+function isScheduledMaintenance(now = new Date()) {
+  const hour = now.getHours()
+  return hour >= 20 || hour < 5
+}
+
 async function bootstrap() {
   const desktopRuntime = isDesktopRuntime()
   const embeddedResource =
@@ -56,6 +61,17 @@ async function bootstrap() {
     try {
       clearManagementToken()
       await initializeClientSettings()
+      if (isScheduledMaintenance()) {
+        root.render(
+          <StrictMode>
+            <DesktopStartupSplash
+              maintenance
+              onExit={() => void exitDesktopApplication()}
+            />
+          </StrictMode>,
+        )
+        return
+      }
       const startup = await startDesktopSession<PortalUser>()
       const session = startup.session
       if (!session.token) throw new Error('Desktop sign-in did not return a Portal session token.')

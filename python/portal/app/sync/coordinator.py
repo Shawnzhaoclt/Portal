@@ -138,6 +138,8 @@ class DataCoordinator:
                     )
                 self._archive_unverified_database()
                 self._install_snapshot(pointer)
+            elif self._snapshot_replacement_required(installed, pointer):
+                self._install_replacement_snapshot(pointer)
         self.actor_id = self.store.ensure_actor(self.identity)
         self._ensure_shared_actor()
         self.recover()
@@ -156,12 +158,15 @@ class DataCoordinator:
         )
 
     def _archive_unverified_database(self) -> Path:
-        """Preserve a schema-only legacy database before replacing it from snapshot."""
+        """Preserve a baseline-less legacy database before replacement."""
+        return self._archive_database("unverified")
+
+    def _archive_database(self, reason: str) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
         recovery_root = self.database_path.parent / "recovery"
         recovery_root.mkdir(parents=True, exist_ok=True)
         archived = recovery_root / (
-            f"{self.database_path.stem}.unverified-{timestamp}{self.database_path.suffix}"
+            f"{self.database_path.stem}.{reason}-{timestamp}{self.database_path.suffix}"
         )
         os.replace(self.database_path, archived)
         for suffix in ("-wal", "-shm"):
@@ -169,6 +174,27 @@ class DataCoordinator:
             if source.exists():
                 os.replace(source, Path(f"{archived}{suffix}"))
         return archived
+
+    @staticmethod
+    def _snapshot_replacement_required(
+        installed: dict[str, object], pointer: SnapshotPointer
+    ) -> bool:
+        return (
+            installed.get("installed_snapshot_id") != pointer.snapshot_id
+            or installed.get("installed_snapshot_sha256") != pointer.sha256
+            or installed.get("installed_snapshot_epoch_id") != pointer.snapshot_epoch_id
+        )
+
+    def _install_replacement_snapshot(self, pointer: SnapshotPointer) -> None:
+        if self.store.has_pending_outbox():
+            raise SnapshotRequired(
+                "A newer shared schema snapshot is available, but this desktop has "
+                "unpublished local work. Synchronize or resolve that work before "
+                "installing the replacement snapshot."
+            )
+        self._archive_database("superseded")
+        self._install_snapshot(pointer)
+        self.actor_id = None
 
     def status(self) -> dict[str, object]:
         result = self.store.status()
@@ -208,6 +234,13 @@ class DataCoordinator:
         membership = load_membership(self.paths.protocol_root)
         membership.member_for(self.identity)
         pointer = load_snapshot_pointer(self.paths.protocol_root)
+        installed = self.store.installed_snapshot()
+        if self._snapshot_replacement_required(installed, pointer):
+            self._install_replacement_snapshot(pointer)
+            self.actor_id = self.store.ensure_actor(self.identity)
+            self._ensure_shared_actor()
+            self._ensure_registration(pointer, membership)
+            self.recover()
         result = self._sync_epoch(pointer, membership)
         self._last_sync_monotonic = time.monotonic()
         return result
@@ -428,11 +461,17 @@ class DataCoordinator:
                 )
         result: dict[str, int] = {}
         for registration in registrations:
-            result[registration.actor_id] = self._sync_registration(registration)
+            result[registration.actor_id] = self._sync_registration(
+                registration, pointer=pointer
+            )
         return result
 
     def _sync_registration(
-        self, registration: ActorRegistration, *, head: ActorHead | None = None
+        self,
+        registration: ActorRegistration,
+        *,
+        head: ActorHead | None = None,
+        pointer: SnapshotPointer | None = None,
     ) -> int:
         actor_root = self._safe_protocol_path(registration.actor_root_relative_path)
         current_head = head or self._read_head(actor_root / "head.json", registration)
@@ -447,6 +486,16 @@ class DataCoordinator:
             if current_head.generation == old_generation and old_package != new_package:
                 raise ProtocolViolation("An actor head generation was reused with different content.")
         cursor = self.store.cursor(current_head.actor_id)
+        # A log floor is the highest sequence compacted into the current
+        # snapshot. A replica behind it must install that snapshot before it
+        # can safely follow the remaining online package chain.
+        active_pointer = pointer or load_snapshot_pointer(self.paths.protocol_root)
+        log_floor = int(active_pointer.log_floor.get(current_head.actor_id, 0))
+        if cursor < log_floor:
+            raise SnapshotRequired(
+                "The local replica is behind the shared retention floor and must "
+                "install the current shared snapshot before synchronizing."
+            )
         if current_head.highest_published_seq <= cursor:
             self.store.record_observed_head(current_head)
             return cursor

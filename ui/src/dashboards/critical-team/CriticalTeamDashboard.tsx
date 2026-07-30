@@ -88,16 +88,16 @@ type SheetDefinition = {
 }
 
 const DETAIL_COLUMNS = [
-  { key: 'workorder_id', label: 'Work Order ID', placeholder: 'ID', width: '8%' },
-  { key: 'facility_id', label: 'Facility ID', placeholder: 'Facility', width: '7%' },
-  { key: 'condition_risk', label: 'Condition Risk', placeholder: 'Risk', width: '8%' },
-  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter', width: '8%' },
-  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer', width: '8%' },
-  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status', width: '18%' },
-  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD', width: '11%' },
-  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD', width: '13%' },
-  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD', width: '12%' },
-  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD', width: '7%' },
+  { key: 'workorder_id', label: 'Work Order ID', placeholder: 'ID', width: '124px' },
+  { key: 'facility_id', label: 'Facility ID', placeholder: 'Facility', width: '112px' },
+  { key: 'condition_risk', label: 'Condition Risk', placeholder: 'Risk', width: '120px' },
+  { key: 'submit_to', label: 'Submit To', placeholder: 'Submitter', width: '150px' },
+  { key: 'wo_closed_by', label: 'Closed By', placeholder: 'Reviewer', width: '150px' },
+  { key: 'critical_team_status', label: 'Critical Team Status', placeholder: 'Status', width: '220px' },
+  { key: 'project_start_date', label: 'Project Start Date', placeholder: 'YYYY-MM-DD', width: '150px' },
+  { key: 'inspection_complete_date', label: 'Inspection Complete Date', placeholder: 'YYYY-MM-DD', width: '180px' },
+  { key: 'report_complete_date', label: 'Report Complete Date', placeholder: 'YYYY-MM-DD', width: '166px' },
+  { key: 'wo_closed_date', label: 'WO Closed Date', placeholder: 'YYYY-MM-DD', width: '148px' },
 ] as const
 
 type DetailColumnKey = (typeof DETAIL_COLUMNS)[number]['key']
@@ -353,8 +353,6 @@ type ChartBarSegmentLabel = {
   color: string
 }
 
-type ChartViewMode = 'count' | 'percent'
-
 type PeriodLabelGroup = {
   label: string
   startIndex: number
@@ -377,16 +375,6 @@ function formatFixedDecimal(value: number | null | undefined, digits = 2) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   }).format(value)
-}
-
-function formatPercent(value: number | null | undefined) {
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return '-'
-  }
-
-  return `${new Intl.NumberFormat('en-US', {
-    maximumFractionDigits: value > 0 && value < 1 ? 1 : 0,
-  }).format(value)}%`
 }
 
 function labelForValue(value: string) {
@@ -424,6 +412,38 @@ function valueText(value: AssetRow[string], column?: DetailColumnKey) {
     return value.slice(0, 10)
   }
   return value
+}
+
+function formatSourceTimestamp(value: string | null | undefined) {
+  if (!value) return null
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return null
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    month: 'short',
+    day: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZoneName: 'short',
+  }).format(date)
+}
+
+function workOrderStatusClass(value: AssetRow[string]) {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized.includes('review complete')) return 'status-complete'
+  if (normalized.includes('ready for review')) return 'status-review'
+  if (normalized.includes('progress')) return 'status-progress'
+  if (normalized.includes('future') || normalized.includes('scheduled')) return 'status-scheduled'
+  return 'status-default'
+}
+
+function riskBandClass(value: AssetRow[string]) {
+  const risk = typeof value === 'number' ? value : Number(value)
+  if (!Number.isFinite(risk)) return 'risk-default'
+  if (risk >= 80) return 'risk-high'
+  if (risk >= 60) return 'risk-moderate'
+  return 'risk-low'
 }
 
 function parseDatePickerValue(value: string) {
@@ -1126,7 +1146,10 @@ function makeOverviewTrendOption(
     (bucket) => bucket.year,
   )
   const monthLabelInterval = months.length > 30 ? 1 : 0
-  const maxTrendValue = Math.max(0, ...seriesList.flatMap((series) => series.points.map((point) => point.count_value)))
+  const maxTrendValue = Math.max(
+    0,
+    ...seriesList.flatMap((series) => series.points.map((point) => point.self_count + point.other_count)),
+  )
   const boundaryLines = chartBoundaryLines(monthBuckets, maxTrendValue)
   const labelBandRuleSeries: CustomSeriesOption[] =
     months.length > 0
@@ -1236,36 +1259,61 @@ function makeOverviewTrendOption(
           },
         ]
       : []
-  const barSeries: BarSeriesOption[] = seriesList.map((series) => {
-    const lookup = new Map(series.points.map((point) => [point.month_label, point.count_value]))
+  const otherColors: Record<string, string> = {
+    project_started: '#7aa8b6',
+    inspections_completed: '#91abd0',
+    reports_completed: '#f3b873',
+    review_complete: '#ad98cb',
+  }
+  const barSeries: BarSeriesOption[] = seriesList.flatMap((series) => {
+    const selfLookup = new Map(series.points.map((point) => [point.month_label, point.self_count]))
+    const otherLookup = new Map(series.points.map((point) => [point.month_label, point.other_count]))
+    const totalLookup = new Map(
+      series.points.map((point) => [point.month_label, point.self_count + point.other_count]),
+    )
 
-    return {
-      name: series.label,
-      type: 'bar',
-      barMinWidth: 3,
-      barMaxWidth: 28,
-      barGap: '12%',
-      barCategoryGap: '22%',
-      itemStyle: { color: series.color },
-      label: {
-        show: true,
-        position: 'top',
-        distance: 3,
-        color: '#334155',
-        fontSize: 10,
-        fontWeight: 700,
-        formatter: ({ value }) => {
-          const count = Number(value)
-          return count > 0 ? formatNumber(count) : ''
-        },
+    return [
+      {
+        name: `${series.label} - Self`,
+        type: 'bar',
+        stack: series.key,
+        barMinWidth: 3,
+        barMaxWidth: 18,
+        barGap: '12%',
+        barCategoryGap: '22%',
+        itemStyle: { color: series.color },
+        emphasis: { focus: 'series' },
+        data: months.map((month) => selfLookup.get(month) ?? 0),
       },
-      emphasis: { focus: 'series' },
-      data: months.map((month) => lookup.get(month) ?? 0),
-    }
+      {
+        name: `${series.label} - Others`,
+        type: 'bar',
+        stack: series.key,
+        barMinWidth: 3,
+        barMaxWidth: 18,
+        barGap: '12%',
+        barCategoryGap: '22%',
+        itemStyle: { color: otherColors[series.key] ?? '#94a3b8' },
+        label: {
+          show: true,
+          position: 'top',
+          distance: 3,
+          color: '#334155',
+          fontSize: 10,
+          fontWeight: 700,
+          formatter: ({ dataIndex }) => {
+            const count = totalLookup.get(months[Number(dataIndex)]) ?? 0
+            return count > 0 ? formatNumber(count) : ''
+          },
+        },
+        emphasis: { focus: 'series' },
+        data: months.map((month) => otherLookup.get(month) ?? 0),
+      },
+    ]
   })
 
   return {
-    color: seriesList.map((series) => series.color),
+    color: seriesList.flatMap((series) => [series.color, otherColors[series.key] ?? '#94a3b8']),
     animationDuration: 260,
     grid: { top: 62, right: 28, bottom: 72, left: 52, containLabel: true },
     tooltip: { trigger: 'axis', confine: true },
@@ -1275,7 +1323,7 @@ function makeOverviewTrendOption(
       right: 4,
       itemWidth: 10,
       itemHeight: 10,
-      data: seriesList.map((series) => series.label),
+      data: seriesList.flatMap((series) => [`${series.label} - Self`, `${series.label} - Others`]),
       textStyle: { color: '#334155', fontSize: 12, fontWeight: 650 },
       pageButtonPosition: 'end',
       pageIconColor: '#255a8f',
@@ -1307,13 +1355,12 @@ function makeOverviewTrendOption(
   }
 }
 
-function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: ChartViewMode = 'count'): EChartsOption {
+function makeChartOption(data: CriticalTeamSheetResponse | null): EChartsOption {
   const rows = data?.rows ?? []
   const months = [...new Set(rows.map((row) => row.month_label))]
   const groups = [...new Set(rows.map((row) => row.group_name))]
   const lookup = new Map(rows.map((row) => [`${row.month_label}::${row.group_name}`, row.count_value]))
   const groupColumn = data?.sheet.group_column
-  const isPercentMode = viewMode === 'percent'
   const monthTotals = new Map(
     months.map((month) => [
       month,
@@ -1322,10 +1369,9 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
   )
   const chartLookup = new Map<string, number>()
   for (const month of months) {
-    const monthTotal = monthTotals.get(month) ?? 0
     for (const group of groups) {
       const rawValue = lookup.get(`${month}::${group}`) ?? 0
-      chartLookup.set(`${month}::${group}`, isPercentMode && monthTotal > 0 ? (rawValue / monthTotal) * 100 : rawValue)
+      chartLookup.set(`${month}::${group}`, rawValue)
     }
   }
   const monthBuckets = months.map(parseMonthBucket)
@@ -1345,14 +1391,14 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
     0,
     ...months.map((month) => monthTotals.get(month) ?? 0),
   )
-  const maxChartValue = isPercentMode ? 100 : maxMonthTotal
+  const maxChartValue = maxMonthTotal
   const boundaryLines = chartBoundaryLines(monthBuckets, maxChartValue)
   const barSegmentLabels = chartBarSegmentLabels(
     months,
     groups,
     chartLookup,
     groupColumn,
-    (value, month, group) => (isPercentMode ? formatPercent(value) : formatNumber(lookup.get(`${month}::${group}`) ?? 0)),
+    (_value, month, group) => formatNumber(lookup.get(`${month}::${group}`) ?? 0),
   )
   const labelBandRuleSeries: CustomSeriesOption[] =
     months.length > 0
@@ -1527,9 +1573,7 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
     itemStyle: { color: colorForGroup(group, groupColumn, index) },
     data: months.map((month) => {
       const rawValue = lookup.get(`${month}::${group}`) ?? 0
-      const chartValue = chartLookup.get(`${month}::${group}`) ?? 0
-
-      return isPercentMode ? { value: chartValue, rawValue, percent: chartValue } : rawValue
+      return rawValue
     }),
   }))
   const tooltipFormatter = (params: unknown) => {
@@ -1547,13 +1591,8 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
     const month = String(firstItem?.axisValue ?? '')
     const title = String(firstItem?.axisValueLabel ?? monthAxisLabel(month))
     const lines = barItems.map((item) => {
-      const dataItem = item.data && typeof item.data === 'object' ? (item.data as Record<string, unknown>) : {}
-      const rawValue = Number(isPercentMode ? dataItem.rawValue : item.value) || 0
-      const percentValue =
-        Number(isPercentMode ? dataItem.percent : chartLookup.get(`${month}::${item.seriesName ?? ''}`)) || 0
-      const valueLabel = isPercentMode
-        ? `${formatPercent(percentValue)} (${formatNumber(rawValue)})`
-        : formatNumber(rawValue)
+      const rawValue = Number(item.value) || 0
+      const valueLabel = formatNumber(rawValue)
 
       return `${item.marker ?? ''}${escapeXml(item.seriesName ?? '')}: <strong>${valueLabel}</strong>`
     })
@@ -1615,13 +1654,9 @@ function makeChartOption(data: CriticalTeamSheetResponse | null, viewMode: Chart
     ],
     yAxis: {
       type: 'value',
-      name: isPercentMode ? 'Share of work orders' : 'Work orders',
-      max: isPercentMode ? 100 : undefined,
+      name: 'Work orders',
       nameTextStyle: { color: '#64748b', fontWeight: 700 },
-      axisLabel: {
-        color: '#64748b',
-        formatter: isPercentMode ? '{value}%' : undefined,
-      },
+      axisLabel: { color: '#64748b' },
       splitLine: { lineStyle: { color: '#e4ebf1' } },
     },
     series: [...labelBandRuleSeries, ...dividerSeries, ...barSeries, ...barLabelSeries],
@@ -2064,11 +2099,6 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
     })
   }
 
-  function clearDetailColumnFilters() {
-    setDetailPage(1)
-    setDetailColumnFilters(createEmptyDetailColumnFilters())
-  }
-
   function updateDetailPageSize(value: number) {
     setDetailPage(1)
     setDetailPageSize(value)
@@ -2194,6 +2224,7 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
         <SheetBody
           sheet={selectedSheet}
           sheetConfig={sheetConfig}
+          source={source}
           summary={summary}
           overviewData={overviewData}
           sheetData={sheetData}
@@ -2214,7 +2245,6 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
           onDetailNumberFilterChange={updateDetailNumberFilter}
           onDetailCategoryFilterChange={updateDetailCategoryFilter}
           onDetailDateFilterChange={updateDetailDateFilter}
-          onClearDetailColumnFilters={clearDetailColumnFilters}
           onDetailPageSizeChange={updateDetailPageSize}
           onDetailPageChange={setDetailPage}
           onDetailSortChange={updateDetailSort}
@@ -2228,6 +2258,7 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
 function SheetBody({
   sheet,
   sheetConfig,
+  source,
   summary,
   overviewData,
   sheetData,
@@ -2248,7 +2279,6 @@ function SheetBody({
   onDetailNumberFilterChange,
   onDetailCategoryFilterChange,
   onDetailDateFilterChange,
-  onClearDetailColumnFilters,
   onDetailPageSizeChange,
   onDetailPageChange,
   onDetailSortChange,
@@ -2256,6 +2286,7 @@ function SheetBody({
 }: {
   sheet: SheetDefinition
   sheetConfig: CriticalTeamSourceResponse['sheets'][string] | undefined
+  source: CriticalTeamSourceResponse | null
   summary: CriticalTeamSummaryResponse | null
   overviewData: CriticalTeamOverviewResponse | null
   sheetData: CriticalTeamSheetResponse | null
@@ -2278,14 +2309,12 @@ function SheetBody({
   onDetailNumberFilterChange: (column: DetailNumberColumnKey, next: Partial<DetailNumberFilter>) => void
   onDetailCategoryFilterChange: (column: DetailCategoryColumnKey, values: string[]) => void
   onDetailDateFilterChange: (column: DetailDateColumnKey, next: Partial<DetailDateFilter>) => void
-  onClearDetailColumnFilters: () => void
   onDetailPageSizeChange: (value: number) => void
   onDetailPageChange: (page: number) => void
   onDetailSortChange: (column: DetailColumnKey) => void
   onDownloadAllDetails: () => void
 }) {
   const chartRef = useRef<EChartHandle | null>(null)
-  const [chartViewMode, setChartViewMode] = useState<ChartViewMode>('count')
   const filterAction =
     sheet.kind !== 'overview' && sheet.kind !== 'details' ? (
       <FloatingFilterButton
@@ -2303,6 +2332,7 @@ function SheetBody({
       <Overview
         data={overviewData}
         fallbackSummary={summary}
+        sourceTimestamp={source?.metadata.published_at_utc ?? source?.metadata.imported_at_utc}
         filters={overviewFilters}
         options={options}
         onFiltersChange={onOverviewFiltersChange}
@@ -2320,13 +2350,12 @@ function SheetBody({
           description={sheet.description}
           actions={
             <>
-              <ChartViewToggle value={chartViewMode} onChange={setChartViewMode} />
               <ChartExportButton chartRef={chartRef} title={sheet.title} />
               {filterAction}
             </>
           }
         />
-        <EChart ref={chartRef} option={makeChartOption(sheetData, chartViewMode)} height="100%" />
+        <EChart ref={chartRef} option={makeChartOption(sheetData)} height="100%" />
       </section>
     )
   }
@@ -2338,6 +2367,7 @@ function SheetBody({
   return (
     <DetailTable
       details={details}
+      sourceTimestamp={source?.metadata.published_at_utc ?? source?.metadata.imported_at_utc}
       loading={loadingDetails}
       columnFilters={detailColumnFilters}
       pageSize={detailPageSize}
@@ -2345,10 +2375,12 @@ function SheetBody({
       sort={detailSort}
       exporting={exportingDetails}
       options={options}
+      search={filters.search}
+      onSearchChange={(search) => onFiltersChange((current) => ({ ...current, search }))}
       onNumberFilterChange={onDetailNumberFilterChange}
       onCategoryFilterChange={onDetailCategoryFilterChange}
       onDateFilterChange={onDetailDateFilterChange}
-      onClearColumnFilters={onClearDetailColumnFilters}
+      onClearAllFilters={onClearFilters}
       onPageSizeChange={onDetailPageSizeChange}
       onPageChange={onDetailPageChange}
       onSortChange={onDetailSortChange}
@@ -2360,6 +2392,7 @@ function SheetBody({
 function Overview({
   data,
   fallbackSummary,
+  sourceTimestamp,
   filters,
   options,
   onFiltersChange,
@@ -2367,6 +2400,7 @@ function Overview({
 }: {
   data: CriticalTeamOverviewResponse | null
   fallbackSummary: CriticalTeamSummaryResponse | null
+  sourceTimestamp: string | null | undefined
   filters: CriticalTeamOverviewFilters
   options: CriticalTeamFilterOptionsResponse | null
   onFiltersChange: (
@@ -2375,66 +2409,66 @@ function Overview({
   onClearFilters: () => void
 }) {
   const overviewMetrics = data?.metrics
-  const totals = data?.totals
+  const totalMetrics = overviewMetrics?.total
+  const selfMetrics = overviewMetrics?.self
   const dateRangeLabel = overviewDateRangeLabel(filters, data)
-  const totalProjects =
-    totals?.all_time_started_projects ?? fallbackSummary?.workorder_count ?? fallbackSummary?.project_started
-  const allTimeScheduledInspections = totals?.all_time_scheduled_inspections ?? totalProjects
-  const percentDenominator = Math.max(1, allTimeScheduledInspections ?? 0)
+  const sourceTime = formatSourceTimestamp(sourceTimestamp)
+  const totalProjects = totalMetrics?.workorder_count ?? fallbackSummary?.workorder_count ?? fallbackSummary?.project_started
+  const selfProjects = selfMetrics?.workorder_count ?? 0
   const metrics = [
     {
       label: 'Total Work Orders',
-      value: totalProjects,
-      totalValue: null,
-      progressValue: totalProjects,
+      value: selfProjects,
+      totalValue: totalProjects,
+      progressValue: selfProjects,
       icon: <ClipboardList size={20} />,
       tone: 'teal',
     },
     {
       label: 'Inspection Scheduled',
-      value: overviewMetrics?.future_inspection_scheduled,
-      totalValue: totals?.all_time_future_inspection_scheduled,
-      progressValue: totals?.all_time_future_inspection_scheduled,
+      value: selfMetrics?.future_inspection_scheduled,
+      totalValue: totalMetrics?.future_inspection_scheduled,
+      progressValue: selfMetrics?.future_inspection_scheduled,
       icon: <CalendarCheck size={20} />,
       tone: 'blue',
     },
     {
       label: 'Inspection In Progress',
-      value: overviewMetrics?.inspection_in_progress,
-      totalValue: totals?.all_time_inspection_in_progress,
-      progressValue: totals?.all_time_inspection_in_progress,
+      value: selfMetrics?.inspection_in_progress,
+      totalValue: totalMetrics?.inspection_in_progress,
+      progressValue: selfMetrics?.inspection_in_progress,
       icon: <ClipboardClock size={20} />,
       tone: 'slate',
     },
     {
       label: 'On Hold',
-      value: overviewMetrics?.on_hold,
-      totalValue: totals?.all_time_on_hold,
-      progressValue: totals?.all_time_on_hold,
+      value: selfMetrics?.on_hold,
+      totalValue: totalMetrics?.on_hold,
+      progressValue: selfMetrics?.on_hold,
       icon: <CirclePause size={20} />,
       tone: 'violet',
     },
     {
       label: 'Ready For Review',
-      value: overviewMetrics?.ready_for_review,
-      totalValue: totals?.all_time_ready_for_review,
-      progressValue: totals?.all_time_ready_for_review,
+      value: selfMetrics?.ready_for_review,
+      totalValue: totalMetrics?.ready_for_review,
+      progressValue: selfMetrics?.ready_for_review,
       icon: <ClipboardCheck size={20} />,
       tone: 'orange',
     },
     {
       label: 'Revisions Required',
-      value: overviewMetrics?.revisions_required,
-      totalValue: totals?.all_time_revisions_required,
-      progressValue: totals?.all_time_revisions_required,
+      value: selfMetrics?.revisions_required,
+      totalValue: totalMetrics?.revisions_required,
+      progressValue: selfMetrics?.revisions_required,
       icon: <FilePenLine size={20} />,
       tone: 'green',
     },
     {
       label: 'Review Complete',
-      value: overviewMetrics?.review_complete,
-      totalValue: totals?.all_time_review_complete,
-      progressValue: totals?.all_time_review_complete,
+      value: selfMetrics?.review_complete,
+      totalValue: totalMetrics?.review_complete,
+      progressValue: selfMetrics?.review_complete,
       icon: <BadgeCheck size={20} />,
       tone: 'slate',
     },
@@ -2446,7 +2480,7 @@ function Overview({
         <PanelHeader
           icon={<LayoutDashboard size={18} />}
           title="Overview"
-          meta={dateRangeLabel}
+          meta={sourceTime ? `Last available data: ${sourceTime}` : dateRangeLabel}
           actions={
             <OverviewFilterButton
               filters={filters}
@@ -2465,7 +2499,7 @@ function Overview({
               tone={metric.tone}
               totalValue={metric.totalValue}
               value={metric.value}
-              maxValue={percentDenominator}
+              maxValue={Math.max(1, metric.totalValue ?? 0)}
               progressValue={metric.progressValue}
             />
           ))}
@@ -2536,6 +2570,7 @@ function OverviewFiltersPanel({
   ]
   const isAllTime = !filters.dateFrom && !filters.dateTo
   const hideSubmitToFilter = options?.viewer_scope.submit_to_restricted ?? false
+  const hideClosedByFilter = options?.viewer_scope.closed_by_restricted ?? false
 
   return (
     <div className="filter-card">
@@ -2602,46 +2637,19 @@ function OverviewFiltersPanel({
         />
       ) : null}
 
-      <ChecklistFilter
-        icon={<UserRound size={15} />}
-        label="Closed By"
-        values={options?.wo_closed_by ?? []}
-        selected={filters.closedBy}
-        allLabel="All reviewers"
-        onChange={(closedBy) => onChange((current) => ({ ...current, closedBy }))}
-      />
+      {!hideClosedByFilter ? (
+        <ChecklistFilter
+          icon={<UserRound size={15} />}
+          label="Closed By"
+          values={options?.wo_closed_by ?? []}
+          selected={filters.closedBy}
+          allLabel="All reviewers"
+          onChange={(closedBy) => onChange((current) => ({ ...current, closedBy }))}
+        />
+      ) : null}
 
       <button className="clear-button" type="button" onClick={onClear}>
         Reset filters
-      </button>
-    </div>
-  )
-}
-
-function ChartViewToggle({
-  value,
-  onChange,
-}: {
-  value: ChartViewMode
-  onChange: (value: ChartViewMode) => void
-}) {
-  return (
-    <div className="chart-view-toggle" aria-label="Chart view mode" role="group">
-      <button
-        className={value === 'count' ? 'active' : ''}
-        type="button"
-        aria-pressed={value === 'count'}
-        onClick={() => onChange('count')}
-      >
-        Stacked count
-      </button>
-      <button
-        className={value === 'percent' ? 'active' : ''}
-        type="button"
-        aria-pressed={value === 'percent'}
-        onClick={() => onChange('percent')}
-      >
-        100% stacked
       </button>
     </div>
   )
@@ -3427,6 +3435,7 @@ function MultiSelectColumnFilter({
 
 function DetailTable({
   details,
+  sourceTimestamp,
   loading,
   columnFilters,
   pageSize,
@@ -3434,16 +3443,19 @@ function DetailTable({
   sort,
   exporting,
   options,
+  search,
+  onSearchChange,
   onNumberFilterChange,
   onCategoryFilterChange,
   onDateFilterChange,
-  onClearColumnFilters,
+  onClearAllFilters,
   onPageSizeChange,
   onPageChange,
   onSortChange,
   onDownloadAllRows,
 }: {
   details: CriticalTeamWorkordersResponse | null
+  sourceTimestamp: string | null | undefined
   loading: boolean
   columnFilters: DetailColumnFilters
   pageSize: number
@@ -3451,10 +3463,12 @@ function DetailTable({
   sort: DetailSortState
   exporting: boolean
   options: CriticalTeamFilterOptionsResponse | null
+  search: string
+  onSearchChange: (value: string) => void
   onNumberFilterChange: (column: DetailNumberColumnKey, next: Partial<DetailNumberFilter>) => void
   onCategoryFilterChange: (column: DetailCategoryColumnKey, values: string[]) => void
   onDateFilterChange: (column: DetailDateColumnKey, next: Partial<DetailDateFilter>) => void
-  onClearColumnFilters: () => void
+  onClearAllFilters: () => void
   onPageSizeChange: (value: number) => void
   onPageChange: (page: number) => void
   onSortChange: (column: DetailColumnKey) => void
@@ -3467,6 +3481,21 @@ function DetailTable({
   const pageCount = Math.max(1, Math.ceil(total / pageSize))
   const activeColumnFilters = hasActiveDetailFilters(columnFilters)
   const filterCount = activeDetailFilterCount(columnFilters)
+  const [filtersVisible, setFiltersVisible] = useState(false)
+  const [searchDraft, setSearchDraft] = useState(search)
+  const sourceTime = formatSourceTimestamp(sourceTimestamp)
+  const hasActiveFilters = activeColumnFilters || Boolean(search.trim())
+
+  useEffect(() => {
+    setSearchDraft(search)
+  }, [search])
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      if (searchDraft !== search) onSearchChange(searchDraft)
+    }, 260)
+    return () => window.clearTimeout(timer)
+  }, [onSearchChange, search, searchDraft])
 
   function moveToPage(nextPage: number) {
     onPageChange(Math.max(1, Math.min(pageCount, nextPage)))
@@ -3514,14 +3543,39 @@ function DetailTable({
 
   return (
     <section className="sheet-panel table-panel detail-panel work-order-detail-panel">
-      <PanelHeader icon={<ClipboardList size={18} />} title="Work Order Detail" description="Review operational Cityworks work orders, risk, ownership, and milestone dates." meta={`${formatNumber(total)} work orders`} />
+      <PanelHeader
+        icon={<ClipboardList size={18} />}
+        title="Work Order Detail"
+        description={sourceTime ? `Last available data: ${sourceTime}. ${formatNumber(total)} work orders.` : 'Review operational Cityworks work orders, risk, ownership, and milestone dates.'}
+        meta={`${formatNumber(total)} work orders`}
+      />
       <div className="detail-toolbar work-order-detail-toolbar">
-        <div className="work-order-detail-summary" aria-live="polite">
-          <strong>{formatNumber(firstRecord)}-{formatNumber(lastRecord)}</strong>
-          <span>of {formatNumber(total)}</span>
-          {loading ? <span className="table-loading-status">Refreshing...</span> : null}
+        <div className="work-order-search">
+          <Search size={16} aria-hidden="true" />
+          <Input
+            value={searchDraft}
+            onChange={(event) => setSearchDraft(event.target.value)}
+            placeholder="Search work order, facility, submitter, or reviewer"
+            aria-label="Search work orders"
+          />
+          {searchDraft ? (
+            <button type="button" className="search-clear-button" title="Clear search" aria-label="Clear search" onClick={() => setSearchDraft('')}>
+              <X size={15} />
+            </button>
+          ) : null}
         </div>
         <div className="detail-toolbar-actions">
+          <Button
+            variant="outline"
+            size="sm"
+            type="button"
+            className={filtersVisible ? 'table-filter-button active' : 'table-filter-button'}
+            onClick={() => setFiltersVisible((current) => !current)}
+            aria-pressed={filtersVisible}
+          >
+            <Filter size={14} />
+            Filters{filterCount > 0 ? ` (${filterCount})` : ''}
+          </Button>
           <div className="records-per-page">
             <span>Rows</span>
           <Select value={String(pageSize)} onValueChange={(value) => onPageSizeChange(Number(value))}>
@@ -3553,8 +3607,11 @@ function DetailTable({
             size="sm"
             className="clear-table-filters"
             type="button"
-            disabled={!activeColumnFilters}
-            onClick={onClearColumnFilters}
+            disabled={!hasActiveFilters}
+            onClick={() => {
+              setSearchDraft('')
+              onClearAllFilters()
+            }}
           >
             <X size={14} />
             Clear{filterCount > 0 ? ` (${filterCount})` : ''}
@@ -3562,7 +3619,11 @@ function DetailTable({
         </div>
       </div>
       <div className="work-order-filter-status">
-        {activeColumnFilters ? `${filterCount} active filter${filterCount === 1 ? '' : 's'}` : 'All work orders'}
+        <span>
+          <strong>{formatNumber(firstRecord)}-{formatNumber(lastRecord)}</strong> of {formatNumber(total)} work orders
+          {loading ? <span className="table-loading-status">Refreshing...</span> : null}
+        </span>
+        <span>{hasActiveFilters ? `${filterCount + (search.trim() ? 1 : 0)} active filter${filterCount + (search.trim() ? 1 : 0) === 1 ? '' : 's'}` : 'All work orders'}</span>
       </div>
       <div className="table-wrap" aria-busy={loading}>
         <table className="detail-table">
@@ -3611,11 +3672,13 @@ function DetailTable({
                 )
               })}
             </tr>
-            <tr className="column-filter-row">
-              {DETAIL_COLUMNS.map((column) => (
-                <th key={column.key}>{renderColumnFilter(column)}</th>
-              ))}
-            </tr>
+            {filtersVisible ? (
+              <tr className="column-filter-row">
+                {DETAIL_COLUMNS.map((column) => (
+                  <th key={column.key}>{renderColumnFilter(column)}</th>
+                ))}
+              </tr>
+            ) : null}
           </thead>
           <tbody>
             {rows.map((row, index) => {
@@ -3644,9 +3707,11 @@ function DetailTable({
                             {text}
                             <ExternalLink size={12} aria-hidden="true" />
                           </a>
-                        ) : (
-                          text
-                        )}
+                        ) : column.key === 'critical_team_status' && row[column.key] !== null && row[column.key] !== undefined && row[column.key] !== '' ? (
+                          <span className={`work-order-status ${workOrderStatusClass(row[column.key])}`}>{text}</span>
+                        ) : column.key === 'condition_risk' && row[column.key] !== null && row[column.key] !== undefined && row[column.key] !== '' ? (
+                          <span className={`condition-risk-value ${riskBandClass(row[column.key])}`}>{text}</span>
+                        ) : text}
                       </td>
                     )
                   })}

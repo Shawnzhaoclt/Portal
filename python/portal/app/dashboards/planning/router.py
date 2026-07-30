@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 import re
 import sqlite3
 from typing import Any
@@ -95,6 +96,17 @@ PENDING_AIF_SEARCH_COLUMNS = [
 
 def sql_identifier(identifier: str) -> str:
     return duck_identifier(identifier)
+
+
+def pending_aif_source_published_at() -> str | None:
+    """Return the publication time for the immutable source snapshot, when available."""
+    manifest = critical_team_data_source().manifest
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("published_at_utc") if isinstance(payload, dict) else None
+    return str(value).strip() if value else None
 
 
 def normalize_person_lookup_value(value: Any) -> str:
@@ -720,6 +732,7 @@ def pending_aif_rows(
         "total": total,
         "limit": limit,
         "offset": offset,
+        "source_published_at_utc": pending_aif_source_published_at(),
         "link_columns": PENDING_AIF_LINK_COLUMNS,
         "rows": paged_records,
     }

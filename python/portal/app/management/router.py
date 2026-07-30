@@ -35,6 +35,7 @@ from portal.app.management.services import (
     bool_int,
     creates_team_cycle,
     discover_resource_candidates,
+    display_name,
     effective_resource_permission,
     find_login_user,
     get_resource_by_public_id_or_404,
@@ -51,6 +52,7 @@ from portal.app.management.services import (
     serialize_user,
     set_selected_user_role,
     team_ancestor_ids,
+    is_management_admin_session,
     is_system_admin_session,
     combine_permission_masks,
     is_valid_permission_mask,
@@ -177,12 +179,10 @@ def _serialize_featured_resources(current_user: User, db: Session) -> dict:
 
     default_featured: dict[str, list[dict]] = {category: [] for category in FEATURED_CATEGORIES}
     default_configured_categories: set[str] = set()
-    test_access = getattr(current_user, "_portal_test_access", None)
-    featured_team_id = test_access["team_id"] if test_access else current_user.team_id
-    if featured_team_id is not None:
+    if current_user.team_id is not None:
         default_rows = db.scalars(
             select(TeamFeaturedResource)
-            .where(TeamFeaturedResource.team_id == featured_team_id)
+            .where(TeamFeaturedResource.team_id == current_user.team_id)
             .order_by(TeamFeaturedResource.category, TeamFeaturedResource.sort_order, TeamFeaturedResource.id)
         ).all()
         default_featured, default_configured_categories = _serialize_featured_rows(default_rows, db, current_user)
@@ -260,28 +260,40 @@ def _apply_test_access(
     user: User,
     db: Session,
     enabled: str | None,
-    team_id: int | None,
+    user_id: int | None,
     role: str | None,
 ) -> User:
     if str(enabled or "").strip().lower() not in {"1", "true", "yes"}:
         return user
-    if not is_system_admin_session(user):
-        raise HTTPException(status_code=403, detail="Only a System Admin can test access for another team.")
-    if team_id is None:
-        raise HTTPException(status_code=400, detail="A test access team is required.")
-    team = db.get(Team, team_id)
-    if team is None or team.is_active != 1:
-        raise HTTPException(status_code=400, detail="The selected test access team is not active.")
-    if role not in {"user", "admin", "system_admin"}:
-        raise HTTPException(status_code=400, detail="A valid test access role is required.")
-    setattr(user, "_portal_test_access", {"team_id": team.id, "team_name": team.name, "role": role})
-    return user
+    if not is_management_admin_session(user):
+        raise HTTPException(status_code=403, detail="An Admin or System Admin role is required to view another user's access.")
+    if user_id is None:
+        raise HTTPException(status_code=400, detail="A user is required for access preview.")
+
+    preview_user = db.get(User, user_id)
+    if preview_user is None or preview_user.deleted_at is not None or preview_user.is_active != 1:
+        raise HTTPException(status_code=400, detail="The selected preview user is not active.")
+    if role not in available_roles(preview_user):
+        raise HTTPException(status_code=400, detail="The selected role is not available for this user.")
+
+    set_selected_user_role(preview_user, role)
+    setattr(
+        preview_user,
+        "_portal_test_access",
+        {
+            "actor_user_id": user.id,
+            "actor_name": display_name(user),
+            "read_only": True,
+        },
+    )
+    return preview_user
 
 
 def get_current_user(
+    request: Request,
     authorization: str | None = Header(default=None),
     test_access: str | None = Header(default=None, alias="X-Portal-Test-Access"),
-    test_team_id: int | None = Header(default=None, alias="X-Portal-Test-Team-Id"),
+    test_user_id: int | None = Header(default=None, alias="X-Portal-Test-User-Id"),
     test_role: str | None = Header(default=None, alias="X-Portal-Test-Role"),
     db: Session = Depends(get_db),
 ) -> User:
@@ -293,8 +305,15 @@ def get_current_user(
     if payload is None:
         desktop_user = _desktop_current_user(db)
         if desktop_user is not None:
-            set_selected_user_role(desktop_user, "user")
-            return _apply_test_access(desktop_user, db, test_access, test_team_id, test_role)
+            # Desktop authentication is based on the signed-in Windows account.
+            # Do not silently downgrade an Admin or System Admin account before
+            # evaluating access-preview authorization. selected_user_role()
+            # already resolves the user's highest available role when no role
+            # has been explicitly selected for this request.
+            current_user = _apply_test_access(desktop_user, db, test_access, test_user_id, test_role)
+            if getattr(current_user, "_portal_test_access", None) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+                raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
+            return current_user
         if authorization:
             raise HTTPException(status_code=401, detail="Invalid or expired authorization token.")
         raise HTTPException(status_code=401, detail="Missing authorization token.")
@@ -305,7 +324,10 @@ def get_current_user(
     selected_role = str(payload.get("role") or "")
     if selected_role:
         set_selected_user_role(user, selected_role)
-    return _apply_test_access(user, db, test_access, test_team_id, test_role)
+    current_user = _apply_test_access(user, db, test_access, test_user_id, test_role)
+    if getattr(current_user, "_portal_test_access", None) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
+    return current_user
 
 
 def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:

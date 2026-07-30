@@ -86,6 +86,10 @@
   padding: 0 14px;
 }
 
+.cctv-report-toolbar-actions .spin {
+  animation: cctv-report-spin 0.8s linear infinite;
+}
+
 .cctv-report-message {
   margin: 12px 18px 0;
   padding: 10px 12px;

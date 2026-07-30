@@ -16,7 +16,7 @@
 - 增量上传、下载、去重、重试和断点恢复；
 - 属性、几何、删除、唯一约束和业务状态冲突；
 - 版本化快照、初始化、修复和日志归档；
-- 维护工作站的 5 分钟轻量任务、每日快照/审计/备份、周六日志整理和 `maintenance.db`；
+- 维护工作站的 5 分钟轻量任务、每日快照/审计/备份、周五日志整理和 `maintenance.db`；
 - 断网、掉电、磁盘满、进程崩溃和文件损坏时的原子性；
 - 性能、可观测性、用户体验、测试和分阶段实施要求。
 
@@ -312,7 +312,7 @@ stateDiagram-v2
 - `stormwater.db` 是每个客户端自己的可写业务库，内部格式为 GeoPackage 兼容的 SQLite 数据库；
 - `system.db` 是随 App 安装包发布和更新的只读能力库，保存该 App 版本支持的 schema registry、migration 定义、capability、动态表单和通用图层配置；
 - App 运行时以只读/query-only 方式打开 `system.db`，不得在其中保存 actor、cursor、outbox、migration 执行结果、用户配置或其他运行期状态；升级程序可以替换它，业务运行过程不能修改它；
-- `system.db` 表示“该 App 能理解什么”，共享目录的 `schema/current.json` 表示“系统当前启用了什么”；只有 current 指向的 release ID、catalog hash 和 required capabilities 均被本机 `system.db` 支持时，App 才能进入正式保存状态；
+- `system.db` 表示“该 App 能理解什么”，经验证的共享 `snapshots/current.json` 指针及其所指 snapshot 表示“系统当前启用了什么”；只有指针所声明的 release ID、catalog hash 和 required capabilities 均被本机 `system.db` 支持时，App 才能进入正式保存状态；
 - `stormwater.db` 与 `system.db` 使用独立连接，不依赖跨数据库事务；所有必须与业务行原子提交的运行期状态仍放在 `stormwater.db`；
 - `.db` 文件名是产品决定，不满足 GeoPackage 对 `.gpkg` 扩展名的标准命名要求；GDAL/OGR 创建和打开时必须显式指定 `GPKG` 驱动；
 - 普通属性表与矢量要素表允许共存；
@@ -1489,15 +1489,24 @@ safe_prune_seq[actor] = min(
 - 快照及日志已有独立备份；
 - actor 序号连续无缺口；若 actor 已退役，还必须有 membership 声明的最终序号。
 
-维护任务执行实际裁剪，但只能裁剪满足上述条件的连续前缀，不能按目录日期无条件清空，也不能删除当前最新快照之后的新操作。裁剪前先发布、验证并备份最新快照；当晚快照或备份失败则不推进 log floor、不裁剪操作包。裁剪后的快照 coverage 与 current pointer 必须采用先数据、后指针的原子发布顺序。
+周五保留任务执行实际归档，但只能处理满足上述条件的连续前缀，不能按目录日期无条件清空，也不能删除当前最新快照之后的新操作。它采用以下防崩溃顺序：
+
+1. 将每个可达在线操作包首次被工作站观察到的时间写入 `maintenance/retention-observations.json`；首次运行只建立这 7 天观察基线。
+2. 在保留在线原件的前提下，先为每个合格 `.opdb` 创建不可变 archive 副本和独立 backup 副本，并逐个校验 hash。
+3. 为最近 5 个已验证快照创建并验证独立备份。
+4. 在独占 epoch-transition 锁内，发布带有单调递增 `log_floor` 的替换快照；原子替换 `snapshots/current.json` 才是本次归档的权威提交点。
+5. 回读并验证新的 pointer 与快照后，才删除对应的 online 操作包冗余副本；只有在新 pointer 和 5 个保留快照的备份均已通过验证后，才归档较旧快照。
+
+因此，若在 pointer 提交前崩溃，所有 online 操作包仍然可读；若在 pointer 提交后、清理前崩溃，只会遗留可安全重试的冗余 online 文件。自动任务绝不永久删除 archive 或 backup 文件。
 
 建议分为三个生命周期：
 
 | 层级 | 内容 | 处理原则 |
 | --- | --- | --- |
 | online | 最近至少 7 天且仍可增量读取的操作包 | 客户端直接增量读取 |
-| archive | 已被快照覆盖并低于 log floor | 不参与日常扫描，但可恢复和审计 |
-| backup | 独立备份介质中的快照与日志 | 按业务/法规保留策略管理 |
+| archive | 已被快照覆盖并低于 log floor 的操作包，以及冲突所需证据 | 不参与日常扫描，但可恢复和审计 |
+| snapshot | 最近 5 个通过验证且已有独立备份的快照 | 不完整或校验失败的候选不计入保留数量 |
+| backup | 独立备份介质中的快照、操作包、pointer、hash 和冲突证据 | 按业务/法规保留策略管理 |
 
 从 archive 彻底删除必须采用更长保留策略，并至少验证一个覆盖该区间的快照可以成功恢复。操作包通常远小于完整快照，建议“清空”只表示移出在线目录；若审计和存储允许，压缩 archive 应比 7 天保留更久。
 
@@ -1510,6 +1519,19 @@ safe_prune_seq[actor] = min(
 - `compacted` 操作仍保留一段本地去重宽限期；
 - 当前 `field_version_head`、开放冲突、tombstone 和 sync cursor 永远不因日志归档而删除；
 - `applied_operation` 可在安全 coverage 和宽限期后压缩为按 actor 的连续 coverage，但必须保留近期 operation ID 去重窗口。
+
+#### 11.6.1 工作站启用方式
+
+自动归档由 Workstation Manager 的 **Snapshots** 页面管理，而不是由 Portal 客户端执行：
+
+1. 在 `portal.settings.json` 的 `maintenance.businessRetention` 中确认 `enabled=true`、`automaticEnabled=true`，并设置周五 `schedule.time`（默认 `21:00`）；
+2. 在 Workstation Manager 的 **Snapshots** 页面选择 **Retention plan**，先确认当前快照、最近 5 个已验证快照和候选操作包状态；
+3. 在 **Automatic archive** 行选择 **Enable**。应用会为当前 Windows 用户注册 `StormWater Portal Business Retention` 计划任务；
+4. 计划任务到点后仍会再次校验星期、配置、快照、备份、操作包观察期和连续 coverage。任一条件不满足时安全跳过，并在工作站事件日志中记录原因；
+5. 选择 **Disable** 会删除当前 Windows 用户的计划任务。手工立即归档仍需输入当前 snapshot ID 并选择 **Archive eligible**。
+
+便携包同时提供 `coordinator/register-weekly-business-retention-task.bat` 和
+`coordinator/remove-weekly-business-retention-task.bat`，仅作为无人值守部署或故障排查入口；正常维护以 Workstation Manager GUI 为准。
 
 ### 11.7 活跃用户清单的每日维护
 
@@ -1556,7 +1578,7 @@ actor 在新 epoch 再次编辑时，正式保存流程会先完成该 epoch 注
 | --- | --- | --- |
 | 轻量同步/整理/审计 | 每 5 分钟 | 否；增量维护副本、只读检查和报告 |
 | 夜间维护 | 每天低峰窗口 | 是；全量追平、快照、完整检查、备份和活跃清单清理 |
-| 周保留任务 | 每周六 | 是；基于快照、7 天观察和备份证据归档在线操作包并推进 log floor |
+| 周保留任务 | 每周五 21:00 | 是；基于快照、7 天观察和备份证据归档在线操作包并推进 log floor |
 
 轻量审计每次检查：
 
@@ -1672,7 +1694,7 @@ flowchart TB
 | `mw_snapshot` | `snapshot_id`、`schema_release_id`、`database_hash`、`created_run_id`、`published_at`、`verification_state`、`backup_state`、`retention_state` | 快照生成、发布、备份和保留状态 |
 | `mw_snapshot_coverage` | `snapshot_id + actor_id`、`covered_seq`、`log_floor` | 规范化 coverage，避免所有查询解析 JSON |
 | `mw_archive_segment` | `archive_id`、`actor_id`、`first_seq/last_seq`、`content_hash`、`created_run_id`、`backup_state`、`restore_test_state` | 已移出在线目录的连续日志段 |
-| `mw_prune_plan` | `plan_id`、`created_run_id`、`state`、`required_snapshot_id`、`required_backup_id`、`plan_hash` | 周六裁剪计划和审批/执行状态 |
+| `mw_prune_plan` | `plan_id`、`created_run_id`、`state`、`required_snapshot_id`、`required_backup_id`、`plan_hash` | 周五裁剪计划和审批/执行状态 |
 | `mw_prune_item` | `plan_id + actor_id`、`from_seq/to_seq`、`source_paths_hash`、`result_state` | 每个 actor 精确连续前缀，保证可重试 |
 | `mw_audit_finding` | `finding_key`、`category`、`severity`、`subject_id`、`first_seen_run_id`、`last_seen_run_id`、`consecutive_count`、`state`、`details_json` | 聚合同一异常，区分新增、持续、恢复和已确认 |
 | `mw_repair_action` | `repair_id`、`finding_key`、`action_type`、`before_hash`、`after_hash`、`started/finished_at`、`result` | 派生文件自动修复的完整证据 |
@@ -1711,7 +1733,7 @@ INDEX  mw_alert_state(resolved_at, severity)
 
 该任务不得生成快照、推进 log floor、删除 activity marker、移动/删除日志或业务记录。单次任务建议软超时 90 秒、硬超时 180 秒；超过一个周期仍未结束时下个周期不得重入。任务中断后，下一周期依靠本地 observation 和共享不可变文件继续，所有步骤必须幂等。
 
-#### 每天固定低峰窗口：全量同步、快照、完整审计和备份
+#### 每天固定低峰窗口：全量同步、检查点快照和完整审计
 
 1. 取得独占维护租约并创建 `mw_run(job_name=nightly)`；
 2. 在 snapshot 生成开始前取得 epoch-transition 锁，读取当前 epoch registry 和其有效 actor head，记录一个 `high_water[actor]=highest_published_seq`；
@@ -1720,21 +1742,21 @@ INDEX  mw_alert_state(resolved_at, severity)
 5. 对维护副本执行 checkpoint、`quick_check`、`foreign_key_check`、业务约束检查、GeoPackage catalog、geometry/SRS、R-Tree 和规范化数据摘要检查；
 6. 通过 SQLite Backup API 或 `VACUUM INTO` 生成 staging 候选，清除工作站私有 actor/outbox/draft/UI 状态，写入精确 coverage、log floor 和 schema release；
 7. 关闭候选、再次检查、计算 hash，按“`.db.part` -> 最终 `.db` -> `snapshots/current.json` 原子替换”发布不可变快照；期间新 operation 不属于该 snapshot，但可从其 coverage 连续追上；
-8. 把新快照和所需操作包复制到独立备份位置，逐文件复核 hash；备份未验证时不得标记成功，也不得裁剪旧数据；
-9. 更新 epoch registry 审计状态，仅归档已覆盖且超过 7 天保留期的旧 epoch 证据；
-10. 计算但不越权执行下一次安全裁剪计划，更新容量预测、冲突积压和客户端兼容报告；
-11. 发布不可变 nightly 报告并更新 current，提交本地状态后释放租约。
+8. 更新 epoch registry 审计状态，仅归档已覆盖且超过 7 天保留期的旧 epoch 证据；
+9. 计算但不执行下一次安全裁剪计划，更新容量预测、冲突积压和客户端兼容报告；
+10. 发布不可变 nightly 报告并更新 current，提交本地状态后释放租约。
 
 夜间任务不需要全局停止客户端保存。快照表示按 actor 高水位构成的一个已验证连续前缀；运行期间稍后到达的操作仍留在操作包链中，由客户端和下次工作站同步继续处理。只有依赖不完整时才放弃本次快照，绝不能更新 snapshot current pointer。
 
-#### 每周六：归档和在线日志裁剪
+#### 每周五：归档和在线日志裁剪
 
-1. 以前一节成功、已备份的最新快照为覆盖证明；
+1. 为全部保留快照和所需操作包创建并验证独立备份；所有受保护备份验证成功后，才允许执行归档或清理；
 2. 从 `mw_package_observation.first_seen_at` 计算满 7 天的连续前缀；
 3. 生成不可变 prune plan，复核 actor 缺口、退役 final seq、备份和恢复测试状态；
-4. 先把符合条件的操作包移入 archive 并验证，再原子发布新的 log floor；
-5. 任一 actor/文件失败只保守地停止或缩小计划，不能跨缺口继续裁剪；
-6. 发布实际结果；“清空日志”仅表示安全移出 online，不等于立即永久删除 archive。
+4. 先验证 archive 副本，再原子发布 replacement snapshot 与新的 log floor、回读验证，最后只删除 online 冗余副本；
+5. 仅在全部受保护快照备份和对应归档操作包均已验证后，删除超过 90 天的备份文件；
+6. 任一 actor/文件失败只保守地停止或缩小计划，不能跨缺口继续裁剪；
+7. 发布实际结果；“清空日志”仅表示安全移出 online，不等于立即永久删除 archive。
 
 ### 11.13 调度、失败与验收基线
 
@@ -1743,8 +1765,8 @@ INDEX  mw_alert_state(resolved_at, severity)
 | 任务 | 默认计划 | 成功条件 | 失败影响 |
 | --- | --- | --- | --- |
 | `audit-5m` | 每 5 分钟，启动延迟 0～30 秒 | 报告发布，新增操作包已验证并尽可能应用到维护副本 | 不影响客户端实时同步；连续异常告警 |
-| `nightly` | 每天 02:00 | 全量高水位追平、snapshot current 原子提交、独立备份验证、报告发布 | 保留旧快照和操作包，不执行裁剪；快照超过 26 小时告警 |
-| `weekly-retention` | 每周六 03:30，且 nightly 成功后 | 安全连续前缀归档、log floor 原子更新、报告发布 | 不推进 log floor，不删除任何在线操作包 |
+| `nightly` | 每天 02:00 | 全量高水位追平、检查点 snapshot current 原子提交、报告发布 | 保留旧快照和操作包，不创建备份或执行裁剪；快照超过 26 小时告警 |
+| `weekly-retention` | `maintenance.businessRetention.schedule.time` 指定的每周五时间（默认 21:00），且 nightly 成功后 | 创建并验证受保护备份、安全连续前缀归档、log floor 原子更新、清理超过 90 天的备份文件、报告发布 | 不推进 log floor、不删除在线操作包或过期备份 |
 | `verify-backup` | 每周或每月 | 从备份在隔离目录恢复并通过完整性/摘要检查 | 阻止对应备份成为裁剪依据并告警 |
 
 统一失败规则：
@@ -1843,7 +1865,7 @@ App 每次启动依次执行：
 
 ### 13.3 Schema Registry
 
-工作站通过 `schema/releases/<version>-<sha256>/` 原子发布不可变 schema release，`schema/current.json` 只作为全局启用版本的原子指针。release 至少包含 manifest、catalog、迁移计划和 `ready`。共享 release 中的 `catalog.json` 是跨客户端激活和审计用的规范化描述，其 release ID/hash 必须与 App 随包 `system.db` 中对应 registry 的确定性导出完全一致；客户端不直接从共享盘打开或修改一个公共 `system.db`。
+随 App 发布的只读 `system.db` 是经批准的 schema registry。工作站使用其中白名单化的 baseline 和 migration handler 构建已验证的不可变 snapshot，把选定的 release ID 和 catalog hash 写入该 snapshot，并原子替换 `snapshots/current.json` 使其生效。系统不维护可写的共享 `system.db`、`schema/current.json` 或 `ready` 标记；客户端绝不直接打开或修改共享 schema catalog。
 
 每张可同步表在 `catalog.json` 中显式声明：
 
@@ -1901,7 +1923,7 @@ App 每次启动依次执行：
 1. 在测试环境生成 schema release、迁移计划、测试快照和 golden operation；
 2. 先发布带有新版只读 `system.db`、能够识别新 schema、但尚不产生新字段操作的 App 版本；
 3. 工作站确认在线客户端 acknowledgement 满足 `min_app_version/required_capabilities`；
-4. 原子发布 release 目录及 `ready`，最后原子替换 `schema/current.json`；
+4. 发布已验证的不可变 snapshot，并原子替换 `snapshots/current.json` 以启用新的 schema epoch；
 5. App 启动、后台刷新和每次保存前同步屏障都先检查 schema current，并将共享 catalog hash 与随包 `system.db` 中的 release 交叉验证；
 6. 发现升级时停止新 commit，等待本地事务结束，保留 local draft/prepared，并验证完整迁移链；
 7. 简单兼容 DDL 在本地事务中迁移；复杂重建在临时数据库副本上完成并走与快照换库相同的验证/原子交换流程；
@@ -1911,17 +1933,30 @@ App 每次启动依次执行：
 
 复杂迁移不得把任意共享目录 SQL 当作脚本直接执行。优先使用声明式、白名单化 migration 操作；必须使用自定义 SQL 时，它应随受信任 App/维护工具发布，或由签名且哈希固定的管理 release 提供。
 
-### 13.6 兼容性与未知结构
+### 13.6 工作站发布共享快照
+
+工作站管理器是共享数据的权威维护工具。它绝不打开、以变更目的校验或修改任何 Portal Desktop 安装目录中的本地 `stormwater.db`。
+
+1. 操作人员选择经批准的 baseline 或 migration，并确认工作站管理器显示的当前共享 snapshot ID。
+2. 工作站读取 `snapshots/current.json`，校验其指向的 snapshot 和 membership release，然后独占取得 `epoch-transition.lck`。客户端正式保存以共享方式取得同一把锁，因此 epoch 切换期间不会有保存基于旧 epoch 发布。
+3. 工作站把当前共享 snapshot 复制为临时候选库，并使用随包发布的 Python `DataCoordinator` reducer，重放当前 epoch 中每个已注册活跃 actor 的 head。
+4. 它只执行只读 `system.db` 中随程序发布且受信任的 baseline/migration handler，然后校验 SQLite `quick_check`、外键、catalog fingerprint，以及适用时的 GeoPackage 检查。
+5. 发布前，候选库只移除设备本地的身份、outbox、draft 和 UI 状态；必须保留 reducer 后续计算所需的确定性操作历史、received-package 状态、物化实体和冲突状态。随后写入精确 actor coverage 和新的 snapshot epoch。
+6. 候选 snapshot 校验成功后先发布为新的不可变文件，并创建新的空 epoch registry；最后才原子替换 `snapshots/current.json`。只有替换该指针才使新的 schema snapshot 成为权威版本。
+7. Desktop 在启动或增量同步时发现新的 pointer。仅当本地没有未终结 outbox 时，才会先归档旧本地副本并安装替换库；若存在未发布工作，则阻止正式编辑直到完成协调，绝不静默覆盖。
+8. 不成功 release 的恢复方式是发布一份单独验证过的前向 snapshot。工作站不得把 current snapshot 直接覆盖或删除来实现回滚。
+
+### 13.7 兼容性与未知结构
 
 - 优先使用 expand-and-contract：先增加兼容表/字段，再切换写入，最后在后续版本删除旧结构；
 - `system.db` 缺失、无法只读打开、产品 ID/内部结构错误或 registry hash 不匹配时，App 必须停止业务模式并提示修复/重装，不能退化成“忽略新表继续保存”；
-- 一个新版 `system.db` 可以同时携带若干历史及当前 release，便于滚动升级和安全迁移，但只有共享 `schema/current.json` 指向的 release 才是当前可写目标；
+- 一个新版 `system.db` 可以同时携带若干历史及当前 release，便于滚动升级和安全迁移，但只有共享 `snapshots/current.json` 所指 snapshot 中声明的 release 才是当前可写目标；
 - 操作包内嵌 metadata 和 snapshot DB 内部 metadata 必须同时携带 `schema_version/schema_release_id/min_app_version`；
 - 老客户端遇到未知 table_id、field_id、value type 或 schema release 时，必须停止业务模式并 deferred/quarantine，不能跳过后推进 terminal cursor；
 - 不能理解新字段的客户端不得把记录按旧 revision 保存，否则可能覆盖新数据；
 - 改变字段语义、几何类型、SRS、冲突策略或保存互斥范围都属于显式 schema migration；
 - 快照 manifest 声明精确 schema release 和允许的迁移路径；
-- schema current 损坏或 release 缺少 ready/hash 时，客户端继续保留最后一个已验证 catalog，但禁止正式保存，直到重新验证当前 schema；
+- `snapshots/current.json` 损坏、所指 snapshot 缺失或 hash 不匹配时，客户端继续保留最后一个已验证 catalog，但禁止正式保存，直到重新验证当前 schema；
 - 协议发布前必须测试新旧 App、旧快照、新 schema 和跨版本 operation 的组合场景。
 
 ## 14. 性能设计
@@ -2080,7 +2115,7 @@ App 必须明确显示：
 - `system.db` 缺失、被替换、hash 不匹配和 App 更新中断；
 - 5 分钟与夜间任务重叠、维护租约持有进程崩溃、`maintenance.db` 损坏和维护副本重建；
 - nightly 采样 high-water 期间仍有客户端发布、snapshot `.db` 发布与 current pointer 原子替换各步骤崩溃；
-- 周六归档中途断电、备份 hash 失败和 log floor 指针更新失败。
+- 周五归档中途断电、备份 hash 失败和 log floor 指针更新失败。
 
 ### 19.3 收敛测试
 
@@ -2158,7 +2193,7 @@ App 必须明确显示：
 - 实现新客户端初始化和已有客户端安全换库；
 - 实现每 5 分钟维护副本增量同步、轻量审计、不可变报告和派生索引修复；
 - 实现每日全量高水位追平、快照、完整性检查、独立备份和活跃清单维护；
-- 实现周六安全裁剪计划、日志归档、log floor 发布、备份恢复、指标和诊断工具；
+- 实现周五安全裁剪计划、日志归档、log floor 发布、备份恢复、指标和诊断工具；
 - 完成 100 在线/20 编辑的系统验收。
 
 ### Phase 6：后续增强
@@ -2198,3 +2233,11 @@ App 必须明确显示：
 - [Microsoft LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
 - [Microsoft SMB2 Handling Loss of a Connection](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/eb5bfe99-47fe-4e87-8e87-08a084dcefb6)
 - [Microsoft SMB2 Durable Handle Request V2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/5e361a29-81a7-4774-861d-f290ea53a00e)
+
+### 工作站归档与清理操作
+
+业务数据归档/清理只能通过 Workstation Manager 的 **Snapshots** 页面执行。该策略默认不自动启用：在 `Portal-Desktop/config/portal.settings.json` 中将 `maintenance.businessRetention.enabled` 和 `maintenance.businessRetention.automaticEnabled` 设置为 `true`，然后在 **Automatic archive** 区域点击 **Enable**，为当前 Windows 用户注册任务计划程序任务。默认计划为每周五本地时间 21:00。
+
+同一页面也管理可选的夜间维护任务。已部署的 `snapshot.nightly.run` 协调器任务每天本地时间 02:00 执行，发布一个已验证的检查点快照并验证一份独立备份；它不会归档在线操作包。
+
+首次运行前先点击 **Retention plan**。它会记录当前可达操作包的首次工作站观察时间；这些操作包至少在线保留七个已观察日。点击 **Archive eligible** 后，系统会先验证备份、发布替换快照、将符合条件的在线 `.opdb` 包移入共享归档和备份目录，最后才移除在线副本。系统始终至少保留五份验证通过的快照，且不会自动永久删除已归档或备份的文件。工作站任务历史日志保留七天。在 Workstation Manager 的 **Snapshots** 页面，可在 **Retention policy** 中设置“在线操作包保留天数”和“已验证快照保留份数”，然后点击 **Save policy** 保存。数值可以提高，但安全下限分别为七天和五份验证通过的快照；手动归档和计划任务都会使用该已保存策略。

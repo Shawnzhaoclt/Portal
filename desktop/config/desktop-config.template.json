@@ -68,7 +68,25 @@
                         "pipeVideoRoot":  "P:\\Pipe_video\\IT Pipes\\mainline"
                     },
     "maintenance":  {
-                        "mapSourceRoot":  ""
+                        "mapSourceRoot":  "",
+                        "businessRetention":  {
+                                                  "enabled":  true,
+                                                  "automaticEnabled":  true,
+                                                  "operationOnlineDays":  7,
+                                                  "verifiedSnapshotCount":  5,
+                                                  "backupRetentionDays":  90,
+                                                  "schedule":  {
+                                                                   "dayOfWeek":  "Friday",
+                                                                   "time":  "21:00"
+                                                               }
+                                              },
+                        "nightlyBusinessMaintenance":  {
+                                                           "enabled":  true,
+                                                           "automaticEnabled":  true,
+                                                           "schedule":  {
+                                                                            "time":  "02:00"
+                                                                        }
+                                                       }
                     },
     "externalServices":  {
                              "cityworks":  {

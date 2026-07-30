@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -620,9 +621,20 @@ def critical_team_filter_sql(
     return (f"WHERE {' AND '.join(clauses)}" if clauses else "", params)
 
 
+def critical_team_source_published_at(source: CriticalTeamDataSource) -> str | None:
+    """Return the publication timestamp from the configured source manifest."""
+    try:
+        payload = json.loads(source.manifest.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    value = payload.get("published_at_utc") if isinstance(payload, dict) else None
+    return str(value).strip() if value else None
+
+
 @router.get("/source")
 def critical_team_source() -> dict[str, Any]:
     source = critical_team_data_source()
+    published_at = critical_team_source_published_at(source)
     with critical_team_connection() as con:
         cursor = con.cursor()
         row_count = cursor.execute(
@@ -642,7 +654,8 @@ def critical_team_source() -> dict[str, Any]:
             "source_database": str(source.database),
             "source_tables": source.source_tables,
             "row_count": row_count,
-            "imported_at_utc": datetime.now(timezone.utc).isoformat(),
+            "imported_at_utc": published_at or datetime.now(timezone.utc).isoformat(),
+            "published_at_utc": published_at,
         }
 
     return {
@@ -704,15 +717,17 @@ def critical_team_overview(
 ) -> dict[str, Any]:
     source = critical_team_data_source()
     start_date, end_date = critical_team_overview_dates(date_from, date_to)
-    effective_submit_to = scoped_submit_to_values(
-        db,
-        current_user,
-        submit_to,
-        apply_scope=True,
-    )
+    person_restricted, _scoped_submit_to = critical_team_submit_to_scope(db, current_user)
+    viewer_first_name = str(current_user.first_name or "").strip()
+    viewer_last_name = str(current_user.last_name or "").strip()
+    viewer_submit_to = f"{viewer_last_name}, {viewer_first_name}" if viewer_first_name and viewer_last_name else ""
+    # The overview deliberately exposes aggregate team totals alongside the current
+    # user's contribution. Detail endpoints continue to apply the user-only scope.
+    effective_submit_to = None if person_restricted else submit_to
+    effective_closed_by = None if person_restricted else closed_by
     person_where_sql, person_params = critical_team_person_filter_sql(
         submit_to=effective_submit_to,
-        closed_by=closed_by,
+        closed_by=effective_closed_by,
     )
     filtered_cte = f"""
         {critical_team_source_cte(source)},
@@ -724,6 +739,12 @@ def critical_team_overview(
             FROM critical_team_workorders
             CROSS JOIN parameters
             {person_where_sql}
+        ),
+        scoped AS (
+            SELECT
+                filtered.*,
+                CASE WHEN submit_to = ? THEN 1 ELSE 0 END AS is_self
+            FROM filtered
         )
     """
     base_params: list[Any] = [
@@ -731,6 +752,7 @@ def critical_team_overview(
         start_date.isoformat() if start_date else None,
         end_date.isoformat() if end_date else None,
         *person_params,
+        viewer_submit_to or "",
     ]
 
     with critical_team_connection() as con:
@@ -740,39 +762,77 @@ def critical_team_overview(
             f"""
             {filtered_cte}
             SELECT
-                COUNT(*) AS row_count,
-                COUNT(DISTINCT workorder_id) AS workorder_count,
+                COUNT(CASE WHEN is_self = 1 THEN 1 END) AS self_row_count,
+                COUNT(*) AS total_row_count,
+                COUNT(DISTINCT CASE WHEN is_self = 1 THEN workorder_id END) AS self_workorder_count,
+                COUNT(DISTINCT workorder_id) AS total_workorder_count,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'Future Inspection Scheduled'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_future_inspection_scheduled,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'Future Inspection Scheduled'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS future_inspection_scheduled,
+                END) AS total_future_inspection_scheduled,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'Inspection In Progress'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_inspection_in_progress,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'Inspection In Progress'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS inspection_in_progress,
+                END) AS total_inspection_in_progress,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'On Hold'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_on_hold,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'On Hold'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS on_hold,
+                END) AS total_on_hold,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'Ready For Review'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_ready_for_review,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'Ready For Review'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS ready_for_review,
+                END) AS total_ready_for_review,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'Revisions Required'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_revisions_required,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'Revisions Required'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS revisions_required,
+                END) AS total_revisions_required,
+                COUNT(DISTINCT CASE
+                    WHEN is_self = 1
+                    AND critical_team_status = 'Review Complete'
+                    AND ({overview_project_scope_predicate()})
+                    THEN workorder_id
+                END) AS self_review_complete,
                 COUNT(DISTINCT CASE
                     WHEN critical_team_status = 'Review Complete'
                     AND ({overview_project_scope_predicate()})
                     THEN workorder_id
-                END) AS review_complete
-            FROM filtered
+                END) AS total_review_complete
+            FROM scoped
             """,
             base_params,
         )
@@ -781,15 +841,23 @@ def critical_team_overview(
             f"""
             {filtered_cte}
             SELECT
-                COUNT(DISTINCT workorder_id) AS all_time_started_projects,
-                COUNT(DISTINCT workorder_id) AS all_time_scheduled_inspections,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'Future Inspection Scheduled' THEN workorder_id END) AS all_time_future_inspection_scheduled,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'Inspection In Progress' THEN workorder_id END) AS all_time_inspection_in_progress,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'On Hold' THEN workorder_id END) AS all_time_on_hold,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'Ready For Review' THEN workorder_id END) AS all_time_ready_for_review,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'Revisions Required' THEN workorder_id END) AS all_time_revisions_required,
-                COUNT(DISTINCT CASE WHEN critical_team_status = 'Review Complete' THEN workorder_id END) AS all_time_review_complete
-            FROM filtered
+                COUNT(DISTINCT CASE WHEN is_self = 1 THEN workorder_id END) AS self_all_time_started_projects,
+                COUNT(DISTINCT workorder_id) AS total_all_time_started_projects,
+                COUNT(DISTINCT CASE WHEN is_self = 1 THEN workorder_id END) AS self_all_time_scheduled_inspections,
+                COUNT(DISTINCT workorder_id) AS total_all_time_scheduled_inspections,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'Future Inspection Scheduled' THEN workorder_id END) AS self_all_time_future_inspection_scheduled,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Future Inspection Scheduled' THEN workorder_id END) AS total_all_time_future_inspection_scheduled,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'Inspection In Progress' THEN workorder_id END) AS self_all_time_inspection_in_progress,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Inspection In Progress' THEN workorder_id END) AS total_all_time_inspection_in_progress,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'On Hold' THEN workorder_id END) AS self_all_time_on_hold,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'On Hold' THEN workorder_id END) AS total_all_time_on_hold,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'Ready For Review' THEN workorder_id END) AS self_all_time_ready_for_review,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Ready For Review' THEN workorder_id END) AS total_all_time_ready_for_review,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'Revisions Required' THEN workorder_id END) AS self_all_time_revisions_required,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Revisions Required' THEN workorder_id END) AS total_all_time_revisions_required,
+                COUNT(DISTINCT CASE WHEN is_self = 1 AND critical_team_status = 'Review Complete' THEN workorder_id END) AS self_all_time_review_complete,
+                COUNT(DISTINCT CASE WHEN critical_team_status = 'Review Complete' THEN workorder_id END) AS total_all_time_review_complete
+            FROM scoped
             """,
             base_params,
         )
@@ -807,9 +875,10 @@ def critical_team_overview(
                     ? AS color,
                     {sql_identifier(date_column)} AS event_date,
                     workorder_id,
+                    is_self,
                     date_from,
                     date_to
-                FROM filtered
+                FROM scoped
                 WHERE {sql_identifier(date_column)} IS NOT NULL
                 {status_sql}
                 """
@@ -835,7 +904,8 @@ def critical_team_overview(
                 color,
                 date(event_date, 'start of month') AS month_start,
                 strftime('%Y-%m', event_date) AS month_label,
-                COUNT(DISTINCT workorder_id) AS count_value
+                COUNT(DISTINCT CASE WHEN is_self = 1 THEN workorder_id END) AS self_count,
+                COUNT(DISTINCT CASE WHEN is_self = 0 THEN workorder_id END) AS other_count
             FROM events
             WHERE (date_from IS NULL OR date(event_date) >= date_from)
               AND (date_to IS NULL OR date(event_date) <= date_to)
@@ -860,9 +930,33 @@ def critical_team_overview(
             {
                 "month_start": record["month_start"],
                 "month_label": record["month_label"],
-                "count_value": record["count_value"],
+                "self_count": record["self_count"],
+                "other_count": record["other_count"],
             }
         )
+
+    metric_record = clean_record(dict(zip(metric_names, metric_row)))
+    total_record = clean_record(dict(zip(total_names, total_row)))
+    metric_fields = [
+        "row_count",
+        "workorder_count",
+        "future_inspection_scheduled",
+        "inspection_in_progress",
+        "on_hold",
+        "ready_for_review",
+        "revisions_required",
+        "review_complete",
+    ]
+    total_fields = [
+        "all_time_started_projects",
+        "all_time_scheduled_inspections",
+        "all_time_future_inspection_scheduled",
+        "all_time_inspection_in_progress",
+        "all_time_on_hold",
+        "all_time_ready_for_review",
+        "all_time_revisions_required",
+        "all_time_review_complete",
+    ]
 
     return {
         "filters": {
@@ -870,8 +964,14 @@ def critical_team_overview(
             "date_to": end_date.isoformat() if end_date else "",
             "submit_to": effective_submit_to or [],
         },
-        "metrics": clean_record(dict(zip(metric_names, metric_row))),
-        "totals": clean_record(dict(zip(total_names, total_row))),
+        "metrics": {
+            "self": {field: metric_record[f"self_{field}"] for field in metric_fields},
+            "total": {field: metric_record[f"total_{field}"] for field in metric_fields},
+        },
+        "totals": {
+            "self": {field: total_record[f"self_{field}"] for field in total_fields},
+            "total": {field: total_record[f"total_{field}"] for field in total_fields},
+        },
         "series": list(points_by_series.values()),
     }
 
@@ -953,17 +1053,34 @@ def critical_team_sheet_data(
     sheet = critical_team_sheet(sheet_id)
     date_column = CRITICAL_TEAM_DATE_COLUMNS[sheet["date_key"]]
     group_column = sheet["group_column"]
-    effective_submit_to = scoped_submit_to_values(
-        db,
-        current_user,
-        submit_to,
-        apply_scope=sheet_id in SUBMIT_TO_SCOPED_SHEET_IDS,
+    person_restricted, scoped_person_name = critical_team_submit_to_scope(db, current_user)
+    comparison_mode = person_restricted and (
+        sheet_id in SUBMIT_TO_SCOPED_SHEET_IDS or sheet_id in CLOSED_BY_SCOPED_SHEET_IDS
     )
-    effective_closed_by = scoped_closed_by_value(
-        db,
-        current_user,
-        closed_by,
-        apply_scope=sheet_id in CLOSED_BY_SCOPED_SHEET_IDS,
+
+    # Restricted users may see their own contribution and the team total, but
+    # never another person's identity.  The chart therefore aggregates the
+    # normal team result into the two safe buckets below instead of applying
+    # the usual user-only detail filter.
+    effective_submit_to = (
+        None
+        if comparison_mode
+        else scoped_submit_to_values(
+            db,
+            current_user,
+            submit_to,
+            apply_scope=sheet_id in SUBMIT_TO_SCOPED_SHEET_IDS,
+        )
+    )
+    effective_closed_by = (
+        None
+        if comparison_mode
+        else scoped_closed_by_value(
+            db,
+            current_user,
+            closed_by,
+            apply_scope=sheet_id in CLOSED_BY_SCOPED_SHEET_IDS,
+        )
     )
     where_sql, params = critical_team_filter_sql(
         sheet,
@@ -984,9 +1101,15 @@ def critical_team_sheet_data(
             f"CASE WHEN {sql_identifier(date_column)} IS NULL THEN 'No Date' "
             f"ELSE strftime('%Y-%m', {sql_identifier(date_column)}) END"
         )
-        group_expression = (
-            f"COALESCE(NULLIF(LTRIM(RTRIM(CAST({sql_identifier(group_column)} AS varchar(4000)))), ''), 'Unassigned')"
-        )
+        if comparison_mode and scoped_person_name:
+            group_expression = (
+                f"CASE WHEN LTRIM(RTRIM(CAST({sql_identifier(group_column)} AS varchar(4000)))) = ? "
+                "THEN 'Self' ELSE 'Others' END"
+            )
+        else:
+            group_expression = (
+                f"COALESCE(NULLIF(LTRIM(RTRIM(CAST({sql_identifier(group_column)} AS varchar(4000)))), ''), 'Unassigned')"
+            )
         names, rows = fetch_all(
             cursor,
             f"""
@@ -1007,12 +1130,21 @@ def critical_team_sheet_data(
                 {month_start_expression},
                 {group_expression}
             """,
-            [*critical_team_base_params(source), *params],
+            [
+                *critical_team_base_params(source),
+                # group_expression occurs before the WHERE clause in SELECT,
+                # then after it in GROUP BY and ORDER BY. SQLite binds every
+                # placeholder occurrence in textual order.
+                *([scoped_person_name] if comparison_mode and scoped_person_name else []),
+                *params,
+                *([scoped_person_name] * 2 if comparison_mode and scoped_person_name else []),
+            ],
         )
 
     return {
         "sheet_id": sheet_id,
         "sheet": sheet,
+        "comparison_mode": comparison_mode,
         "rows": [clean_record(dict(zip(names, row))) for row in rows],
     }
 

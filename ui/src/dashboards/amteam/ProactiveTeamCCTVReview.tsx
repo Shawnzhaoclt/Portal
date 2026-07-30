@@ -28,6 +28,7 @@ import {
   fetchMe,
   fetchCctvReviewReportEvents,
   fetchCctvReviewReports,
+  pullBusinessDataNow,
   updateCctvReviewReportStatus,
   storedManagementUser,
   type CctvReviewReportEvent,
@@ -634,9 +635,12 @@ export default function ProactiveTeamCCTVReview() {
   const [eventModal, setEventModal] = useState<EventModalState | null>(null)
   const [downloadingReportId, setDownloadingReportId] = useState<number | null>(null)
 
-  async function loadReports() {
+  async function loadReports(options: { forceSync?: boolean } = {}) {
     setLoading(true)
     try {
+      if (options.forceSync) {
+        await pullBusinessDataNow()
+      }
       const cachedUser = isDesktopRuntime() ? storedManagementUser() : null
       const [meResponse, reportsResponse] = await Promise.all([
         cachedUser ? Promise.resolve({ user: cachedUser }) : fetchMe(),
@@ -644,6 +648,7 @@ export default function ProactiveTeamCCTVReview() {
       ])
       setCurrentUser(meResponse.user)
       setReports(reportsResponse.reports)
+      if (options.forceSync) toast.success('Report data refreshed from the shared repository.')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load reports.'
       toast.error(message)
@@ -979,8 +984,12 @@ export default function ProactiveTeamCCTVReview() {
             <h1>Proactive Team CCTV Review</h1>
           </div>
           <div className="cctv-report-toolbar-actions">
-            <button onClick={loadReports} type="button">
-              <RefreshCw size={16} /> Refresh
+            <button
+              disabled={loading}
+              onClick={() => { void loadReports({ forceSync: true }) }}
+              type="button"
+            >
+              {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />} Refresh
             </button>
             <button className="primary" onClick={() => setCreateModalOpen(true)} type="button">
               <Plus size={17} /> New Report

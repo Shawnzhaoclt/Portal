@@ -312,39 +312,6 @@
   font-weight: 760;
 }
 
-.chart-view-toggle {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, auto));
-  align-items: center;
-  overflow: hidden;
-  border: 1px solid rgba(185, 199, 219, 0.66);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.64);
-}
-
-.chart-view-toggle button {
-  min-height: 34px;
-  border: 0;
-  border-radius: 0;
-  padding: 0 11px;
-  background: transparent;
-  color: #5e697b;
-  font-size: 12px;
-  font-weight: 780;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.chart-view-toggle button + button {
-  border-left: 1px solid rgba(185, 199, 219, 0.66);
-}
-
-.chart-view-toggle button:hover,
-.chart-view-toggle button.active {
-  color: var(--brand-blue);
-  background: color-mix(in srgb, var(--brand-blue) 12%, transparent);
-}
-
 .chart-export-popover {
   width: 156px;
   padding: 6px;
@@ -1061,6 +1028,36 @@ tbody tr:hover {
   padding: 8px 0;
 }
 
+.work-order-search {
+  display: grid;
+  grid-template-columns: 18px minmax(220px, 460px) 20px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  color: var(--panel-muted);
+}
+
+.work-order-search input {
+  min-width: 0;
+  height: 32px;
+}
+
+.search-clear-button {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 0;
+  padding: 0;
+  color: var(--panel-muted);
+  background: transparent;
+}
+
+.search-clear-button:hover,
+.search-clear-button:focus-visible {
+  color: var(--brand-blue);
+}
+
 .work-order-detail-summary {
   display: flex;
   align-items: baseline;
@@ -1083,10 +1080,15 @@ tbody tr:hover {
   display: flex;
   min-height: 30px;
   align-items: center;
-  justify-content: flex-end;
+  justify-content: space-between;
+  gap: 12px;
   color: var(--panel-muted);
   font-size: 11px;
   font-weight: 750;
+}
+
+.work-order-filter-status strong {
+  color: var(--panel-text);
 }
 
 .work-order-detail-panel .detail-table tbody tr {
@@ -1097,6 +1099,49 @@ tbody tr:hover {
   position: sticky;
   top: 0;
   z-index: 3;
+}
+
+.work-order-detail-panel .detail-table {
+  min-width: 1518px;
+}
+
+.work-order-detail-panel .detail-table th:nth-child(1),
+.work-order-detail-panel .detail-table td:nth-child(1) {
+  position: sticky;
+  left: 0;
+}
+
+.work-order-detail-panel .detail-table th:nth-child(2),
+.work-order-detail-panel .detail-table td:nth-child(2) {
+  position: sticky;
+  left: 124px;
+}
+
+.work-order-detail-panel .detail-table th:nth-child(3),
+.work-order-detail-panel .detail-table td:nth-child(3) {
+  position: sticky;
+  left: 236px;
+  box-shadow: 2px 0 0 #d6e0ea;
+}
+
+.work-order-detail-panel .detail-table thead th:nth-child(-n + 3) {
+  z-index: 5;
+}
+
+.work-order-detail-panel .detail-table tbody td:nth-child(-n + 3) {
+  z-index: 1;
+}
+
+.work-order-detail-panel .detail-table tbody tr:nth-child(even) td:nth-child(-n + 3) {
+  background: #f8fbfd;
+}
+
+.work-order-detail-panel .detail-table tbody tr:nth-child(odd) td:nth-child(-n + 3) {
+  background: #ffffff;
+}
+
+.work-order-detail-panel .detail-table tbody tr:not(.selected-row):hover td:nth-child(-n + 3) {
+  background: #edf7f9;
 }
 
 .work-order-detail-panel .detail-table thead .column-filter-row th {
@@ -1124,6 +1169,18 @@ tbody tr:hover {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.table-filter-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.table-filter-button.active {
+  border-color: var(--brand-blue);
+  color: var(--brand-blue);
+  background: #eef6fc;
 }
 
 .records-per-page span,
@@ -1163,6 +1220,56 @@ tbody tr:hover {
   color: var(--subtle);
   background: #f3f6f8;
   cursor: not-allowed;
+}
+
+.work-order-status,
+.condition-risk-value {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 7px;
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1.15;
+  white-space: normal;
+}
+
+.work-order-status.status-complete {
+  color: #17623d;
+  background: #e8f5ec;
+}
+
+.work-order-status.status-review {
+  color: #8a4c09;
+  background: #fff3db;
+}
+
+.work-order-status.status-progress {
+  color: #1a5189;
+  background: #e8f1fb;
+}
+
+.work-order-status.status-scheduled,
+.work-order-status.status-default {
+  color: #4f6070;
+  background: #eef2f6;
+}
+
+.condition-risk-value.risk-high {
+  color: #a12929;
+  background: #fff0f0;
+}
+
+.condition-risk-value.risk-moderate {
+  color: #905709;
+  background: #fff5df;
+}
+
+.condition-risk-value.risk-low,
+.condition-risk-value.risk-default {
+  color: #1d5b83;
+  background: #edf6fb;
 }
 
 .column-filter-row th {
@@ -2215,7 +2322,6 @@ td {
 .export-button,
 .clear-button,
 .pagination button,
-.chart-view-toggle button,
 .overview-date-mode button,
 .boolean-filter button,
 .check-grid button,
@@ -2254,8 +2360,6 @@ select,
 .export-button:hover:not(:disabled),
 .clear-button:hover,
 .pagination button:hover:not(:disabled),
-.chart-view-toggle button:hover,
-.chart-view-toggle button.active,
 .overview-date-mode button:hover,
 .overview-date-mode button.active,
 .boolean-filter button:hover,
@@ -2461,8 +2565,6 @@ html.theme-dark .overview-trend-card {
 .workbook-shell.portal-view-mode .table-panel .table-download-button,
 .workbook-shell.portal-view-mode .table-panel .clear-table-filters,
 .workbook-shell.portal-view-mode .table-panel .export-button,
-.workbook-shell.portal-view-mode .chart-panel .chart-view-toggle,
-.workbook-shell.portal-view-mode .chart-panel .chart-view-toggle button,
 .workbook-shell.portal-view-mode .chart-panel .chart-export-button,
 .workbook-shell.portal-view-mode .chart-panel .floating-filter-button,
 .workbook-shell.portal-view-mode .table-panel .page-size-select,

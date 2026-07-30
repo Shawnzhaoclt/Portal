@@ -35,7 +35,7 @@ import {
   fetchMe,
   fetchMyFeaturedResources,
   fetchMyResources,
-  fetchTeams,
+  fetchUsers,
   managementSessionTransferUrl,
   saveManagementToken,
   saveManagementUser,
@@ -46,7 +46,6 @@ import {
   type PortalFeaturedResourcesByCategory,
   type PortalResource as ManagedPortalResource,
   type PortalRole,
-  type PortalTeam,
   type PortalUser,
 } from './management/api'
 import ThemeToggle from './ThemeToggle'
@@ -646,9 +645,9 @@ function resourceLaunchContext(
     portal_employeeid: user.employee_id,
     portal_first_name: user.first_name,
     portal_last_name: user.last_name,
-    portal_team_name: testAccess?.teamName ?? user.team_name ?? '',
+    portal_team_name: user.team_name ?? '',
     portal_is_manager: user.manager_user_id === user.id ? '1' : '0',
-    portal_user_role: roleText(testAccess?.role ?? user.selected_role),
+    portal_user_role: roleText(user.selected_role),
     portal_permission: permission?.permission ?? '',
     portal_permission_level: String(permission?.permission_level ?? 0),
     portal_permission_types: permission?.permission_types.join(',') ?? '',
@@ -776,6 +775,70 @@ function ResourcePopup({
   )
 }
 
+function DesktopResourceTabs({
+  tabs,
+  activeResourceId,
+  onActivateHome,
+  onActivateResource,
+  onCloseResource,
+}: {
+  tabs: PortalResource[]
+  activeResourceId: string | null
+  onActivateHome: () => void
+  onActivateResource: (resourceId: string) => void
+  onCloseResource: (resourceId: string) => void
+}) {
+  if (!tabs.length) return null
+
+  return (
+    <nav className="desktop-resource-tabs" aria-label="Open portal resources">
+      <button className={`desktop-resource-tab desktop-resource-home-tab ${activeResourceId === null ? 'active' : ''}`} type="button" onClick={onActivateHome}>
+        <Grid3X3 size={16} aria-hidden="true" />
+        <span>Home</span>
+      </button>
+      {tabs.map((resource) => (
+        <div className={`desktop-resource-tab ${activeResourceId === resource.id ? 'active' : ''}`} key={resource.id}>
+          <button className="desktop-resource-tab-open" type="button" onClick={() => onActivateResource(resource.id)} aria-current={activeResourceId === resource.id ? 'page' : undefined}>
+            <ResourceTypeIcon type={resource.type} />
+            <span>{resource.title}</span>
+          </button>
+          <button className="desktop-resource-tab-close" type="button" onClick={() => onCloseResource(resource.id)} aria-label={`Close ${resource.title}`} title={`Close ${resource.title}`}>
+            <X size={16} />
+          </button>
+        </div>
+      ))}
+    </nav>
+  )
+}
+
+function DesktopResourceWorkspace({
+  tabs,
+  activeResourceId,
+  user,
+  testAccess,
+}: {
+  tabs: PortalResource[]
+  activeResourceId: string | null
+  user: PortalUser | null
+  testAccess: PortalTestAccess | null
+}) {
+  if (!tabs.length) return null
+
+  return (
+    <section className={`desktop-resource-workspace ${activeResourceId ? 'is-active' : ''}`} aria-label="Portal resource workspace">
+      {tabs.map((resource) => {
+        const isActive = resource.id === activeResourceId
+
+        return (
+          <section className={`desktop-resource-pane ${isActive ? 'is-active' : ''}`} key={resource.id} aria-hidden={!isActive}>
+            <iframe src={resourcePopupUrl(resource, user, testAccess)} title={resource.title} tabIndex={isActive ? 0 : -1} />
+          </section>
+        )
+      })}
+    </section>
+  )
+}
+
 const ACCOUNT_PROFILE_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=profile`
 const ACCOUNT_FAVORITES_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=featured`
 
@@ -870,16 +933,16 @@ function AccountMenu({
               Portal Admin
             </a>
           ) : null}
-          {user.selected_role === 'system_admin' ? (
+          {isManagementRole(user.selected_role) ? (
             testAccess ? (
               <button type="button" role="menuitem" onClick={() => { onStopTestAccess(); setOpen(false) }}>
                 <ShieldCheck size={16} />
-                Stop test access
+                Stop viewing as user
               </button>
             ) : (
               <button type="button" role="menuitem" onClick={() => { onStartTestAccess(); setOpen(false) }}>
                 <ShieldCheck size={16} />
-                Test access
+                View as user
               </button>
             )
           ) : null}
@@ -904,57 +967,68 @@ function AccountMenu({
 }
 
 function TestAccessDialog({
-  teams,
+  users,
   current,
   loading,
   error,
   onClose,
   onStart,
 }: {
-  teams: PortalTeam[]
+  users: PortalUser[]
   current: PortalTestAccess | null
   loading: boolean
   error: string
   onClose: () => void
   onStart: (value: PortalTestAccess) => void
 }) {
-  const [teamId, setTeamId] = useState<number | null>(current?.teamId ?? null)
+  const [userId, setUserId] = useState<number | null>(current?.userId ?? null)
   const [role, setRole] = useState<PortalRole>(current?.role ?? 'user')
-  const selectedTeam = teams.find((team) => team.id === teamId) ?? null
+  const selectedUser = users.find((user) => user.id === userId) ?? null
+  const availableRoles = selectedUser?.roles ?? []
+
+  useEffect(() => {
+    if (selectedUser && !availableRoles.includes(role)) setRole(availableRoles[0] ?? 'user')
+  }, [availableRoles, role, selectedUser])
 
   return (
     <div className="home-test-access-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <section className="home-test-access-dialog" role="dialog" aria-modal="true" aria-labelledby="test-access-title">
         <div className="home-test-access-title-row">
           <div>
-            <span>System Admin</span>
-            <h2 id="test-access-title">Test access</h2>
+            <span>Access preview</span>
+            <h2 id="test-access-title">View as user</h2>
           </div>
           <button type="button" onClick={onClose} aria-label="Close test access" title="Close">
             <X size={21} />
           </button>
         </div>
-        <p>Preview the portal as a selected team and role. Your Windows account remains the audit identity, and changes are disabled.</p>
+        <p>Preview the portal as a real active user. Their team, manager access, direct permissions, and featured resources are used. Changes are disabled.</p>
         <label>
-          Team
-          <select value={teamId ?? ''} disabled={loading} onChange={(event) => setTeamId(event.target.value ? Number(event.target.value) : null)}>
-            <option value="">Select team</option>
-            {teams.filter((team) => team.is_active).map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          User
+          <select value={userId ?? ''} disabled={loading} onChange={(event) => setUserId(event.target.value ? Number(event.target.value) : null)}>
+            <option value="">Select user</option>
+            {users.filter((user) => user.is_active).map((user) => (
+              <option key={user.id} value={user.id}>
+                {user.display_name} - {user.email}{user.team_name ? ` - ${user.team_name}` : ''}
+              </option>
+            ))}
           </select>
         </label>
         <label>
-          Effective role
+          User role
           <select value={role} disabled={loading} onChange={(event) => setRole(event.target.value as PortalRole)}>
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
-            <option value="system_admin">System Admin</option>
+            {availableRoles.map((availableRole) => <option key={availableRole} value={availableRole}>{roleText(availableRole)}</option>)}
           </select>
         </label>
         {error ? <div className="home-test-access-error">{error}</div> : null}
         <div className="home-test-access-actions">
           <button type="button" onClick={onClose}>Cancel</button>
-          <button type="button" disabled={!selectedTeam || loading} onClick={() => selectedTeam && onStart({ teamId: selectedTeam.id, teamName: selectedTeam.name, role })}>
-            Start test access
+          <button
+            type="button"
+            disabled={!selectedUser || loading || !availableRoles.includes(role)}
+            onClick={() => selectedUser && onStart({ userId: selectedUser.id, displayName: selectedUser.display_name, email: selectedUser.email, role })}
+          >
+            Start preview
           </button>
         </div>
       </section>
@@ -972,18 +1046,23 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [defaultConfiguredFeaturedCategories, setDefaultConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
   const [accessibleManagedResources, setAccessibleManagedResources] = useState<ManagedPortalResource[]>([])
   const [portalUser, setPortalUser] = useState<PortalUser | null>(() => storedManagementUser())
+  const [previewUser, setPreviewUser] = useState<PortalUser | null>(null)
   const [popupResource, setPopupResource] = useState<PortalResource | null>(null)
+  const [desktopResourceTabs, setDesktopResourceTabs] = useState<PortalResource[]>([])
+  const [activeDesktopResourceId, setActiveDesktopResourceId] = useState<string | null>(null)
   const [testAccess, setTestAccess] = useState<PortalTestAccess | null>(() => storedPortalTestAccess())
   const [testAccessDialogOpen, setTestAccessDialogOpen] = useState(false)
-  const [testTeams, setTestTeams] = useState<PortalTeam[]>([])
-  const [testTeamsLoading, setTestTeamsLoading] = useState(false)
-  const [testTeamsError, setTestTeamsError] = useState('')
+  const [testUsers, setTestUsers] = useState<PortalUser[]>([])
+  const [testUsersLoading, setTestUsersLoading] = useState(false)
+  const [testUsersError, setTestUsersError] = useState('')
 
   useEffect(() => {
-    if (!storedManagementToken()) return
+    // Desktop authentication comes from the current Windows account, so it has
+    // no browser token. Keep the web token requirement only for browser runs.
+    if (!desktopRuntime && !storedManagementToken()) return
     let cancelled = false
 
-    if (!desktopRuntime) {
+    if (!desktopRuntime && !testAccess) {
       fetchMe()
         .then((meResponse) => {
           if (cancelled) return
@@ -996,6 +1075,18 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           setPortalUser(null)
           window.location.replace(PORTAL_LOGIN_ROUTE)
         })
+    }
+
+    if (testAccess) {
+      fetchMe()
+        .then((meResponse) => {
+          if (!cancelled) setPreviewUser(meResponse.user)
+        })
+        .catch(() => {
+          if (!cancelled) setPreviewUser(null)
+        })
+    } else {
+      setPreviewUser(null)
     }
 
     Promise.all([fetchMyResources(), fetchMyFeaturedResources()])
@@ -1022,7 +1113,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     return () => {
       cancelled = true
     }
-  }, [desktopRuntime, testAccess?.role, testAccess?.teamId])
+  }, [desktopRuntime, testAccess?.role, testAccess?.userId])
 
   useEffect(() => {
     if (!popupResource) return
@@ -1043,6 +1134,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   function handlePortalSignOut() {
     clearPortalTestAccess()
     setTestAccess(null)
+    setPreviewUser(null)
     clearManagementToken()
     setPortalUser(null)
     setAccessibleManagedResources([])
@@ -1050,6 +1142,8 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     setConfiguredFeaturedCategories([])
     setDefaultFeaturedResourcesByCategory({})
     setDefaultConfiguredFeaturedCategories([])
+    setDesktopResourceTabs([])
+    setActiveDesktopResourceId(null)
     window.location.replace(PORTAL_LOGIN_ROUTE)
   }
 
@@ -1061,12 +1155,31 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       return
     }
 
+    if (desktopRuntime) {
+      setDesktopResourceTabs((currentTabs) => (currentTabs.some((tab) => tab.id === resource.id) ? currentTabs : [...currentTabs, resource]))
+      setActiveDesktopResourceId(resource.id)
+      return
+    }
+
     setPopupResource(resource)
+  }
+
+  function handleCloseDesktopResource(resourceId: string) {
+    const closedIndex = desktopResourceTabs.findIndex((tab) => tab.id === resourceId)
+    const nextTabs = desktopResourceTabs.filter((tab) => tab.id !== resourceId)
+
+    setDesktopResourceTabs(nextTabs)
+    if (activeDesktopResourceId === resourceId) {
+      setActiveDesktopResourceId(nextTabs[Math.max(0, closedIndex - 1)]?.id ?? nextTabs[0]?.id ?? null)
+    }
   }
 
   async function handlePortalRoleSwitch(role: PortalRole) {
     clearPortalTestAccess()
     setTestAccess(null)
+    setPreviewUser(null)
+    setDesktopResourceTabs([])
+    setActiveDesktopResourceId(null)
     const response = await switchRole(role)
     saveManagementToken(response.token, role)
     const switchedUser = { ...response.user, selected_role: role }
@@ -1100,26 +1213,32 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   }
 
   function handleOpenTestAccess() {
-    if (portalUser?.selected_role !== 'system_admin') return
+    if (!portalUser || !isManagementRole(portalUser.selected_role)) return
     setTestAccessDialogOpen(true)
-    setTestTeamsError('')
-    if (testTeams.length || testTeamsLoading) return
-    setTestTeamsLoading(true)
-    fetchTeams()
-      .then((response) => setTestTeams(response.teams))
-      .catch((error) => setTestTeamsError(error instanceof Error ? error.message : 'Could not load portal teams.'))
-      .finally(() => setTestTeamsLoading(false))
+    setTestUsersError('')
+    if (testUsers.length || testUsersLoading) return
+    setTestUsersLoading(true)
+    fetchUsers()
+      .then((response) => setTestUsers(response.users.filter((user) => user.is_active)))
+      .catch((error) => setTestUsersError(error instanceof Error ? error.message : 'Could not load portal users.'))
+      .finally(() => setTestUsersLoading(false))
   }
 
   function handleStartTestAccess(value: PortalTestAccess) {
     savePortalTestAccess(value)
     setTestAccess(value)
+    setPreviewUser(null)
+    setDesktopResourceTabs([])
+    setActiveDesktopResourceId(null)
     setTestAccessDialogOpen(false)
   }
 
   function handleStopTestAccess() {
     clearPortalTestAccess()
     setTestAccess(null)
+    setPreviewUser(null)
+    setDesktopResourceTabs([])
+    setActiveDesktopResourceId(null)
   }
 
   const catalogResources = useMemo(() => DASHBOARD_CATALOG.map(catalogResource), [])
@@ -1230,34 +1349,22 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     <main className="home-page">
       <header className="home-header">
         <div className="home-nav-row">
-          <a className="home-brand" href="/" aria-label="Storm Water Asset Intelligence Portal">
+          <a
+            className="home-brand"
+            href="/"
+            aria-label="Storm Water Asset Intelligence Portal"
+            onClick={(event) => {
+              if (!desktopRuntime) return
+              event.preventDefault()
+              setActiveDesktopResourceId(null)
+            }}
+          >
             <span className="home-logo-mark">
               <img src={stormwaterLogo} alt="" />
             </span>
           </a>
 
-          <nav className="home-category-nav" aria-label="Resource categories">
-            {visibleCategoryOptions.map((option) => (
-              <button
-                className={activeCategory === option.key ? 'active' : ''}
-                key={option.key}
-                type="button"
-                onClick={() => setActiveCategory(option.key)}
-              >
-                {option.label}
-              </button>
-            ))}
-          </nav>
-
-          <label className="home-search-bar">
-            <Search size={23} aria-hidden="true" />
-            <input
-              value={searchTerm}
-              onChange={(event) => setSearchTerm(event.target.value)}
-              placeholder="Search"
-              type="search"
-            />
-          </label>
+          <strong className="home-desktop-app-title">Storm Water Asset Intelligence Portal</strong>
 
           <div className="home-utility-nav" aria-label="Portal utilities">
             {portalUser ? (
@@ -1283,24 +1390,48 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
         </div>
       </header>
 
+      {desktopRuntime ? (
+        <DesktopResourceTabs
+          tabs={desktopResourceTabs}
+          activeResourceId={activeDesktopResourceId}
+          onActivateHome={() => setActiveDesktopResourceId(null)}
+          onActivateResource={setActiveDesktopResourceId}
+          onCloseResource={handleCloseDesktopResource}
+        />
+      ) : null}
+
       {testAccess ? (
         <section className="home-test-access-banner" aria-label="Test access is active">
           <ShieldCheck size={18} />
-          <span>Testing access as <strong>{roleText(testAccess.role)}</strong> for <strong>{testAccess.teamName}</strong>. Changes are disabled.</span>
-          <button type="button" onClick={handleStopTestAccess}>Stop testing</button>
+          <span>Viewing as <strong>{previewUser?.display_name ?? testAccess.displayName}</strong> ({roleText(testAccess.role)}). Changes are disabled.</span>
+          <button type="button" onClick={handleStopTestAccess}>Stop preview</button>
         </section>
       ) : null}
 
-      <section className="home-hero">
-        <div className="home-hero-content">
-          <span className="home-hero-logo" aria-hidden="true">
-            <img src={stormwaterLogo} alt="" />
-          </span>
-          <div className="home-hero-copy">
-            <h1>Storm Water Asset Intelligence Portal</h1>
-            <p>sharing asset risk data, maps, and dashboards for strategic planning and analysis.</p>
-          </div>
-        </div>
+      <div className={`desktop-home-content ${desktopRuntime && activeDesktopResourceId ? 'is-hidden' : ''}`}>
+      <section className="home-catalog-controls" aria-label="Portal resources">
+        <nav className="home-category-nav" aria-label="Resource categories">
+          {visibleCategoryOptions.map((option) => (
+            <button
+              className={activeCategory === option.key ? 'active' : ''}
+              key={option.key}
+              type="button"
+              onClick={() => setActiveCategory(option.key)}
+            >
+              {option.label}
+            </button>
+          ))}
+        </nav>
+
+        <label className="home-search-bar">
+          <Search size={23} aria-hidden="true" />
+          <input
+            value={searchTerm}
+            onChange={(event) => setSearchTerm(event.target.value)}
+            placeholder="Search resources"
+            type="search"
+          />
+        </label>
       </section>
 
       <section className="home-featured">
@@ -1383,13 +1514,23 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           ) : null}
         </section>
       </section>
-      {popupResource ? <ResourcePopup resource={popupResource} user={portalUser} testAccess={testAccess} onClose={() => setPopupResource(null)} /> : null}
+      </div>
+      {desktopRuntime ? (
+        <DesktopResourceWorkspace
+          tabs={desktopResourceTabs}
+          activeResourceId={activeDesktopResourceId}
+          user={previewUser ?? portalUser}
+          testAccess={testAccess}
+        />
+      ) : popupResource ? (
+        <ResourcePopup resource={popupResource} user={previewUser ?? portalUser} testAccess={testAccess} onClose={() => setPopupResource(null)} />
+      ) : null}
       {testAccessDialogOpen ? (
         <TestAccessDialog
-          teams={testTeams}
+          users={testUsers}
           current={testAccess}
-          loading={testTeamsLoading}
-          error={testTeamsError}
+          loading={testUsersLoading}
+          error={testUsersError}
           onClose={() => setTestAccessDialogOpen(false)}
           onStart={handleStartTestAccess}
         />

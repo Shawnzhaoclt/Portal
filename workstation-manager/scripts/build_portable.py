@@ -56,6 +56,16 @@ def main() -> int:
     coordinator_directory = output_directory / "coordinator"
     copy_required(PROJECT_ROOT / "coordinator" / "repository_runner.py", coordinator_directory / "repository_runner.py")
     copy_required(PROJECT_ROOT / "coordinator" / "schema_runner.py", coordinator_directory / "schema_runner.py")
+    copy_required(PROJECT_ROOT / "coordinator" / "maintenance_runner.py", coordinator_directory / "maintenance_runner.py")
+    for filename in (
+        "run-business-retention.bat",
+        "register-weekly-business-retention-task.bat",
+        "remove-weekly-business-retention-task.bat",
+        "run-nightly-business-maintenance.bat",
+        "register-nightly-business-maintenance-task.bat",
+        "remove-nightly-business-maintenance-task.bat",
+    ):
+        copy_required(PROJECT_ROOT / "coordinator" / filename, coordinator_directory / filename)
     coordinator_package = coordinator_directory / "python" / "portal"
     copy_required(coordinator_source / "__init__.py", coordinator_package / "__init__.py")
     copy_required(coordinator_source / "app" / "__init__.py", coordinator_package / "app" / "__init__.py")
@@ -71,10 +81,15 @@ def main() -> int:
         dirs_exist_ok=True,
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.log"),
     )
+    for cache_directory in coordinator_directory.rglob("__pycache__"):
+        shutil.rmtree(cache_directory, ignore_errors=True)
+    for compiled_file in coordinator_directory.rglob("*.py[co]"):
+        compiled_file.unlink(missing_ok=True)
 
     sync_directory = output_directory / "sync"
     sync_directory.mkdir(exist_ok=True)
     for filename in (
+        "start-source-sync.bat",
         "sync_portal_sources.py",
         "sync.settings.json",
         "sync.settings.template.json",

@@ -19,7 +19,7 @@ The design covers:
 - incremental upload/download, deduplication, retries, and restart recovery;
 - attribute, geometry, deletion, uniqueness, and workflow conflicts;
 - versioned snapshots, initialization, repair, and log retention;
-- the maintenance workstation's five-minute job, nightly snapshot/audit/backup job, Saturday retention job, and `maintenance.db`;
+- the maintenance workstation's five-minute job, nightly snapshot/audit/backup job, Friday retention job, and `maintenance.db`;
 - atomic behavior during network loss, power loss, full disks, process crashes, and corrupted files;
 - performance, observability, usability, testing, and phased delivery.
 
@@ -321,7 +321,7 @@ stateDiagram-v2
 - `stormwater.db` is each client's writable business database. Internally it is a GeoPackage-compatible SQLite database.
 - `system.db` is a read-only capability database installed and updated with the App. It contains supported schema releases, migration definitions, capabilities, dynamic forms, and generic layer configuration.
 - Runtime opens `system.db` read-only/query-only. It never stores actors, cursors, outbox state, migration results, user preferences, or other mutable state.
-- `system.db` says what the App understands; shared `schema/current.json` says what the environment has activated. Formal save is enabled only when release ID, catalog hash, and required capabilities match.
+- `system.db` says what the App understands; the verified shared `snapshots/current.json` pointer and its referenced snapshot say what the environment has activated. Formal save is enabled only when release ID, catalog hash, and required capabilities match.
 - `stormwater.db` and `system.db` use separate connections. Cross-database atomic transactions are not required. Anything that must commit atomically with a business row stays in `stormwater.db`.
 - `.db` is a product naming decision and does not satisfy the conventional `.gpkg` suffix. GDAL/OGR must explicitly select the `GPKG` driver.
 - Attribute and vector feature tables may coexist.
@@ -1370,9 +1370,9 @@ Only a maintenance ACL identity may generate snapshots:
 
 The workstation is not an online master. Its absence delays snapshots and maintenance but not client publication/synchronization.
 
-Run nightly in a configured low-usage window, recommended within 00:00-04:00 local time. The job performs full synchronization, snapshot, integrity/actor-gap checks, snapshot-epoch registry maintenance, conflict reporting, backup, and safe retention planning. It holds a maintenance lease to prevent duplicate heavy jobs. Failure alerts and retries later; it blocks publication only for the brief exclusive epoch-pointer transition, not while building or validating the snapshot candidate.
+Run nightly in a configured low-usage window, recommended within 00:00-04:00 local time. The job performs full synchronization, snapshot, integrity/actor-gap checks, snapshot-epoch registry maintenance, conflict reporting, and safe retention planning. It does not create backups or remove retained data. It holds a maintenance lease to prevent duplicate heavy jobs. Failure alerts and retries later; it blocks publication only for the brief exclusive epoch-pointer transition, not while building or validating the snapshot candidate.
 
-Production retains at least seven full days of online operations and the five most recent successfully verified snapshots. Failed, incomplete, corrupt, or unbacked snapshot candidates do not count toward five. The operation floor may advance only to a continuous prefix that is at least seven workstation-observed days old and is covered by the oldest of those retained verified snapshots. Therefore maintenance or backup failure extends retention beyond seven days rather than weakening recovery. Retire a sixth or older snapshot only after five newer snapshots are verified, independently backed up, and collectively leave a continuous restore path.
+Production retains at least seven full days of online operations, the five most recent successfully verified snapshots, and backup artifacts from the most recent ninety days. Failed, incomplete, corrupt, or unbacked snapshot candidates do not count toward five. The operation floor may advance only to a continuous prefix that is at least seven workstation-observed days old and is covered by the oldest of those retained verified snapshots. Therefore maintenance or backup failure extends retention beyond seven days rather than weakening recovery. Retire a sixth or older snapshot only after five newer snapshots are verified, independently backed up, and collectively leave a continuous restore path. The deployed coordinator reads this policy from `maintenance.businessRetention` in `portal.settings.json`; the minimum values are seven days of online operations, five snapshots, and ninety days of backups.
 
 ### 11.3 Choosing Incremental Catch-Up or Snapshot
 
@@ -1409,7 +1409,7 @@ For an actor, `required_next_seq = highest_terminal_seq + 1`. A required increme
 | Installed snapshot old, cursors still within window | Baseline only is old | Prefer incremental; do not copy full DB daily |
 | Healthy and caught up to snapshot coverage | No replacement needed | Pull operations after snapshot |
 
-A long absence triggers the log-floor check but is not itself the decision. After Saturday pruning, a returning client may fall below log floor and require replacement. If every required operation remains online, incremental catch-up is still safe.
+A long absence triggers the log-floor check but is not itself the decision. After Friday pruning, a returning client may fall below log floor and require replacement. If every required operation remains online, incremental catch-up is still safe.
 
 The pointer and referenced file must have compatible protocol/schema/profile; matching path, size, SHA-256, internal snapshot metadata, and mutable catalog; and `coverage[actor] + 1 >= log_floor[actor]` for every effective actor. An unreferenced final snapshot is an uncommitted candidate. Timestamps or one database version number are insufficient.
 
@@ -1467,7 +1467,15 @@ An operation also requires all of the following before archival:
 
 Conflict records are permanent protocol history and are never automatically merged, reduced, or deleted by retention. Before an operation payload referenced by a conflict can leave its required archive/backup lifecycle, maintenance must materialize complete immutable conflict evidence: both candidate values/geometries, hashes, operation and transaction IDs, actor/sequence coordinates, affected table/record/field IDs, and resolution events. Business/regulatory audit retention remains independent and may be longer.
 
-The Saturday job performs actual pruning. It never clears a date directory indiscriminately and never removes operations after the oldest retained verified snapshot's coverage. Failed snapshot/backup means no floor advance or pruning that week. Move data first, verify the archive, and atomically publish the new floor pointer last.
+The Friday retention job performs actual archival. It never clears a date directory indiscriminately and never removes operations after the oldest retained verified snapshot's coverage. Failed snapshot/backup means no floor advance or pruning that week. It uses the following crash-safe order:
+
+1. Record first-observation evidence in `maintenance/retention-observations.json`; the first run only establishes this seven-day baseline.
+2. Stage immutable archive **copies** and independent backup copies for every eligible operation package while the online originals remain readable; hash-verify every copy.
+3. Create and verify independent backups for all five retained snapshots.
+4. Under the exclusive epoch transition lock, publish a replacement verified snapshot with the proposed monotonic `log_floor`. The atomic replacement of `snapshots/current.json` is the authority commit.
+5. Read back the pointer and replacement snapshot. Only after that succeeds, remove the redundant online operation-package copies. Archive older snapshots only after the new pointer and the five retained snapshot backups are verified.
+
+Thus a crash before the pointer commit leaves every online package available. A crash after the pointer commit but before online cleanup leaves redundant online files, which is safe and can be retried. Archive artifacts remain preserved. Friday retention removes only backup artifacts older than ninety days, after it verifies that every protected retained snapshot still has a valid backup and that an operation backup has a verified archive counterpart.
 
 | Lifecycle | Content | Rule |
 | --- | --- | --- |
@@ -1506,8 +1514,8 @@ Production runs a lightweight sync/organization/audit task every five minutes, s
 | Task | Frequency | Heavy work allowed |
 | --- | --- | --- |
 | Lightweight sync/organization/audit | Every 5 minutes | No; maintain replica incrementally, inspect, report, optionally rebuild deterministic non-authoritative caches |
-| Nightly maintenance | Daily low-usage window | Yes; full catch-up, snapshot, integrity, backup, epoch-registry rollover/cleanup |
-| Retention | Saturday | Yes; archive online logs and advance log floor only with retained-snapshot coverage, seven-day observation, conflict-evidence preservation, and backup proof |
+| Nightly maintenance | Daily low-usage window | Yes; full catch-up, checkpoint snapshot, integrity, epoch-registry rollover/cleanup. No backup creation or pruning. |
+| Retention | Friday 21:00 | Yes; create and verify backups, archive online logs, prune eligible backup artifacts older than ninety days, and advance log floor only with retained-snapshot coverage, seven-day observation, conflict-evidence preservation, and backup proof |
 
 The five-minute audit checks root latency; protocol directories and current pointers; epoch-registration/membership/head relation; committed head/package hash-chain continuity above snapshot coverage/log floor; final `.opdb` orphans not reachable from a head; stale `.part`, overlaps, and sequence gaps; client acknowledgement metrics; current snapshot path/hash/internal-metadata relation, age, coverage/floor; and the latest nightly result.
 
@@ -1613,7 +1621,7 @@ The maintenance replica has client-equivalent business/version/conflict/reducer 
 | `mw_snapshot` | snapshot/schema/hash/run/publish/verification/backup/retention | Snapshot lifecycle |
 | `mw_snapshot_coverage` | snapshot + actor, covered sequence, floor | Queryable normalized coverage |
 | `mw_archive_segment` | archive/actor/range/hash/run/backup/restore state | Continuous archived log segments |
-| `mw_prune_plan` | plan/run/state/required snapshot/backup/hash | Saturday immutable plan and execution state |
+| `mw_prune_plan` | plan/run/state/required snapshot/backup/hash | Friday immutable plan and execution state |
 | `mw_prune_item` | plan + actor, exact range, source-path hash, result | Idempotent actor prefix work |
 | `mw_audit_finding` | stable key/category/severity/subject/first-last run/count/state/details | New, persistent, recovered, acknowledged findings |
 | `mw_repair_action` | repair/finding/type/plan generation/approval/locks/before-after hash/times/result | Complete derived or emergency repair evidence |
@@ -1654,7 +1662,7 @@ Back up `maintenance.db` daily with SQLite Backup API. Aggregate/expire successf
 
 This job never creates a snapshot, advances floor, removes epoch registrations/logs, writes actor metadata, or edits business data. Recommended soft timeout is 90 seconds and hard timeout 180 seconds. It never overlaps its next interval. Restart uses observations and immutable shared evidence idempotently.
 
-#### Nightly Low-Usage Window: Full Sync, Snapshot, Integrity Audit, and Backup
+#### Nightly Low-Usage Window: Full Sync, Checkpoint Snapshot, and Integrity Audit
 
 1. Acquire exclusive maintenance lease and create the nightly run.
 2. Ignore the current-epoch optimization for the nightly audit and read every valid membership actor head, recording `high_water[actor]`.
@@ -1663,29 +1671,29 @@ This job never creates a snapshot, advances floor, removes epoch registrations/l
 5. Checkpoint and run SQLite, FK, business, GeoPackage, geometry/SRS, R-Tree, and normalized digest checks.
 6. Create a staging candidate via Backup API or `VACUUM INTO`; remove workstation-local actor/outbox/draft/UI state; write exact coverage/floor/schema.
 7. Write internal snapshot metadata/coverage, close, recheck, hash, and publish one final immutable snapshot database plus the prepared epoch registry. Acquire the exclusive epoch-transition lock, re-read prior registered heads, carry forward uncovered actors, then atomically replace `snapshots/current.json`. Later operations remain continuously replayable.
-8. Copy the snapshot database, snapshot current pointer, and required operation packages to independent backup and verify every hash. Unverified backup is failure and cannot justify pruning.
-9. Update actor/epoch observations and schedule exact old-registration cleanup only after snapshot coverage, seven-day retention, archive verification, and log-floor requirements are proven.
-10. Calculate—but do not exceed—the next safe retention plan; update capacity, conflict backlog, and compatibility reports.
-11. Publish immutable nightly report/current, commit local state, and release lease.
+8. Update actor/epoch observations and schedule exact old-registration cleanup only after snapshot coverage, seven-day retention, archive verification, and log-floor requirements are proven.
+9. Calculate—but do not execute—the next safe retention plan; update capacity, conflict backlog, and compatibility reports.
+10. Publish immutable nightly report/current, commit local state, and release lease.
 
 No global client freeze is required. The snapshot represents a verified continuous per-actor high-water prefix. Missing dependencies abandon the candidate; an incomplete or unreferenced snapshot never becomes authoritative.
 
-#### Saturday: Archive and Online Log Pruning
+#### Friday: Archive and Online Log Pruning
 
-1. Require the latest successfully backed-up snapshot.
+1. Create and verify independent backups for all retained snapshots and required operation packages. Require every protected backup to validate before any archival or cleanup work.
 2. Calculate seven-day continuous prefixes from workstation first-observed times, bounded by coverage of the oldest of the five retained verified snapshots.
 3. Create an immutable prune plan and revalidate gaps, retired final sequences, conflict-evidence preservation, backup, and restore-test state.
-4. Move eligible operation packages to archive and verify them before atomically advancing log floor.
-5. Any failure stops or shrinks the safe range; never jump over a gap.
-6. Publish results. “Clear logs” means safe removal from online, not immediate archive destruction.
+4. Stage and verify archive copies, atomically publish the replacement snapshot and log floor, read it back, then remove only the redundant online copies.
+5. Remove backup artifacts older than ninety days only after protected retained-snapshot backups and archived operation counterparts validate.
+6. Any failure stops or shrinks the safe range; never jump over a gap.
+7. Publish results. “Clear logs” means safe removal from online, not immediate archive destruction.
 
 ### 11.12 Scheduling, Failure, and Acceptance Baseline
 
 | Job | Default | Success | Failure effect |
 | --- | --- | --- | --- |
 | `audit-5m` | Every 5 minutes, 0-30 s jitter | Report published; new packages verified and applied where possible | Client real-time sync unaffected; repeated errors alert |
-| `nightly` | Daily 02:00 | Full high-water catch-up, immutable snapshot/current pointer, verified independent backup, report | Keep old snapshot/logs; do not prune; alert after 26 h |
-| `weekly-retention` | Saturday 03:30 after successful nightly | Continuous prefix archived, floor atomically advanced, report | Do not advance floor or remove online logs |
+| `nightly` | Daily 02:00 | Full high-water catch-up, immutable checkpoint snapshot/current pointer, report | Keep old snapshot/logs; do not create backups or prune; alert after 26 h |
+| `weekly-retention` | Friday at `maintenance.businessRetention.schedule.time` (default 21:00) | Protected backups created and verified, continuous prefix archived, floor atomically advanced, backup artifacts older than ninety days pruned, report | Do not advance floor, remove online logs, or remove expired backups |
 | `verify-backup` | Weekly or monthly | Isolated restore passes integrity/digest | Backup cannot support pruning and alerts |
 
 Common failure rules:
@@ -1786,7 +1794,7 @@ The synchronizer is metadata-driven, explicitly registered, and migration-contro
 
 ### 13.3 Schema Registry
 
-The workstation atomically publishes immutable `schema/releases/<version>-<sha256>/`; `schema/current.json` is only the activation pointer. A release contains manifest, catalog, migration plan, and ready. Shared normalized catalog release/hash exactly matches the deterministic export in the packaged `system.db`. Clients never open or mutate one shared public `system.db`.
+The packaged, read-only `system.db` is the approved schema registry. The workstation uses its allowlisted baseline and migration handlers to build a verified immutable snapshot, embeds the selected release ID and catalog hash in that snapshot, and atomically replaces `snapshots/current.json` to activate it. There is no writable shared `system.db`, `schema/current.json`, or `ready` marker. Clients never open or mutate a shared public schema catalog.
 
 Each synchronized table is explicit:
 
@@ -1847,7 +1855,7 @@ Dynamic forms and generic map rendering can introduce a simple table without a n
 1. Produce release, migration plan, test snapshot, and golden operations in test.
 2. First deploy an App with the new read-only `system.db` that understands but does not yet emit new fields.
 3. Workstation confirms acknowledgements satisfy minimum version/capabilities.
-4. Atomically publish release/ready and finally replace schema current.
+4. Publish a verified immutable snapshot and atomically replace `snapshots/current.json` to activate the new schema epoch.
 5. Startup, background refresh, and every pre-save barrier cross-check shared catalog hash with packaged `system.db`.
 6. On upgrade, stop new commits, let local transaction finish, preserve drafts/prepared, and validate the complete migration chain.
 7. Perform simple compatible DDL in a local transaction. Perform complex rebuild on a temporary copy with snapshot-style validation and atomic exchange.
@@ -1857,7 +1865,20 @@ Dynamic forms and generic map rendering can introduce a simple table without a n
 
 Do not execute arbitrary shared SQL. Prefer allowlisted declarative migration. Necessary custom logic ships with trusted App/tool code or a signed, hash-pinned administrative release.
 
-### 13.6 Compatibility and Unknown Structures
+### 13.6 Shared Snapshot Publication by the Workstation
+
+The Workstation Manager is a shared-authority tool. It never opens, validates for change, or modifies a Portal Desktop installation's local `stormwater.db`.
+
+1. The operator selects an approved baseline or migration and confirms the active shared snapshot ID shown by the Workstation Manager.
+2. The Workstation reads `snapshots/current.json`, validates the referenced snapshot and membership release, then acquires `epoch-transition.lck` exclusively. Formal client saves take the same lock in shared mode, so no save can publish against the old epoch during the transition.
+3. It copies the active shared snapshot to a temporary candidate and uses the packaged Python `DataCoordinator` reducer to replay every registered active actor head in the current epoch.
+4. It applies only trusted, packaged baseline or migration handlers from read-only `system.db`, then validates SQLite `quick_check`, foreign keys, catalog fingerprint, and GeoPackage checks where applicable.
+5. Before publication, the candidate removes only device-local identity, outbox, draft, and UI state. It retains deterministic operation history, received-package state, materialized entities, and conflict state required by the reducer. It writes exact actor coverage and a new snapshot epoch.
+6. The candidate snapshot is verified, published as a new immutable file, and a new empty epoch registry is created. Only then is `snapshots/current.json` atomically replaced. Replacing that pointer is the sole commit that makes the new schema snapshot authoritative.
+7. A Desktop detects the new pointer at startup or incremental synchronization. It installs a replacement only when there is no non-terminal local outbox, first archiving the previous local replica for recovery. If unpublished work exists, it blocks formal edits until reconciliation; it never silently overwrites that work.
+8. Recovery from an unsuccessful release is performed by publishing a separately verified forward snapshot. The Workstation never rewrites or deletes the current snapshot as a rollback action.
+
+### 13.7 Compatibility and Unknown Structures
 
 - Prefer expand-and-contract: add compatible structures, switch writers, later remove old structures.
 - Missing/unopenable/mismatched `system.db` blocks business mode and requests repair/reinstall; never ignore a new table and keep saving.
@@ -1867,7 +1888,7 @@ Do not execute arbitrary shared SQL. Prefer allowlisted declarative migration. N
 - A client that cannot understand a new field cannot save an old-revision representation over it.
 - Field semantics, geometry type, SRS, conflict policy, and mutex scope changes are explicit migrations.
 - Snapshot internal metadata and `snapshots/current.json` declare the exact release and permitted migration path.
-- Corrupt schema current or missing ready/hash retains the last verified catalog locally but blocks formal save.
+- A corrupt `snapshots/current.json`, missing referenced snapshot, or hash mismatch retains the last verified catalog locally but blocks formal save.
 - Test old/new Apps, old snapshot, new schema, and cross-version operations before release.
 
 ## 14. Performance Design
@@ -1986,7 +2007,7 @@ The workstation additionally records replica-to-head lag, five-minute duration/s
 
 ### 19.2 Fault Injection
 
-Automate every section 12 failure, including process kill around SQLite COMMIT; disconnect at different bytes of `.opdb.part` and snapshot `.db.part` copy; crash before/after final package rename and actor-head replacement; crash before/after final snapshot rename and `snapshots/current.json` replacement; duplicate/out-of-order/missing/tampered packages; broken previous-package links; final uncommitted package/snapshot orphans; full/read-only disk and permission changes; uncheckpointed WAL and power recovery; each snapshot install step; client clock movement; competing SMB locks and crash/disconnect/reconnect; first-write epoch registration racing another save; crash before/after registration visibility; snapshot epoch rollover while saves hold shared locks; stale operation arrival during a held save mutex; draft recovery; concurrent attribute/geometry edits; missing/replaced/hash-mismatched `system.db`; client/workstation Python or coordinator-version mismatch; five-minute/nightly overlap; maintenance lease crash; actor generation changing during an emergency repair plan; maintenance-state corruption and replica rebuild; client publication while nightly samples high-water; degraded read-only entry/reconnect; and power/backup/floor failures during Saturday archive.
+Automate every section 12 failure, including process kill around SQLite COMMIT; disconnect at different bytes of `.opdb.part` and snapshot `.db.part` copy; crash before/after final package rename and actor-head replacement; crash before/after final snapshot rename and `snapshots/current.json` replacement; duplicate/out-of-order/missing/tampered packages; broken previous-package links; final uncommitted package/snapshot orphans; full/read-only disk and permission changes; uncheckpointed WAL and power recovery; each snapshot install step; client clock movement; competing SMB locks and crash/disconnect/reconnect; first-write epoch registration racing another save; crash before/after registration visibility; snapshot epoch rollover while saves hold shared locks; stale operation arrival during a held save mutex; draft recovery; concurrent attribute/geometry edits; missing/replaced/hash-mismatched `system.db`; client/workstation Python or coordinator-version mismatch; five-minute/nightly overlap; maintenance lease crash; actor generation changing during an emergency repair plan; maintenance-state corruption and replica rebuild; client publication while nightly samples high-water; degraded read-only entry/reconnect; and power/backup/floor failures during Friday archive.
 
 ### 19.3 Convergence Tests
 
@@ -2055,7 +2076,7 @@ Feed the same operation set to at least three clients with different order, pack
 - New-client initialization and safe replacement.
 - Five-minute replica catch-up, audit, immutable reports, derived repair.
 - Nightly full high-water, snapshot, checks, backup, active registry.
-- Saturday safe prune plan, archive, floor, restore, metrics/diagnostics.
+- Friday safe prune plan, archive, floor, restore, metrics/diagnostics.
 - Acceptance with 100 online/20 editors.
 
 ### Phase 6: Later Enhancements
@@ -2095,3 +2116,11 @@ Create configuration or ADRs for:
 - [Microsoft LockFileEx](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex)
 - [Microsoft SMB2 Handling Loss of a Connection](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/eb5bfe99-47fe-4e87-8e87-08a084dcefb6)
 - [Microsoft SMB2 Durable Handle Request V2](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/5e361a29-81a7-4774-861d-f290ea53a00e)
+
+### Workstation retention operation
+
+The Workstation Manager **Snapshots** page is the only supported control surface for business-data archive/cleanup. The policy is opt-in: set `maintenance.businessRetention.enabled` and `maintenance.businessRetention.automaticEnabled` to `true` in `Portal-Desktop/config/portal.settings.json`, then use **Enable** under **Automatic archive** to register the current user's Windows Task Scheduler job. The default schedule is Friday at 21:00 local time.
+
+The same page manages the opt-in nightly maintenance task. The deployed `snapshot.nightly.run` coordinator task runs daily at 02:00 local time and publishes one verified checkpoint snapshot. It does not create backups or archive online operation packages.
+
+Use **Retention plan** before the first run. It records the first workstation observation of currently reachable packages; those packages remain online for at least seven observed days. The Friday task first verifies protected backups, publishes a replacement snapshot, moves eligible online `.opdb` packages to the shared archive, and only then removes the online copies. It also removes backup artifacts older than ninety days when their retained-snapshot and archived-operation safeguards are satisfied. The system keeps at least five verified snapshots. Workstation task-history log entries are trimmed to seven days. In the Workstation Manager **Snapshots** page, set **Online package retention** and **Verified snapshots** under **Retention policy**, then select **Save policy**. Those values may be increased, but are protected by minimums of seven days and five verified snapshots; backup retention is fixed at ninety days. The saved policy governs the scheduled task; manual backup creation is not supported.

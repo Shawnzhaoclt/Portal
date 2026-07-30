@@ -5,8 +5,9 @@ import { isDesktopRuntime } from './runtime'
 const DESKTOP_DATA_ORIGIN = 'http://portal-data.localhost'
 
 export type PortalTestAccess = {
-  teamId: number
-  teamName: string
+  userId: number
+  displayName: string
+  email: string
   role: 'user' | 'admin' | 'system_admin'
 }
 
@@ -18,8 +19,9 @@ export function storedPortalTestAccess(): PortalTestAccess | null {
   try {
     const value = JSON.parse(raw) as Partial<PortalTestAccess>
     if (
-      typeof value.teamId === 'number' &&
-      typeof value.teamName === 'string' &&
+      typeof value.userId === 'number' &&
+      typeof value.displayName === 'string' &&
+      typeof value.email === 'string' &&
       (value.role === 'user' || value.role === 'admin' || value.role === 'system_admin')
     ) {
       return value as PortalTestAccess
@@ -91,7 +93,7 @@ export async function portalRequest<T>(path: string, options: RequestInit = {}):
   const testAccess = storedPortalTestAccess()
   if (testAccess) {
     headers['X-Portal-Test-Access'] = '1'
-    headers['X-Portal-Test-Team-Id'] = String(testAccess.teamId)
+    headers['X-Portal-Test-User-Id'] = String(testAccess.userId)
     headers['X-Portal-Test-Role'] = testAccess.role
   }
   const response = await invoke<LocalResponse<T>>('python_request', {

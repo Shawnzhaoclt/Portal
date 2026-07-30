@@ -584,6 +584,22 @@ export function fetchCctvReviewReports() {
   return requestJson<{ reports: CctvReviewReport[]; total: number }>('/api/reports/proactive-team-cctv-review/reports')
 }
 
+export function pullBusinessDataNow() {
+  const user = storedManagementUser()
+  if (!user) {
+    throw new Error('No signed-in Portal user is available for data synchronization.')
+  }
+
+  return requestJson<{ cursors: Record<string, number>; status: Record<string, unknown> }>('/api/sync/pull', {
+    method: 'POST',
+    body: JSON.stringify({
+      user_id: String(user.id),
+      employee_number: user.employee_id,
+      email: user.email,
+    }),
+  })
+}
+
 export function fetchCctvReviewReportDetail(reportId: number) {
   return requestJson<CctvReviewReportDetail>(`/api/reports/proactive-team-cctv-review/reports/${reportId}`)
 }

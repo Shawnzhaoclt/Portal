@@ -107,3 +107,7 @@ export type AmTeamObservationResponse = {
   media: AmTeamInspectionMedia
   rows: AmTeamObservation[]
 }
+
+export type AmTeamObservationBatchResponse = {
+  rows: Record<string, AmTeamObservationResponse>
+}

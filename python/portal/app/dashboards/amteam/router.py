@@ -5,6 +5,7 @@ import os
 import re
 import sqlite3
 import struct
+from functools import lru_cache
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
@@ -374,24 +375,30 @@ def mp4_video_metadata(path: Path) -> dict[str, Any]:
 
 
 def media_url(path: Path) -> str:
-    root = amteam_media_root().resolve()
-    relative_path = path.resolve().relative_to(root).as_posix()
+    relative_path = media_relative_path(path)
     return f"/api/amteam/media?path={quote(relative_path, safe='/')}"
+
+
+def media_relative_path(path: Path) -> str:
+    """Return a media-root-relative path without resolving every network file."""
+    root = amteam_media_root()
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        # Callers normally pass paths derived from the configured root. Keep a
+        # defensive fallback for equivalent absolute paths with different forms.
+        return path.absolute().relative_to(root.absolute()).as_posix()
 
 
 def media_asset(path: Path, kind: str) -> dict[str, Any]:
     media_type, _ = mimetypes.guess_type(path)
-    root = amteam_media_root().resolve()
-    asset = {
+    return {
         "name": path.name,
         "kind": kind,
-        "relative_path": path.resolve().relative_to(root).as_posix(),
+        "relative_path": media_relative_path(path),
         "url": media_url(path),
         "media_type": media_type,
     }
-    if kind == "video":
-        asset.update(mp4_video_metadata(path))
-    return asset
 
 
 def inspection_media_directory(us_mh: Any, ds_mh: Any, inspection_date: Any) -> tuple[Path | None, list[str], dict[str, Any]]:
@@ -439,8 +446,16 @@ def inspection_media_directory(us_mh: Any, ds_mh: Any, inspection_date: Any) -> 
     return matches[0], warnings, metadata
 
 
-def inspection_media_assets(us_mh: Any, ds_mh: Any, inspection_date: Any) -> dict[str, Any]:
-    media_directory, warnings, metadata = inspection_media_directory(us_mh, ds_mh, inspection_date)
+@lru_cache(maxsize=256)
+def _inspection_media_assets_cached(
+    media_root: str,
+    us_mh: str,
+    ds_mh: str,
+    inspection_date_text: str,
+) -> dict[str, Any]:
+    # The CCTV media folders are read-only while the desktop app is running.
+    # Caching avoids repeated SMB directory enumeration for the same inspection.
+    media_directory, warnings, metadata = inspection_media_directory(us_mh, ds_mh, inspection_date_text)
     snapshots_dir = media_subdirectory(media_directory, "SnapShots") if media_directory else None
     videos_dir = media_subdirectory(media_directory, "Videos") if media_directory else None
     reports_dir = media_subdirectory(media_directory, "Reports") if media_directory else None
@@ -464,6 +479,15 @@ def inspection_media_assets(us_mh: Any, ds_mh: Any, inspection_date: Any) -> dic
         "reports": reports,
         "warnings": warnings,
     }
+
+
+def inspection_media_assets(us_mh: Any, ds_mh: Any, inspection_date: Any) -> dict[str, Any]:
+    return _inspection_media_assets_cached(
+        str(amteam_media_root()),
+        str(us_mh or ""),
+        str(ds_mh or ""),
+        str(inspection_date or ""),
+    )
 
 
 def normalized_file_token(value: Any) -> str:
@@ -652,8 +676,8 @@ def inspection_context(connection: sqlite3.Connection, mli_id: str) -> dict[str,
         select {select_sql}
         from {table_reference(INSPECTION_TABLE)} as i
         inner join {table_reference(PIPE_TABLE)} as p
-          on cast(i.{quote_identifier(inspection_ml_id)} as varchar) = cast(p.{quote_identifier(pipe_ml_id)} as varchar)
-        where cast(i.{quote_identifier(inspection_mli_id)} as varchar) = ?
+          on i.{quote_identifier(inspection_ml_id)} = p.{quote_identifier(pipe_ml_id)}
+        where i.{quote_identifier(inspection_mli_id)} = ?
         limit 1
         """,
         [mli_id],
@@ -909,6 +933,65 @@ def pipe_inspections(
         connection.close()
 
 
+def inspection_observation_payload(
+    connection: sqlite3.Connection,
+    mli_id: str,
+    *,
+    limit: int,
+    columns: ColumnMap | None = None,
+) -> dict[str, Any]:
+    """Load one inspection using indexed keys and one reusable source connection."""
+    context = inspection_context(connection, mli_id)
+    media = inspection_media_assets(
+        context.get("us_mh"),
+        context.get("ds_mh"),
+        context.get("inspection_date"),
+    ) if context else {
+        "media_root": str(amteam_media_root()),
+        "pipe_folder": None,
+        "inspection_folder": None,
+        "date_prefix": None,
+        "snapshots": [],
+        "videos": [],
+        "reports": [],
+        "warnings": ["Inspection record was not found, so media could not be resolved."],
+    }
+    columns = columns or observation_columns(available_column_lookup(connection, OBSERVATION_TABLE))
+    select_sql = ", ".join(select_expression(column, alias) for alias, column in columns.items())
+    mli_id_column = str(columns["mli_id"])
+    mlo_id_column = str(columns["mlo_id"])
+    grade_column = str(columns["grade"])
+    text_column = str(columns["observation_text"])
+    exclusion_sql = " and ".join(
+        f"lower(coalesce(cast({quote_identifier(text_column)} as varchar), '')) not like lower(?)" for _ in EXCLUDED_OBSERVATION_TEXT
+    )
+    rows = fetch_dicts(
+        connection,
+        f"""
+        select {select_sql}
+        from {table_reference(OBSERVATION_TABLE)}
+        where {quote_identifier(mli_id_column)} = ?
+          and {quote_identifier(grade_column)} is not null
+          and {exclusion_sql}
+        order by {quote_identifier(mlo_id_column)} asc
+        limit ?
+        """,
+        [mli_id, *[f"%{pattern}%" for pattern in EXCLUDED_OBSERVATION_TEXT], limit],
+    )
+    rows = dedupe_observation_rows(rows)
+    for row in rows:
+        matched_snapshots = matching_snapshot_assets(
+            row,
+            media["snapshots"],
+            context.get("us_mh") if context else None,
+            context.get("ds_mh") if context else None,
+        )
+        row["image_urls"] = [snapshot["url"] for snapshot in matched_snapshots]
+        row["image_available"] = len(matched_snapshots) > 0
+        row["image_url"] = row["image_urls"][0] if row["image_urls"] else None
+    return {"mli_id": mli_id, "media": media, "rows": rows}
+
+
 @router.get("/inspections/{mli_id}/observations")
 def inspection_observations(
     mli_id: str,
@@ -916,55 +999,36 @@ def inspection_observations(
 ) -> dict[str, Any]:
     connection = connect_amteam_database()
     try:
-        context = inspection_context(connection, mli_id)
-        media = inspection_media_assets(
-            context.get("us_mh"),
-            context.get("ds_mh"),
-            context.get("inspection_date"),
-        ) if context else {
-            "media_root": str(amteam_media_root()),
-            "pipe_folder": None,
-            "inspection_folder": None,
-            "date_prefix": None,
-            "snapshots": [],
-            "videos": [],
-            "reports": [],
-            "warnings": ["Inspection record was not found, so media could not be resolved."],
-        }
+        return inspection_observation_payload(connection, mli_id, limit=limit)
+    finally:
+        connection.close()
+
+
+@router.get("/inspections/observations")
+def inspection_observations_batch(
+    mli_id: list[str] | None = Query(default=None),
+    limit: int = Query(default=1000, ge=1, le=5000),
+) -> dict[str, Any]:
+    requested_ids = list(dict.fromkeys(item.strip() for item in (mli_id or []) if item and item.strip()))
+    if not requested_ids:
+        return {"rows": {}}
+    if len(requested_ids) > 500:
+        raise HTTPException(status_code=422, detail="A maximum of 500 inspection IDs can be loaded at once.")
+
+    connection = connect_amteam_database()
+    try:
         columns = observation_columns(available_column_lookup(connection, OBSERVATION_TABLE))
-        select_sql = ", ".join(select_expression(column, alias) for alias, column in columns.items())
-        mli_id_column = str(columns["mli_id"])
-        mlo_id_column = str(columns["mlo_id"])
-        grade_column = str(columns["grade"])
-        text_column = str(columns["observation_text"])
-        exclusion_sql = " and ".join(
-            f"lower(coalesce(cast({quote_identifier(text_column)} as varchar), '')) not like lower(?)" for _ in EXCLUDED_OBSERVATION_TEXT
-        )
-        rows = fetch_dicts(
-            connection,
-            f"""
-            select {select_sql}
-            from {table_reference(OBSERVATION_TABLE)}
-            where cast({quote_identifier(mli_id_column)} as varchar) = ?
-              and {quote_identifier(grade_column)} is not null
-              and {exclusion_sql}
-            order by PORTAL_INT({quote_identifier(mlo_id_column)}) asc nulls last, {quote_identifier(mlo_id_column)} asc
-            limit ?
-            """,
-            [mli_id, *[f"%{pattern}%" for pattern in EXCLUDED_OBSERVATION_TEXT], limit],
-        )
-        rows = dedupe_observation_rows(rows)
-        for row in rows:
-            matched_snapshots = matching_snapshot_assets(
-                row,
-                media["snapshots"],
-                context.get("us_mh") if context else None,
-                context.get("ds_mh") if context else None,
-            )
-            row["image_urls"] = [snapshot["url"] for snapshot in matched_snapshots]
-            row["image_available"] = len(matched_snapshots) > 0
-            row["image_url"] = row["image_urls"][0] if row["image_urls"] else None
-        return {"mli_id": mli_id, "media": media, "rows": rows}
+        return {
+            "rows": {
+                inspection_id: inspection_observation_payload(
+                    connection,
+                    inspection_id,
+                    limit=limit,
+                    columns=columns,
+                )
+                for inspection_id in requested_ids
+            }
+        }
     finally:
         connection.close()
 
