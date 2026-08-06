@@ -2,6 +2,7 @@
 param(
     [string]$OutputDirectory,
     [string]$PythonExecutable,
+    [string]$SystemDatabase,
     [string]$Version
 )
 
@@ -37,6 +38,13 @@ if (-not $PythonExecutable) {
 
 if (-not $OutputDirectory) {
     $OutputDirectory = Join-Path $projectRoot "dist\Portal-Desktop"
+}
+if (-not $SystemDatabase) {
+    $SystemDatabase = Join-Path $projectRoot "portal-manager\dist\Portal-Manager\config\system.db"
+}
+$SystemDatabase = [System.IO.Path]::GetFullPath($SystemDatabase)
+if (-not (Test-Path -LiteralPath $SystemDatabase -PathType Leaf)) {
+    throw "The authoritative Portal Manager system database was not found at $SystemDatabase."
 }
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $outputPrefix = $OutputDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
@@ -95,6 +103,20 @@ try {
         --source $legacySeed `
         --system $systemSeed
     if ($LASTEXITCODE -ne 0) { throw "Desktop database seed separation failed." }
+
+    $previousSystemDatabase = $env:PORTAL_SYSTEM_DB
+    try {
+        $env:PORTAL_SYSTEM_DB = $systemSeed
+        & $PythonExecutable -c "from portal.app.management.seed import initialize_management_database; initialize_management_database()"
+        if ($LASTEXITCODE -ne 0) { throw "Desktop system database initialization failed." }
+    }
+    finally {
+        if ($null -eq $previousSystemDatabase) {
+            Remove-Item Env:PORTAL_SYSTEM_DB -ErrorAction SilentlyContinue
+        } else {
+            $env:PORTAL_SYSTEM_DB = $previousSystemDatabase
+        }
+    }
 }
 finally {
     Pop-Location
@@ -172,7 +194,7 @@ if ($null -ne $existingSettings) {
     Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\config\desktop-config.template.json") -Destination $settingsOutput -Force
 }
 $packagedSystemDatabase = Join-Path $configOutput "system.db"
-Copy-Item -LiteralPath $systemSeed -Destination $packagedSystemDatabase -Force
+Copy-Item -LiteralPath $SystemDatabase -Destination $packagedSystemDatabase -Force
 Set-ItemProperty -LiteralPath $packagedSystemDatabase -Name IsReadOnly -Value $true
 
 $version = $Version

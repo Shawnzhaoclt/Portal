@@ -161,6 +161,63 @@ class TeamFeaturedResource(Base):
     resource: Mapped[Resource] = relationship("Resource")
 
 
+class CodeDictionary(Base):
+    __tablename__ = "SYS_DICTIONARIES"
+    __table_args__ = (
+        CheckConstraint("is_active IN (0, 1)", name="ck_dictionaries_is_active"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dictionary_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
+    updated_at: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+    items: Mapped[list["CodeDictionaryItem"]] = relationship(
+        "CodeDictionaryItem",
+        back_populates="dictionary",
+        cascade="all, delete-orphan",
+    )
+
+
+class CodeDictionaryItem(Base):
+    __tablename__ = "SYS_DICTIONARY_ITEMS"
+    __table_args__ = (
+        CheckConstraint("is_active IN (0, 1)", name="ck_dictionary_items_is_active"),
+        CheckConstraint("sort_order > 0", name="ck_dictionary_items_sort_order"),
+        UniqueConstraint("dictionary_id", "item_code", name="uq_dictionary_item_code"),
+        UniqueConstraint("dictionary_id", "label", name="uq_dictionary_item_label"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    dictionary_id: Mapped[int] = mapped_column(
+        ForeignKey("SYS_DICTIONARIES.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    item_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    sort_order: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
+    metadata_json: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
+    updated_at: Mapped[str] = mapped_column(
+        String,
+        nullable=False,
+        server_default=func.current_timestamp(),
+        onupdate=func.current_timestamp(),
+    )
+
+    dictionary: Mapped[CodeDictionary] = relationship("CodeDictionary", back_populates="items")
+
+
 class PasswordResetToken(Base):
     __tablename__ = "SYS_PASSWORD_RESET_TOKENS"
 

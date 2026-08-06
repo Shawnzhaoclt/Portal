@@ -43,7 +43,8 @@ Priorities, in order, are:
 - When the shared root is unavailable, a healthy compatible local replica may be opened in a clearly labeled degraded read-only mode. Creation, editing, workflow actions, and formal saves remain blocked; the App never queues offline business operations.
 - There are no more than 300 users, normally no more than 100 concurrently online.
 - No more than 20 users have edit permission, and they normally write only every several minutes or tens of minutes.
-- The expected scale is 20-30 business tables, with no table exceeding roughly one million rows after five years.
+- Capacity planning assumes at least 50 registered business tables. Any table may grow to several million rows, and the complete local replica may contain tens or hundreds of millions of rows over its lifetime.
+- Endpoint storage, snapshot duration, migration duration, and index cost must be sized and benchmarked against the aggregate planned dataset rather than against a single representative table.
 - Current data contains attributes and point/line/polygon vectors. It does not contain rasters, basemaps, or attachments.
 - v1 uses the `.db` suffix while preserving SQLite/GeoPackage structures internally.
 - v1 does not use SQLCipher. The data-access abstraction and migration framework must allow later adoption.
@@ -329,6 +330,8 @@ stateDiagram-v2
 - Python `sqlite3` may manage attributes and synchronization tables; geometry encoding, coordinate conversion, and spatial indexes go through the GeoPackage adapter.
 - Prepared outbox creation and actor-sequence allocation use one local transaction and do not modify business rows. After shared publication, business rows, geometry/R-Tree, `applied_operation`, and outbox applied state use one local connection and transaction.
 - Local databases may use WAL. Shared snapshots and operation packages are closed before publication and are never opened for writing by consumers.
+- The active `stormwater.db`, its WAL, temporary migration/replacement copy, and local rollback material must reside on local storage. Clients never run interactive queries against a mutable database opened directly from the network share.
+- Before initialization, snapshot replacement, or a copy-based migration, the App verifies sufficient free local space for the active database plus the complete replacement/migration working set and safety margin. If capacity cannot be proven, the operation fails closed.
 
 Recommended settings:
 
@@ -619,6 +622,8 @@ The same head set always produces the same revision regardless of arrival order.
 
 Relationships are `release -> table -> field/geometry/index/constraint`. Forms, layers, and rules reference stable table/field IDs rather than physical names. A package may include the active release and a bounded set of historical releases needed for migration.
 
+Every synchronized business table is explicitly registered as a typed physical table (or an explicitly registered normalized table set). The registry is not an EAV catalog and does not authorize creating arbitrary tables or columns when an operation first arrives. A new table, field, index, constraint, or geometry definition becomes usable only through an approved schema release and migration.
+
 Build and publication requirements:
 
 - Validate FKs, duplicate IDs, SQL identifiers, migration continuity, GeoPackage capability, and form references.
@@ -643,6 +648,21 @@ Build and publication requirements:
 Before publishing, the workstation removes its actor, outbox, drafts, UI settings, and workstation paths from the candidate, then writes normalized snapshot coverage. An existing client exports and restores its own local state during replacement.
 
 Use a reserved internal prefix such as `sw_sync_` and prohibit business schema from using it. All business and synchronization writes still share one SQLite connection and transaction. Do not depend on `ATTACH system.db` for cross-file atomicity.
+
+### 4.9 Large-Volume Physical Storage Contract
+
+Production sizing assumes at least 50 registered business tables and that any one of them may contain several million rows. The operation protocol remains generic, but the materialized business model does not.
+
+1. Each business entity type maps through a stable `table_id` to one typed physical table, or to an explicitly registered normalized table set, in `stormwater.db`.
+2. Typed columns, foreign keys, CHECK/UNIQUE constraints, business indexes, GeoPackage metadata, and R-Trees are the authoritative current state and primary query surface.
+3. A generic table such as `sw_sync_entity` with a `body_json` column must not be the authoritative full-record store or the primary query source. Full JSON bodies may exist transiently in prepared/inbox operation payloads and immutable `.opdb` packages, but are not retained as a second materialized copy of every business record.
+4. The reducer resolves the registered table and field IDs, then atomically updates the physical business rows, system-maintained revision/tombstone fields, side-table version state, geometry/R-Tree state, and applied-operation result.
+5. Synchronization metadata remains in side tables keyed by stable table/entity/field IDs. It must not duplicate complete business rows.
+6. Views may provide ordinary relational joins, calculated fields, or compatibility aliases. Interactive list, filter, sort, export, and map queries must not depend on `json_extract`, `json_each`, or JSON flattening across large entity collections.
+7. New or changed physical structures are installed only by explicit schema releases and idempotent migrations. Dynamic first-operation DDL is prohibited.
+8. Snapshot creation, initialization, migration, reducer catch-up, and bulk import use streaming or bounded chunks; implementations must not load a whole table, package history, or snapshot into memory.
+
+This contract preserves a generic synchronization protocol without sacrificing relational query performance. It also means that a business resource such as a CCTV report owns real registered tables rather than one aggregate JSON entity.
 
 ## 5. Operation Model
 
@@ -685,6 +705,8 @@ Every operation contains:
 ```
 
 Wall-clock time is for display and audit only. Base field versions, explicit dependencies, and actor sequence establish concurrency and validity.
+
+`entity_type` resolves to a stable registered `table_id`, and each field patch resolves to a stable registered `field_id`. The generic envelope is a transport contract; it does not imply generic JSON/EAV physical storage. A receiver rejects an operation whose table, field, type, or capability is absent from its installed approved schema release.
 
 ### 5.2 Supported Operation Types
 
@@ -819,7 +841,59 @@ INDEX  field_version_head(entity_type, entity_id, field_name)
 UNIQUE business_table(global_id)
 ```
 
-Owner, status, area, time-range, and FK indexes depend on real query plans and must be verified with `EXPLAIN QUERY PLAN`.
+Every registered physical business table has a unique `global_id` index. Owner, status, area, time-range, common sort, selective filter, and FK indexes depend on real resource query plans and must be declared in the schema release and verified with `EXPLAIN QUERY PLAN`. Interactive queries must not use generic JSON/EAV scans as a substitute for these indexes. After a bulk load or index-changing migration, run `ANALYZE` and retain representative query-plan evidence in release validation.
+
+#### Universal review-event indexes
+
+Cross-resource review history is stored in the typed physical table
+`SYS_RESOURCE_REVIEW_EVENTS` in `stormwater.db`. The stable `resource_key` identifies
+the report, map, document, or form; `subject_global_id` identifies the reviewed
+record. `resource_id` is only an optional local system-catalog reference and is not a
+cross-database synchronization identity.
+
+The first release must declare these six composite indexes:
+
+```sql
+CREATE INDEX SYS_RRE_subject_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, subject_type, subject_global_id,
+    deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_resource_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_actor_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    actor_user_id, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_type_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, event_type, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_correlation
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, correlation_id, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_conflict
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, conflict_state, event_at DESC, global_id DESC
+);
+```
+
+Do not add indexes for memo, display names, or status-transition fields without a
+measured query need. Use UTC ISO-8601 `event_at`, keep `global_id` as the ordering
+tie-breaker, and use keyset pagination on `(event_at, global_id)` for large event
+histories. Because the current registry supports ordinary composite indexes, the
+first release includes `deleted` as an equality column rather than an unregistered
+partial-index predicate. These indexes are schema-release artifacts, followed by
+`ANALYZE` and representative `EXPLAIN QUERY PLAN` evidence; they are never created
+implicitly at route or application startup.
 
 ## 7. Shared Directory Protocol
 
@@ -1265,14 +1339,14 @@ Strict pre-save revision normally rejects a second steward's simultaneous resolu
 
 Every client and workstation uses the same reducer version. For a complete transaction:
 
-1. Validate protocol/schema, actor identity, transaction completeness, and operation IDs.
+1. Validate protocol/schema, actor identity, transaction completeness, and operation IDs; resolve every table and field through the installed registry and reject unknown or disabled definitions.
 2. If every operation is terminal, return stored results idempotently.
 3. Check actor sequences, all base heads, and cross-record dependencies.
 4. Defer the entire set when a dependency is missing.
 5. Generate candidate insert/delete, fields, geometry, owner, workflow, and cross-table constraint results.
 6. Apply explicitly configured table reducers; otherwise generate conflict.
 7. If a critical operation conflicts, store the complete candidate/head set without partial business materialization.
-8. Otherwise update all business rows, field heads including `$tombstone`, geometry, and R-Tree.
+8. Otherwise update the registered typed physical business rows, field heads including `$tombstone`, geometry, and R-Tree using allowlisted prepared statements generated from the registry.
 9. Recompute record revision from sorted heads.
 10. Store terminal applied/conflict/rejected results and advance terminal cursor.
 11. Commit all steps in one SQLite transaction.
@@ -1330,7 +1404,7 @@ Global UNIQUE, foreign-key, workflow, assignment, and cross-table rules may rely
 
 ### 10.4 Scale Metrics
 
-Monitor feature count per layer, total/average/maximum vertex count, geometry BLOB bytes, R-Tree size, bbox candidate count, and exact geometry computation time. Row count alone is not a useful spatial capacity measure.
+Monitor row count and bytes per physical table and index, total database/page/WAL size, free-space headroom, query selectivity and full-scan count, reducer apply throughput, and snapshot build/hash/copy/install duration. For spatial tables also monitor feature count per layer, total/average/maximum vertex count, geometry BLOB bytes, R-Tree size, bbox candidate count, and exact geometry computation time. Row count alone is not a useful capacity measure.
 
 ## 11. Snapshots, Initialization, and Repair
 
@@ -1343,6 +1417,8 @@ Each retained snapshot release consists of one closed, WAL-checkpointed, immutab
 - `snapshot_actor_coverage` with the highest continuous covered sequence and current log floor per actor;
 - current field heads, tombstones, and all open conflicts/candidates;
 - valid SQLite, foreign-key, GeoPackage, geometry/SRS, and R-Tree state.
+
+At the planned aggregate scale, snapshots can be large. Snapshot creation must use SQLite backup/copy primitives and bounded-memory verification, and publication cadence must be justified by measured build, hash, copy, install, and recovery times on the real LAN. A client with a valid compatible local replica normally pulls incremental operations; it does not download the full snapshot at every startup. Capacity planning must include the active local database, temporary replacement/migration space, five retained verified shared snapshots, and the independent backup policy.
 
 The whole-file SHA-256 and size are stored in `snapshots/current.json` because a file cannot contain its own whole-file hash. The pointer duplicates the small compatibility, catalog, coverage, and floor fields needed to decide whether a client should download the large database. After download, every duplicated value must match the internal snapshot tables.
 
@@ -1895,7 +1971,7 @@ The Workstation Manager is a shared-authority tool. It never opens, validates fo
 
 ### 14.1 Write Load
 
-The stress example is 100 updates from 30 users in five minutes: 20 formal saves/minute, about 0.33/second. Even bursts 5-10 times higher are below local SQLite transaction capability. Likely bottlenecks are snapshot size, missing database indexes, geometry vertex complexity, synchronized polling from 100 clients, and operation-package/snapshot copy and hash cost.
+The stress example is 100 updates from 30 users in five minutes: 20 formal saves/minute, about 0.33/second. Even bursts 5-10 times higher are below local SQLite transaction capability. The more important risks are aggregate database size, physical-table/index design, snapshot and migration duration, geometry vertex complexity, synchronized polling from 100 clients, and operation-package/snapshot copy and hash cost.
 
 ### 14.2 Database Rules
 
@@ -1908,6 +1984,9 @@ The stress example is 100 updates from 30 users in five minutes: 20 formal saves
 - Never auto-run full `VACUUM` during interactive use.
 - Centralize writes in one queue; keep read transactions short.
 - Commit each remote business transaction independently. A sync window may process multiple small transactions but must not hold a long write lock.
+- Keep authoritative current state in typed physical tables. Do not introduce JSON-document, EAV, or one-row-per-aggregate storage for million-row business workloads.
+- Stream result sets and use bounded pagination/keyset iteration for exports, reducer rebuilds, validation, and maintenance jobs.
+- Treat SQLite/GeoPackage feasibility as a measured release gate. If the planned aggregate dataset cannot meet query, snapshot, migration, recovery, and endpoint-storage targets, revisit the architecture rather than silently switching to JSON scans or incomplete replicas.
 
 ### 14.3 Shared Directory Rules
 
@@ -2017,8 +2096,12 @@ Feed the same operation set to at least three clients with different order, pack
 
 - 300 registered clients, 100 concurrent pollers, 20 editing actors.
 - Average four business saves/minute plus bursts/bulk import.
-- One million attribute rows in one table.
-- One million points and representative line/polygon vertex distributions.
+- At least 50 registered typed physical business tables.
+- Representative attribute tables at 1 million, 5 million, and 10 million rows, with an aggregate test dataset of at least 50 million rows or the current planned upper bound, whichever is greater.
+- Representative spatial tables at 1 million and 5 million features with realistic line/polygon vertex distributions and geometry sizes.
+- Hot and cold list/filter/sort/export/map queries with `EXPLAIN QUERY PLAN` checks that reject unexpected full-table scans and JSON/EAV flattening.
+- Snapshot construction, whole-file hash, LAN copy, client installation, copy-based migration, recovery, and free-space guard behavior at the aggregate planned database size.
+- Incremental reducer catch-up and conflict convergence against physical tables without keeping duplicate full-record JSON state.
 - Long-lived logs, long per-actor package chains, snapshot construction, and catch-up behavior without protocol checkpoint files.
 - Slow/high-latency share, brief disconnects, low disk.
 - Record P50/P95/P99, CPU, memory, disk, network, and lock wait.

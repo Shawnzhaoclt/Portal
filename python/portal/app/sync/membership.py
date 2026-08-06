@@ -37,6 +37,10 @@ class MembershipRelease:
 
 def load_membership(protocol_root: Path) -> MembershipRelease:
     pointer_path = protocol_root / "membership" / "current.json"
+    if not pointer_path.is_file():
+        raise ProtocolViolation(
+            "The shared synchronization repository has not published a membership release."
+        )
     pointer = read_json(pointer_path)
     if int(pointer.get("protocol_version", -1)) != PROTOCOL_VERSION:
         raise ProtocolViolation("Membership protocol version is unsupported.")

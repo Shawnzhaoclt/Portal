@@ -80,10 +80,12 @@ class SharedSchemaPublisher:
             "snapshot_created_at": self._snapshot_created_at(source),
             "target_release_id": active_release["release_id"],
             "target_schema_version": active_release["schema_version"],
+            "target_catalog_hash": active_release["catalog_hash"],
             "catalog_hash": active_release["catalog_hash"],
             "rollback_available": False,
             "checks": checks,
             **(state or {"installed_release_id": None, "installed_schema_version": None}),
+            "installed_catalog_hash": state.get("catalog_hash") if state else None,
         }
 
     def validate(self) -> dict[str, Any]:

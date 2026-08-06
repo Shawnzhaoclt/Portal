@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from typing import Any
 
 from portal.runtime.transport import HTTPException
@@ -39,6 +40,21 @@ def display_name(user: User | None) -> str | None:
     if user is None:
         return None
     return f"{user.first_name} {user.last_name}".strip()
+
+
+def username_from_name(first_name: str, last_name: str) -> str:
+    """Build the stable login username from the user's first and last name."""
+
+    def normalize(value: str) -> str:
+        ascii_value = unicodedata.normalize("NFKD", str(value or ""))
+        ascii_value = ascii_value.encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]", "", ascii_value.lower())
+
+    first = normalize(first_name)
+    last = normalize(last_name)
+    if not first or not last:
+        raise ValueError("First name and last name are required to generate a username.")
+    return f"{first[0]}{last}"
 
 
 def available_roles(user: User) -> list[str]:

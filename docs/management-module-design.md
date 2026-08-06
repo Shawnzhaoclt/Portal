@@ -122,20 +122,22 @@ Suggested resource types:
 
 Some resources may allow public access. Public resources should be visible without a user-specific permission assignment.
 
-### Featured Items
+### Team Featured and My Favorites
 
-Users should be able to customize their own featured resource items. These behave like pinned resources on the Portal home page.
+Team Featured resources are centrally configured by an Admin or System Admin in Portal Manager and published in the read-only system catalog. My Favorites are personal Desktop preferences stored in the synchronized business database.
 
-Featured items should reference existing resources instead of duplicating resource data.
+Both configurations reference the public eight-character resource ID instead of duplicating resource metadata.
 
-Suggested behavior:
+Required behavior:
 
-- A user can pin resources they are allowed to access.
-- A user can unpin their own featured resources.
-- A user can reorder their featured resources.
-- If a resource is disabled or the user loses access, it should not appear in their featured list.
-- Public resources can be pinned by any user.
-- Admins may optionally configure default featured resources later.
+- Portal Manager configures only Team Featured resources.
+- A Desktop user can add or remove resources they are allowed to access from My Favorites. Each Portal category has an independent favorites list.
+- My Favorites synchronize between the user's workstations through `stormwater.db`.
+- When a user has no personal favorites in the selected category, Desktop copies that category from the user's accessible Team Featured resources into `PORTAL_USER_FAVORITES` in `stormwater.db`.
+- Desktop provides a **Load team settings** action that replaces only the selected category's synchronized personal list with the matching Team Featured configuration.
+- If a resource is disabled or the user loses access, it is hidden without deleting the saved preference.
+- Public resources can be favorited by any active user.
+- Personal favorites do not override or modify Team Featured resources.
 
 ### Permissions
 
@@ -467,11 +469,8 @@ CREATE TABLE SYS_USER_FEATURED_RESOURCES (
 
 Notes:
 
-- This table stores each user's pinned or featured portal resources.
-- Users may only pin resources they can access.
-- If a user loses access to a resource, the backend should hide it from the featured list.
-- `sort_order` controls the display order on the Portal home page.
-- `category` allows one featured order per Portal category.
+- This legacy system-catalog table is preserved for compatibility but is not writable by Portal Desktop.
+- New personal preferences are stored in `PORTAL_USER_FAVORITES` in `stormwater.db`.
 
 ### SYS_TEAM_FEATURED_RESOURCES
 
@@ -495,8 +494,34 @@ CREATE TABLE SYS_TEAM_FEATURED_RESOURCES (
 Notes:
 
 - This table stores team default featured resources.
-- User featured resources override team defaults; if a user has no personal configuration, load the team default.
+- Team Featured resources remain visible independently of My Favorites.
 - `category` allows admins to configure defaults per Portal category.
+
+### PORTAL_USER_FAVORITES (`stormwater.db`)
+
+```sql
+CREATE TABLE PORTAL_USER_FAVORITES (
+  global_id TEXT PRIMARY KEY,
+  owner_user_id INTEGER,
+  owner_employee_number TEXT,
+  category TEXT,
+  resource_id TEXT,
+  sort_order INTEGER,
+  created_at DATETIME,
+  updated_at DATETIME,
+  record_revision TEXT NOT NULL,
+  deleted INTEGER NOT NULL DEFAULT 0,
+  conflict_state TEXT NOT NULL DEFAULT 'none',
+  selected_operation_id TEXT
+);
+```
+
+Notes:
+
+- One synchronized entity is stored per employee, category, and resource.
+- `global_id` is deterministically derived from the employee number, category, and public resource ID. Existing All Resources IDs remain stable during migration.
+- Ownership is always taken from the authenticated Desktop session.
+- Tombstones preserve add/remove history and allow the same favorite to be restored safely.
 
 ### SYS_PASSWORD_RESET_TOKENS
 
@@ -609,7 +634,10 @@ User-facing APIs:
 GET  /api/me
 GET  /api/me/resources
 GET  /api/me/featured-resources
-PUT  /api/me/featured-resources
+GET  /api/me/favorites?category={category}
+PUT  /api/me/favorites/{resource_id}?category={category}
+DELETE /api/me/favorites/{resource_id}?category={category}
+POST /api/me/favorites/load-team-settings?category={category}
 POST /api/auth/change-password
 ```
 

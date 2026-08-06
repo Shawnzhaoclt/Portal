@@ -6,10 +6,21 @@ import sqlite3
 import uuid
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import Iterator, Mapping, Sequence
 
 from .errors import ProtocolViolation, RevisionChanged
 from .models import ActorHead, Identity, Mutation, Operation, canonical_json, utc_now
+from .physical_entities import (
+    count_all_physical_entities,
+    delete_physical_entity,
+    dependency_order,
+    get_physical_entity,
+    initialize_physical_schema,
+    is_managed_entity_type,
+    materialize_physical_entity,
+    physical_spec,
+    query_physical_entities,
+)
 
 
 SCHEMA_SQL = """
@@ -165,6 +176,7 @@ class LocalStore:
     def initialize(self) -> None:
         with closing(self.connect()) as connection:
             connection.executescript(SCHEMA_SQL)
+            initialize_physical_schema(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO sw_sync_install_state(singleton) VALUES (1)"
             )
@@ -256,9 +268,10 @@ class LocalStore:
         """
         self.initialize()
         with closing(self.connect()) as connection:
-            entities = int(
+            generic_entities = int(
                 connection.execute("SELECT COUNT(*) FROM sw_sync_entity").fetchone()[0]
             )
+            physical_entities = count_all_physical_entities(connection)
             pending = int(
                 connection.execute(
                     """
@@ -268,7 +281,7 @@ class LocalStore:
                     """
                 ).fetchone()[0]
             )
-        return entities > 0 or pending > 0
+        return generic_entities > 0 or physical_entities > 0 or pending > 0
 
     def has_pending_outbox(self) -> bool:
         """Return whether this device has work not proven present in a snapshot.
@@ -363,6 +376,14 @@ class LocalStore:
 
     def current_revision(self, entity_type: str, entity_id: str) -> str | None:
         with closing(self.connect()) as connection:
+            spec = physical_spec(entity_type)
+            if spec:
+                row = connection.execute(
+                    f'SELECT record_revision FROM "{spec.table}" WHERE global_id=?',
+                    (entity_id,),
+                ).fetchone()
+                return str(row[0]) if row else None
+            self._require_registered_entity_type(entity_type)
             row = connection.execute(
                 "SELECT record_revision FROM sw_sync_entity WHERE entity_type=? AND entity_id=?",
                 (entity_type, entity_id),
@@ -371,6 +392,9 @@ class LocalStore:
 
     def get_entity(self, entity_type: str, entity_id: str) -> dict[str, object] | None:
         with closing(self.connect()) as connection:
+            if physical_spec(entity_type):
+                return get_physical_entity(connection, entity_type, entity_id)
+            self._require_registered_entity_type(entity_type)
             row = connection.execute(
                 "SELECT * FROM sw_sync_entity WHERE entity_type=? AND entity_id=?",
                 (entity_type, entity_id),
@@ -390,6 +414,9 @@ class LocalStore:
     def list_entities(self, entity_type: str) -> list[dict[str, object]]:
         """Return the current materialized entities for a synchronized resource."""
         with closing(self.connect()) as connection:
+            if physical_spec(entity_type):
+                return query_physical_entities(connection, entity_type)
+            self._require_registered_entity_type(entity_type)
             rows = connection.execute(
                 """
                 SELECT entity_type, entity_id, body_json, geometry, record_revision, deleted, conflict_state
@@ -412,8 +439,57 @@ class LocalStore:
             for row in rows
         ]
 
+    def query_entities(
+        self,
+        entity_type: str,
+        *,
+        filters: Mapping[str, object] | None = None,
+        order_by: Sequence[tuple[str, bool]] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        include_deleted: bool = False,
+    ) -> list[dict[str, object]]:
+        """Query a registered physical entity without loading its full table."""
+        self._require_registered_entity_type(entity_type)
+        if physical_spec(entity_type) is None:
+            raise ProtocolViolation(
+                f"Entity type {entity_type} does not have a registered physical table."
+            )
+        with closing(self.connect()) as connection:
+            return query_physical_entities(
+                connection,
+                entity_type,
+                filters=filters,
+                order_by=order_by,
+                limit=limit,
+                offset=offset,
+                include_deleted=include_deleted,
+            )
+
+    def count_entities(
+        self,
+        entity_type: str,
+        *,
+        filters: Mapping[str, object] | None = None,
+        include_deleted: bool = False,
+    ) -> int:
+        """Count registered physical rows using SQL-side filtering."""
+        self._require_registered_entity_type(entity_type)
+        if physical_spec(entity_type) is None:
+            raise ProtocolViolation(
+                f"Entity type {entity_type} does not have a registered physical table."
+            )
+        with closing(self.connect()) as connection:
+            return count_physical_entities(
+                connection,
+                entity_type,
+                filters=filters,
+                include_deleted=include_deleted,
+            )
+
     def validate_revisions(self, mutations: Sequence[Mutation]) -> None:
         for mutation in mutations:
+            self._require_registered_entity_type(mutation.entity_type)
             current = self.current_revision(mutation.entity_type, mutation.entity_id)
             expected = mutation.base_record_revision
             if mutation.operation_type == "insert_entity":
@@ -573,7 +649,9 @@ class LocalStore:
                     ),
                 )
                 affected.add((operation.entity_type, operation.entity_id))
-            for entity_type, entity_id in sorted(affected):
+            for entity_type, entity_id in sorted(
+                affected, key=lambda item: (dependency_order(item[0]), item[0], item[1])
+            ):
                 self._recompute_entity(connection, entity_type, entity_id)
             for operation in operations:
                 result = connection.execute(
@@ -621,6 +699,7 @@ class LocalStore:
     def _recompute_entity(
         self, connection: sqlite3.Connection, entity_type: str, entity_id: str
     ) -> None:
+        self._require_registered_entity_type(entity_type)
         rows = connection.execute(
             """
             SELECT * FROM sw_sync_operation_log
@@ -698,8 +777,13 @@ class LocalStore:
             elif operation_type == "delete_entity":
                 deleted = True
             elif operation_type == "restore_entity":
+                body.update(values)
                 deleted = False
             elif operation_type == "append_event":
+                if physical_spec(entity_type):
+                    raise ProtocolViolation(
+                        f"Typed entity {entity_type} must store events as registered event rows."
+                    )
                 events = list(body.get("events", []))
                 events.append(values)
                 body["events"] = events
@@ -708,34 +792,51 @@ class LocalStore:
             current_revision = selected["output_record_revision"]
 
         if current_revision is None:
+            delete_physical_entity(connection, entity_type, entity_id)
             connection.execute(
                 "DELETE FROM sw_sync_entity WHERE entity_type=? AND entity_id=?",
                 (entity_type, entity_id),
             )
         else:
-            connection.execute(
-                """
-                INSERT INTO sw_sync_entity(
-                    entity_type, entity_id, body_json, geometry, record_revision,
-                    deleted, conflict_state, selected_operation_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(entity_type, entity_id) DO UPDATE SET
-                    body_json=excluded.body_json, geometry=excluded.geometry,
-                    record_revision=excluded.record_revision, deleted=excluded.deleted,
-                    conflict_state=excluded.conflict_state,
-                    selected_operation_id=excluded.selected_operation_id
-                """,
-                (
+            if physical_spec(entity_type):
+                if geometry is not None:
+                    raise ProtocolViolation(
+                        f"Typed entity {entity_type} does not define a geometry column."
+                    )
+                materialize_physical_entity(
+                    connection,
                     entity_type,
                     entity_id,
-                    canonical_json(body),
-                    geometry,
-                    current_revision,
-                    int(deleted),
-                    "open" if conflict_ids else "none",
-                    selected_operation_id,
-                ),
-            )
+                    body,
+                    record_revision=str(current_revision),
+                    deleted=deleted,
+                    conflict_state="open" if conflict_ids else "none",
+                    selected_operation_id=selected_operation_id,
+                )
+            else:
+                connection.execute(
+                    """
+                    INSERT INTO sw_sync_entity(
+                        entity_type, entity_id, body_json, geometry, record_revision,
+                        deleted, conflict_state, selected_operation_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+                        body_json=excluded.body_json, geometry=excluded.geometry,
+                        record_revision=excluded.record_revision, deleted=excluded.deleted,
+                        conflict_state=excluded.conflict_state,
+                        selected_operation_id=excluded.selected_operation_id
+                    """,
+                    (
+                        entity_type,
+                        entity_id,
+                        canonical_json(body),
+                        geometry,
+                        current_revision,
+                        int(deleted),
+                        "open" if conflict_ids else "none",
+                        selected_operation_id,
+                    ),
+                )
         connection.execute(
             "UPDATE sw_sync_operation_log SET terminal_result='deferred' WHERE entity_type=? AND entity_id=?",
             (entity_type, entity_id),
@@ -768,6 +869,13 @@ class LocalStore:
                 WHERE entity_type=? AND entity_id=? AND state='open'
                 """,
                 (entity_type, entity_id),
+            )
+
+    @staticmethod
+    def _require_registered_entity_type(entity_type: str) -> None:
+        if is_managed_entity_type(entity_type) and physical_spec(entity_type) is None:
+            raise ProtocolViolation(
+                f"Business entity type {entity_type} is not registered with a physical table."
             )
 
     def update_actor_head(self, head: ActorHead) -> None:

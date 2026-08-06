@@ -24,6 +24,14 @@
                                               "manifest":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json",
                                               "readOnly":  true
                                           },
+                        "itpipes":  {
+                                         "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/itpipes_stormwater_prod.duckdb",
+                                         "readOnly":  true
+                                     },
+                        "itpipesMerged":  {
+                                               "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/itpipes/itpipes.db",
+                                               "readOnly":  true
+                                           },
                         "gisFacility":  {
                                             "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
                                             "readOnly":  true

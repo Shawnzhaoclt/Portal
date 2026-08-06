@@ -1,20 +1,36 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from portal.runtime.transport import APIRouter, Depends, Header, HTTPException, Query, Request
 
 from portal.app.management.database import get_db
-from portal.app.management.models import AuditLog, Resource, ResourcePermission, Team, TeamFeaturedResource, User, UserFeaturedResource
+from portal.app.management.models import (
+    AuditLog,
+    CodeDictionary,
+    CodeDictionaryItem,
+    Resource,
+    ResourcePermission,
+    Team,
+    TeamFeaturedResource,
+    User,
+)
 from portal.app.management.resource_ids import normalize_resource_id, resource_id_validation_error
 from portal.app.management.schemas import (
     AdminStatusRequest,
     BulkPermissionsRequest,
     ChangePasswordRequest,
+    DictionaryCreateRequest,
+    DictionaryItemCreateRequest,
+    DictionaryItemOrderRequest,
+    DictionaryItemUpdateRequest,
+    DictionaryUpdateRequest,
     FeaturedResourcesRequest,
     LoginRequest,
     PermissionAssignment,
@@ -54,6 +70,7 @@ from portal.app.management.services import (
     team_ancestor_ids,
     is_management_admin_session,
     is_system_admin_session,
+    username_from_name,
     combine_permission_masks,
     is_valid_permission_mask,
     permission_label,
@@ -70,6 +87,7 @@ router = APIRouter(tags=["portal-management"])
 
 FEATURED_CATEGORIES = ("all", "dashboard", "map", "tab", "doc", "report", "dataset")
 FEATURED_LIMIT_PER_CATEGORY = 4
+SYSTEM_DATABASE_WRITER_EMAIL = "shawn.zhao@charlottenc.gov"
 LEGACY_FEATURED_CATEGORY_MAP = {
     "dashboards": "dashboard",
     "maps": "map",
@@ -87,6 +105,94 @@ def _commit(db: Session) -> None:
     except IntegrityError as error:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(error.orig)) from error
+
+
+def _require_system_database_writer(current_user: User) -> None:
+    """Keep catalog-only edits behind the manager role boundary.
+
+    Portal Manager is the approved native administration surface. The legacy
+    desktop writer allowlist remains in place for browser/development flows,
+    while manager requests are authorized by the selected Portal role.
+    """
+    if os.getenv("PORTAL_MANAGER_MODE", "").strip().lower() in {"1", "true", "yes"}:
+        require_management_admin(current_user)
+        return
+    if current_user.email.strip().casefold() != SYSTEM_DATABASE_WRITER_EMAIL:
+        raise HTTPException(
+            status_code=403,
+            detail="Only shawn.zhao@charlottenc.gov can update the Portal system database.",
+        )
+    if os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes"}:
+        if os.getenv("PORTAL_SYSTEM_DB_WRITE_ENABLED", "").strip() != "1":
+            raise HTTPException(
+                status_code=403,
+                detail="The Portal system database is read-only for this Windows account.",
+            )
+
+
+def _normalize_dictionary_code(value: str, label: str) -> str:
+    source = value.strip() or label.strip()
+    normalized = re.sub(r"_+", "_", re.sub(r"[^a-z0-9]+", "_", source.lower())).strip("_")
+    if not normalized:
+        raise HTTPException(status_code=422, detail="Code must contain a letter or number.")
+    if len(normalized) > 64:
+        raise HTTPException(status_code=422, detail="Code cannot exceed 64 characters.")
+    return normalized
+
+
+def _dictionary_or_404(db: Session, dictionary_key: str) -> CodeDictionary:
+    dictionary = db.scalar(
+        select(CodeDictionary).where(CodeDictionary.dictionary_key == dictionary_key.strip().lower())
+    )
+    if dictionary is None:
+        raise HTTPException(status_code=404, detail="Dictionary was not found.")
+    return dictionary
+
+
+def _dictionary_items(db: Session, dictionary_id: int) -> list[CodeDictionaryItem]:
+    return list(
+        db.scalars(
+            select(CodeDictionaryItem)
+            .where(CodeDictionaryItem.dictionary_id == dictionary_id)
+            .order_by(CodeDictionaryItem.sort_order, CodeDictionaryItem.label, CodeDictionaryItem.id)
+        ).all()
+    )
+
+
+def _serialize_dictionary_item(item: CodeDictionaryItem) -> dict[str, object]:
+    metadata: dict[str, object] | None = None
+    if item.metadata_json:
+        try:
+            parsed = json.loads(item.metadata_json)
+            metadata = parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            metadata = None
+    return {
+        "id": item.id,
+        "dictionary_id": item.dictionary_id,
+        "item_code": item.item_code,
+        "label": item.label,
+        "sort_order": item.sort_order,
+        "is_active": bool(item.is_active),
+        "metadata": metadata,
+        "created_at": item.created_at,
+        "updated_at": item.updated_at,
+    }
+
+
+def _serialize_dictionary(db: Session, dictionary: CodeDictionary) -> dict[str, object]:
+    items = _dictionary_items(db, dictionary.id)
+    return {
+        "id": dictionary.id,
+        "dictionary_key": dictionary.dictionary_key,
+        "name": dictionary.name,
+        "description": dictionary.description,
+        "is_active": bool(dictionary.is_active),
+        "item_count": len(items),
+        "active_item_count": sum(1 for item in items if item.is_active),
+        "created_at": dictionary.created_at,
+        "updated_at": dictionary.updated_at,
+    }
 
 
 def _resource_string_id_or_400(
@@ -107,10 +213,6 @@ def _resource_string_id_or_400(
     if conflict is not None:
         raise HTTPException(status_code=400, detail=f"Resource ID {resource_string_id} is already registered to {conflict.resource_key}.")
     return resource_string_id
-
-
-def _username_from_email(email: str, employee_id: str) -> str:
-    return (email.split("@", 1)[0].strip().lower() or employee_id.strip())
 
 
 def _request_data(payload) -> dict:
@@ -146,7 +248,7 @@ def _featured_request_by_category(payload: FeaturedResourcesRequest) -> dict[str
     return selections
 
 
-def _serialize_featured_rows(rows: list[UserFeaturedResource | TeamFeaturedResource], db: Session, current_user: User | None = None) -> tuple[dict[str, list[dict]], set[str]]:
+def _serialize_featured_rows(rows: list[TeamFeaturedResource], db: Session, current_user: User | None = None) -> tuple[dict[str, list[dict]], set[str]]:
     featured: dict[str, list[dict]] = {category: [] for category in FEATURED_CATEGORIES}
     configured_categories: set[str] = set()
 
@@ -170,13 +272,6 @@ def _serialize_featured_rows(rows: list[UserFeaturedResource | TeamFeaturedResou
 
 
 def _serialize_featured_resources(current_user: User, db: Session) -> dict:
-    personal_rows = db.scalars(
-        select(UserFeaturedResource)
-        .where(UserFeaturedResource.user_id == current_user.id)
-        .order_by(UserFeaturedResource.category, UserFeaturedResource.sort_order, UserFeaturedResource.id)
-    ).all()
-    personal_featured, personal_configured_categories = _serialize_featured_rows(personal_rows, db, current_user)
-
     default_featured: dict[str, list[dict]] = {category: [] for category in FEATURED_CATEGORIES}
     default_configured_categories: set[str] = set()
     if current_user.team_id is not None:
@@ -188,9 +283,11 @@ def _serialize_featured_resources(current_user: User, db: Session) -> dict:
         default_featured, default_configured_categories = _serialize_featured_rows(default_rows, db, current_user)
 
     return {
-        "resources": personal_featured["all"],
-        "featured": personal_featured,
-        "configured_categories": sorted(personal_configured_categories),
+        # Preserve the response shape for older clients while making the
+        # selected user's team configuration authoritative.
+        "resources": default_featured["all"],
+        "featured": default_featured,
+        "configured_categories": sorted(default_configured_categories),
         "default_resources": default_featured["all"],
         "default_featured": default_featured,
         "default_configured_categories": sorted(default_configured_categories),
@@ -221,21 +318,78 @@ def _extract_bearer_token(authorization: str | None) -> str:
     return authorization[len(prefix):].strip()
 
 
+def _normalize_windows_identity(value: str | None) -> str:
+    return str(value or "").strip().casefold()
+
+
+def _desktop_identity_values() -> list[str]:
+    """Return all Windows identity values that may identify the signed-in user.
+
+    Domain-qualified account names are reduced to their account component as
+    well, so both ``CHARLOTTE\\105692`` and ``105692`` can match a Portal
+    username or employee ID.
+    """
+    raw_values = [
+        os.getenv("PORTAL_WINDOWS_EMAIL"),
+        os.getenv("PORTAL_WINDOWS_EMPLOYEE_ID"),
+        os.getenv("PORTAL_WINDOWS_USERNAME"),
+        os.getenv("PORTAL_WINDOWS_ACCOUNT"),
+        os.getenv("USERPRINCIPALNAME"),
+        os.getenv("USERNAME"),
+        os.getenv("USER"),
+    ]
+    domain = _normalize_windows_identity(os.getenv("USERDOMAIN"))
+    username = _normalize_windows_identity(os.getenv("USERNAME"))
+    if domain and username:
+        raw_values.append(f"{domain}\\{username}")
+
+    values: list[str] = []
+    for raw_value in raw_values:
+        value = _normalize_windows_identity(raw_value)
+        if not value:
+            continue
+        candidates = [value]
+        if "\\" in value:
+            candidates.append(value.rsplit("\\", 1)[-1])
+        if "/" in value:
+            candidates.append(value.rsplit("/", 1)[-1])
+        for candidate in candidates:
+            if candidate and candidate not in values:
+                values.append(candidate)
+    return values
+
+
+def _desktop_identity_label() -> str:
+    return ", ".join(_desktop_identity_values()) or "unresolved Windows account"
+
+
 def _desktop_current_user(db: Session) -> User | None:
     if os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() not in {"1", "true", "yes"}:
         return None
 
-    windows_email = os.getenv("PORTAL_WINDOWS_EMAIL", "").strip().lower()
-    if not windows_email or "@" not in windows_email:
+    identity_values = _desktop_identity_values()
+    if not identity_values:
         return None
 
     return db.scalar(
         select(User).where(
             User.deleted_at.is_(None),
             User.is_active == 1,
-            func.lower(User.email) == windows_email,
+            or_(
+                func.lower(User.email).in_(identity_values),
+                func.lower(User.employee_id).in_(identity_values),
+                func.lower(User.username).in_(identity_values),
+            ),
         )
     )
+
+
+def _desktop_runtime() -> bool:
+    return os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes"}
+
+
+def _manager_runtime() -> bool:
+    return os.getenv("PORTAL_MANAGER_MODE", "").strip().lower() in {"1", "true", "yes"}
 
 
 def _initialize_desktop_business_sync(user: User) -> None:
@@ -297,6 +451,9 @@ def get_current_user(
     test_role: str | None = Header(default=None, alias="X-Portal-Test-Role"),
     db: Session = Depends(get_db),
 ) -> User:
+    if _desktop_runtime() and not _manager_runtime() and request.path.startswith("/api/admin"):
+        raise HTTPException(status_code=403, detail="Portal Administration is available only in Portal Manager.")
+
     payload = None
     if authorization:
         token = _extract_bearer_token(authorization)
@@ -376,20 +533,24 @@ def desktop_login(db: Session = Depends(get_db)) -> dict:
     if os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() not in {"1", "true", "yes"}:
         raise HTTPException(status_code=404, detail="Desktop sign-in is not available in this runtime.")
 
-    windows_email = os.getenv("PORTAL_WINDOWS_EMAIL", "").strip().lower()
-    if not windows_email or "@" not in windows_email:
-        raise HTTPException(status_code=401, detail="The Windows account email could not be resolved.")
+    identity_values = _desktop_identity_values()
+    if not identity_values:
+        raise HTTPException(status_code=401, detail="The signed-in Windows account identity could not be resolved.")
 
     user = _desktop_current_user(db)
     if user is None:
         raise HTTPException(
             status_code=401,
-            detail=f"The Windows account {windows_email} is not an active Portal user.",
+            detail=f"The Windows account identity ({_desktop_identity_label()}) is not an active Portal user.",
         )
 
     selected_role = "user"
     set_selected_user_role(user, selected_role)
-    _initialize_desktop_business_sync(user)
+    # Portal Manager authenticates against the same Windows identity, but it
+    # is an operator/administration host and must not block on the desktop
+    # business-data replica or network synchronization during sign-in.
+    if os.getenv("PORTAL_MANAGER_MODE", "").strip().lower() not in {"1", "true", "yes"}:
+        _initialize_desktop_business_sync(user)
     return {
         "token": create_access_token(user.id, selected_role),
         "token_type": "bearer",
@@ -406,6 +567,8 @@ def switch_role(
     role = payload.role.strip()
     if not role:
         raise HTTPException(status_code=400, detail="Role is required.")
+    if _desktop_runtime() and not _manager_runtime() and role != "user":
+        raise HTTPException(status_code=403, detail="Elevated Portal roles are available only in Portal Manager.")
 
     user = db.merge(current_user)
     set_selected_user_role(user, role)
@@ -456,33 +619,13 @@ def my_featured_resources(current_user: User = Depends(get_current_user), db: Se
 
 @router.put("/api/me/featured-resources")
 def update_my_featured_resources(
-    payload: FeaturedResourcesRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
+    _payload: FeaturedResourcesRequest,
+    _current_user: User = Depends(get_current_user),
 ) -> dict:
-    selections = _featured_request_by_category(payload)
-    resource_ids = sorted({resource_id for category_ids in selections.values() for resource_id in category_ids})
-    resources_by_id = {resource_id: get_resource_or_404(db, resource_id) for resource_id in resource_ids}
-    for resource in resources_by_id.values():
-        if effective_resource_permission(db, current_user, resource) is None:
-            raise HTTPException(status_code=403, detail=f"You do not have access to resource {resource.id}.")
-        if resource.resource_type in {"admin", "api", "service"}:
-            raise HTTPException(status_code=400, detail="Admin, API, and service resources cannot be featured on the portal home page.")
-
-    db.execute(delete(UserFeaturedResource).where(UserFeaturedResource.user_id == current_user.id))
-    for category, category_resource_ids in selections.items():
-        for index, resource_id in enumerate(category_resource_ids):
-            db.add(
-                UserFeaturedResource(
-                    user_id=current_user.id,
-                    category=category,
-                    resource_record_id=resources_by_id[resource_id].id,
-                    sort_order=index,
-                )
-            )
-    write_audit_log(db, current_user, "update_featured_resources", "user", current_user.id, {"featured": selections})
-    _commit(db)
-    return my_featured_resources(current_user, db)
+    raise HTTPException(
+        status_code=405,
+        detail="Personal featured-item configuration is no longer supported. Featured items are managed by team.",
+    )
 
 
 @router.get("/api/admin/summary")
@@ -529,13 +672,21 @@ def create_user(
 ) -> dict:
     if payload.is_admin:
         require_system_admin(current_user)
+    first_name = payload.first_name.strip()
+    last_name = payload.last_name.strip()
+    try:
+        username = username_from_name(first_name, last_name)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     employee_id = payload.employee_id.strip()
     if db.scalar(select(User).where(User.employee_id == employee_id)):
         raise HTTPException(status_code=409, detail="Employee ID already exists.")
+    if db.scalar(select(User).where(User.username == username)):
+        raise HTTPException(status_code=409, detail=f"Generated username '{username}' already exists.")
     user = User(
-        username=payload.username or _username_from_email(str(payload.email), payload.employee_id),
-        first_name=payload.first_name.strip(),
-        last_name=payload.last_name.strip(),
+        username=username,
+        first_name=first_name,
+        last_name=last_name,
         email=str(payload.email),
         employee_id=employee_id,
         team_id=payload.team_id,
@@ -563,6 +714,19 @@ def update_user(
 ) -> dict:
     target = get_user_or_404(db, user_id)
     updates = _request_data(payload)
+    first_name = str(updates.get("first_name", target.first_name) or "").strip()
+    last_name = str(updates.get("last_name", target.last_name) or "").strip()
+    try:
+        username = username_from_name(first_name, last_name)
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    if db.scalar(select(User).where(User.username == username, User.id != target.id)):
+        raise HTTPException(status_code=409, detail=f"Generated username '{username}' already exists.")
+    updates["username"] = username
+    if "first_name" in updates:
+        updates["first_name"] = first_name
+    if "last_name" in updates:
+        updates["last_name"] = last_name
     if target.is_system_admin and not is_system_admin_session(current_user):
         raise HTTPException(status_code=403, detail="Portal admins cannot modify system admin accounts.")
     if "is_active" in updates and not updates["is_active"] and target.is_system_admin:
@@ -1213,6 +1377,247 @@ def delete_resource_permission(
     db.delete(permission)
     _commit(db)
     return {"ok": True}
+
+
+@router.get("/api/admin/dictionaries")
+def list_dictionaries(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    dictionaries = db.scalars(
+        select(CodeDictionary).order_by(CodeDictionary.name, CodeDictionary.id)
+    ).all()
+    return {
+        "dictionaries": [_serialize_dictionary(db, dictionary) for dictionary in dictionaries]
+    }
+
+
+@router.post("/api/admin/dictionaries")
+def create_dictionary(
+    payload: DictionaryCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    _require_system_database_writer(current_user)
+    name = payload.name.strip()
+    dictionary_key = _normalize_dictionary_code(payload.dictionary_key or "", name)
+    if db.scalar(
+        select(CodeDictionary).where(CodeDictionary.dictionary_key == dictionary_key)
+    ):
+        raise HTTPException(status_code=409, detail="That dictionary key already exists.")
+    dictionary = CodeDictionary(
+        dictionary_key=dictionary_key,
+        name=name,
+        description=(payload.description or "").strip() or None,
+        is_active=1,
+    )
+    db.add(dictionary)
+    db.flush()
+    write_audit_log(
+        db,
+        current_user,
+        "create_dictionary",
+        "dictionary",
+        dictionary.id,
+        {"dictionary_key": dictionary_key, "name": name},
+    )
+    _commit(db)
+    db.refresh(dictionary)
+    return {"dictionary": _serialize_dictionary(db, dictionary)}
+
+
+@router.patch("/api/admin/dictionaries/{dictionary_key}")
+def update_dictionary(
+    dictionary_key: str,
+    payload: DictionaryUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    _require_system_database_writer(current_user)
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    changes: dict[str, object] = {}
+    if payload.name is not None:
+        dictionary.name = payload.name.strip()
+        changes["name"] = dictionary.name
+    if payload.description is not None:
+        dictionary.description = payload.description.strip() or None
+        changes["description"] = dictionary.description
+    if payload.is_active is not None:
+        dictionary.is_active = 1 if payload.is_active else 0
+        changes["is_active"] = payload.is_active
+    if changes:
+        write_audit_log(
+            db,
+            current_user,
+            "update_dictionary",
+            "dictionary",
+            dictionary.id,
+            changes,
+        )
+        _commit(db)
+        db.refresh(dictionary)
+    return {"dictionary": _serialize_dictionary(db, dictionary)}
+
+
+@router.get("/api/admin/dictionaries/{dictionary_key}/items")
+def list_dictionary_items(
+    dictionary_key: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    return {
+        "dictionary": _serialize_dictionary(db, dictionary),
+        "items": [
+            _serialize_dictionary_item(item)
+            for item in _dictionary_items(db, dictionary.id)
+        ],
+    }
+
+
+@router.post("/api/admin/dictionaries/{dictionary_key}/items")
+def create_dictionary_item(
+    dictionary_key: str,
+    payload: DictionaryItemCreateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    _require_system_database_writer(current_user)
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    label = payload.label.strip()
+    item_code = _normalize_dictionary_code(payload.item_code or "", label)
+    duplicate = db.scalar(
+        select(CodeDictionaryItem).where(
+            CodeDictionaryItem.dictionary_id == dictionary.id,
+            (CodeDictionaryItem.item_code == item_code)
+            | (CodeDictionaryItem.label == label),
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="That item code or label already exists.")
+    existing_items = _dictionary_items(db, dictionary.id)
+    sort_order = payload.sort_order or (
+        max((item.sort_order for item in existing_items), default=0) + 1
+    )
+    item = CodeDictionaryItem(
+        dictionary_id=dictionary.id,
+        item_code=item_code,
+        label=label,
+        sort_order=sort_order,
+        is_active=1,
+        metadata_json=json.dumps(payload.metadata, sort_keys=True) if payload.metadata else None,
+    )
+    db.add(item)
+    db.flush()
+    write_audit_log(
+        db,
+        current_user,
+        "create_dictionary_item",
+        "dictionary_item",
+        item.id,
+        {
+            "dictionary_key": dictionary.dictionary_key,
+            "item_code": item_code,
+            "label": label,
+        },
+    )
+    _commit(db)
+    db.refresh(item)
+    return {"item": _serialize_dictionary_item(item)}
+
+
+@router.patch("/api/admin/dictionaries/{dictionary_key}/items/{item_id}")
+def update_dictionary_item(
+    dictionary_key: str,
+    item_id: int,
+    payload: DictionaryItemUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    _require_system_database_writer(current_user)
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    item = db.get(CodeDictionaryItem, item_id)
+    if item is None or item.dictionary_id != dictionary.id:
+        raise HTTPException(status_code=404, detail="Dictionary item was not found.")
+    changes: dict[str, object] = {}
+    if payload.label is not None:
+        label = payload.label.strip()
+        duplicate = db.scalar(
+            select(CodeDictionaryItem).where(
+                CodeDictionaryItem.dictionary_id == dictionary.id,
+                CodeDictionaryItem.label == label,
+                CodeDictionaryItem.id != item.id,
+            )
+        )
+        if duplicate:
+            raise HTTPException(status_code=409, detail="That item label already exists.")
+        item.label = label
+        changes["label"] = label
+    if payload.sort_order is not None:
+        item.sort_order = payload.sort_order
+        changes["sort_order"] = payload.sort_order
+    if payload.is_active is not None:
+        item.is_active = 1 if payload.is_active else 0
+        changes["is_active"] = payload.is_active
+    if payload.metadata is not None:
+        item.metadata_json = json.dumps(payload.metadata, sort_keys=True)
+        changes["metadata"] = payload.metadata
+    if changes:
+        write_audit_log(
+            db,
+            current_user,
+            "update_dictionary_item",
+            "dictionary_item",
+            item.id,
+            {"dictionary_key": dictionary.dictionary_key, **changes},
+        )
+        _commit(db)
+        db.refresh(item)
+    return {"item": _serialize_dictionary_item(item)}
+
+
+@router.put("/api/admin/dictionaries/{dictionary_key}/items-order")
+def reorder_dictionary_items(
+    dictionary_key: str,
+    payload: DictionaryItemOrderRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_management_admin(current_user)
+    _require_system_database_writer(current_user)
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    items = _dictionary_items(db, dictionary.id)
+    item_ids = payload.item_ids
+    if len(item_ids) != len(set(item_ids)) or set(item_ids) != {item.id for item in items}:
+        raise HTTPException(
+            status_code=422,
+            detail="The display order must include every dictionary item exactly once.",
+        )
+    by_id = {item.id: item for item in items}
+    previous_order = [item.id for item in items]
+    for sort_order, item_id in enumerate(item_ids, start=1):
+        by_id[item_id].sort_order = sort_order
+    write_audit_log(
+        db,
+        current_user,
+        "reorder_dictionary_items",
+        "dictionary",
+        dictionary.id,
+        {"previous_order": previous_order, "item_ids": item_ids},
+    )
+    _commit(db)
+    return {
+        "items": [
+            _serialize_dictionary_item(item)
+            for item in _dictionary_items(db, dictionary.id)
+        ]
+    }
 
 
 @router.get("/api/admin/audit-logs")

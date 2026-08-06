@@ -4,6 +4,7 @@ import { Tooltip } from 'radix-ui'
 import { toast } from 'sonner'
 import {
   AlertCircle,
+  ArrowLeft,
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
@@ -11,6 +12,7 @@ import {
   ChevronsRight,
   Download,
   Edit3,
+  Ellipsis,
   Eye,
   FileText,
   History,
@@ -159,7 +161,7 @@ const DEFAULT_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
   submitted_at: 100,
   reviewed_by_name: 100,
   reviewed_at: 100,
-  operations: 180,
+  operations: 208,
 }
 
 const MIN_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
@@ -176,7 +178,7 @@ const MIN_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
   submitted_at: 100,
   reviewed_by_name: 100,
   reviewed_at: 100,
-  operations: 180,
+  operations: 208,
 }
 
 const REPORT_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
@@ -632,6 +634,7 @@ export default function ProactiveTeamCCTVReview() {
   const [pageSize, setPageSize] = useState(10)
   const [isCreateModalOpen, setCreateModalOpen] = useState(false)
   const [workspaceModal, setWorkspaceModal] = useState<WorkspaceState | null>(null)
+  const [workspaceDirty, setWorkspaceDirty] = useState(false)
   const [eventModal, setEventModal] = useState<EventModalState | null>(null)
   const [downloadingReportId, setDownloadingReportId] = useState<number | null>(null)
 
@@ -661,8 +664,37 @@ export default function ProactiveTeamCCTVReview() {
     loadReports()
   }, [])
 
+  useEffect(() => {
+    if (!workspaceModal || !workspaceDirty) return undefined
+
+    const confirmBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', confirmBeforeUnload)
+    return () => window.removeEventListener('beforeunload', confirmBeforeUnload)
+  }, [workspaceDirty, workspaceModal])
+
+  function openWorkspace(workspace: WorkspaceState) {
+    setWorkspaceDirty(false)
+    setWorkspaceModal(workspace)
+  }
+
+  function closeWorkspace() {
+    if (workspaceDirty && !window.confirm('Discard unsaved review changes and return to the report list?')) return
+    setWorkspaceDirty(false)
+    setWorkspaceModal(null)
+  }
+
   function handleReportSaved(report: CctvReviewReport) {
     toast.success('Report saved.')
+    setWorkspaceDirty(false)
+    setWorkspaceModal((currentWorkspace) => (
+      currentWorkspace && 'report' in currentWorkspace && currentWorkspace.report.id === report.id
+        ? { ...currentWorkspace, report }
+        : currentWorkspace
+    ))
     setReports((currentReports) => {
       const existingIndex = currentReports.findIndex((currentReport) => currentReport.id === report.id)
       if (existingIndex < 0) return [report, ...currentReports]
@@ -798,6 +830,7 @@ export default function ProactiveTeamCCTVReview() {
     try {
       await deleteCctvReviewReport(report.id)
       toast.success('Report deleted.')
+      setWorkspaceDirty(false)
       setReports((currentReports) => currentReports.filter((currentReport) => currentReport.id !== report.id))
       setWorkspaceModal((currentWorkspace) =>
         currentWorkspace && 'report' in currentWorkspace && currentWorkspace.report.id === report.id ? null : currentWorkspace,
@@ -879,49 +912,61 @@ export default function ProactiveTeamCCTVReview() {
   function renderActions(report: CctvReviewReport) {
     const isPending = report.status === 'pending'
     const isReady = report.status === 'ready_to_review'
+    const hasDeleteAction = canDeleteReport(report)
 
     return (
       <Tooltip.Provider delayDuration={250} skipDelayDuration={100}>
         <div className="cctv-report-actions">
-          <ReportActionButton onClick={() => setWorkspaceModal({ mode: 'view', report })} tooltip="View report" type="button">
+          <ReportActionButton onClick={() => openWorkspace({ mode: 'view', report })} tooltip="View report" type="button">
             <Eye size={15} />
           </ReportActionButton>
-        {isPending ? (
-          <>
-            <ReportActionButton onClick={() => setWorkspaceModal({ mode: 'edit', report })} tooltip="Edit report" type="button">
+          {isPending ? (
+            <ReportActionButton onClick={() => openWorkspace({ mode: 'edit', report })} tooltip="Edit report" type="button">
               <Edit3 size={15} />
             </ReportActionButton>
-            <ReportActionButton onClick={() => runStatusAction(report, 'submit_to_review')} tooltip="Submit to review" type="button">
+          ) : null}
+          <ReportActionButton
+            disabled={downloadingReportId === report.id}
+            onClick={() => void downloadReport(report)}
+            tooltip="Download report"
+            type="button"
+          >
+            {downloadingReportId === report.id ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+          </ReportActionButton>
+          {isPending ? (
+            <ReportActionButton onClick={() => void runStatusAction(report, 'submit_to_review')} tooltip="Submit to review" type="button">
               <Send size={15} />
             </ReportActionButton>
-          </>
-        ) : null}
-        {isReady ? (
-          <>
-            <ReportActionButton onClick={() => runStatusAction(report, 'return_to_edit')} tooltip="Return to edit" type="button">
-              <RotateCcw size={15} />
+          ) : null}
+          {isReady ? (
+            <>
+              <ReportActionButton onClick={() => void runStatusAction(report, 'return_to_edit')} tooltip="Return to edit" type="button">
+                <RotateCcw size={15} />
+              </ReportActionButton>
+              <ReportActionButton onClick={() => void runStatusAction(report, 'complete')} tooltip="Complete review" type="button">
+                <CheckCircle2 size={15} />
+              </ReportActionButton>
+            </>
+          ) : null}
+          {hasDeleteAction ? (
+            <details className="cctv-report-action-menu">
+              <summary aria-label="More report actions" title="More report actions">
+                <Ellipsis size={17} />
+              </summary>
+              <div className="cctv-report-action-menu-panel">
+                <button onClick={() => void openReportEvents(report)} type="button">
+                  <History size={15} /> Events
+                </button>
+                <button className="danger" onClick={() => void deleteReport(report)} type="button">
+                  <Trash2 size={15} /> Delete report
+                </button>
+              </div>
+            </details>
+          ) : (
+            <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
+              <History size={15} />
             </ReportActionButton>
-            <ReportActionButton onClick={() => runStatusAction(report, 'complete')} tooltip="Complete review" type="button">
-              <CheckCircle2 size={15} />
-            </ReportActionButton>
-          </>
-        ) : null}
-        <ReportActionButton
-          disabled={downloadingReportId === report.id}
-          onClick={() => void downloadReport(report)}
-          tooltip="Download report"
-          type="button"
-        >
-          {downloadingReportId === report.id ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
-        </ReportActionButton>
-        <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
-          <History size={15} />
-        </ReportActionButton>
-        {canDeleteReport(report) ? (
-          <ReportActionButton className="danger" onClick={() => void deleteReport(report)} tooltip="Delete report" type="button">
-            <Trash2 size={15} />
-          </ReportActionButton>
-        ) : null}
+          )}
         </div>
       </Tooltip.Provider>
     )
@@ -949,6 +994,7 @@ export default function ProactiveTeamCCTVReview() {
           hideReviewNavigation
           reportSaveContext={reportSaveContextFromDraft(workspace.draft)}
           onReportSaved={handleReportSaved}
+          onDirtyChange={setWorkspaceDirty}
         />
       )
     }
@@ -964,6 +1010,7 @@ export default function ProactiveTeamCCTVReview() {
         readOnly={workspace.mode !== 'edit'}
         reportSaveContext={workspace.mode === 'edit' ? reportSaveContextFromReport(workspace.report) : undefined}
         onReportSaved={handleReportSaved}
+        onDirtyChange={setWorkspaceDirty}
       />
     )
   }
@@ -977,7 +1024,33 @@ export default function ProactiveTeamCCTVReview() {
   }
 
   return (
-    <div className="cctv-report-page">
+    <div className={`cctv-report-page${workspaceModal ? ' is-workspace-open' : ''}`}>
+      {workspaceModal ? (
+        <section className="cctv-report-workspace-shell" aria-label="Report edit and view">
+          <header className="cctv-report-workspace-commandbar">
+            <button className="cctv-report-workspace-back" onClick={closeWorkspace} type="button">
+              <ArrowLeft size={18} /> Reports
+            </button>
+            <div className="cctv-report-workspace-heading">
+              <span>{workspaceModal.mode === 'view' ? 'Read-only report' : workspaceModal.mode === 'new' ? 'New report' : 'Edit report'}</span>
+              <strong>{workspaceTitle()}</strong>
+            </div>
+            <div className="cctv-report-workspace-actions">
+              <span className={`cctv-report-workspace-draft-state${workspaceDirty ? ' is-dirty' : ''}`}>
+                {workspaceModal.mode === 'view' ? 'Read-only' : workspaceDirty ? 'Draft changes pending' : 'All changes saved'}
+              </span>
+              {'report' in workspaceModal ? (
+                <button onClick={() => void openReportEvents(workspaceModal.report)} type="button">
+                  <History size={16} /> Events
+                </button>
+              ) : null}
+            </div>
+          </header>
+          <div className="cctv-report-workspace-body">
+            {renderWorkspace()}
+          </div>
+        </section>
+      ) : (
       <section className="cctv-report-shell">
         <div className="cctv-report-toolbar">
           <div>
@@ -1093,6 +1166,7 @@ export default function ProactiveTeamCCTVReview() {
           </div>
         </div>
       </section>
+      )}
 
       {isCreateModalOpen ? (
         <div className="cctv-report-modal cctv-report-create-modal" role="dialog" aria-modal="true" aria-label="Create report">
@@ -1106,27 +1180,10 @@ export default function ProactiveTeamCCTVReview() {
               onReportsLoaded={setReports}
               onStartDraft={(draft) => {
                 setCreateModalOpen(false)
-                setWorkspaceModal({ mode: 'new', draft })
+                openWorkspace({ mode: 'new', draft })
               }}
             />
           </aside>
-        </div>
-      ) : null}
-
-      {workspaceModal ? (
-        <div className="cctv-report-modal cctv-report-workspace-modal" role="dialog" aria-modal="true" aria-label="Report edit and view">
-          <div className="cctv-report-modal-backdrop" onClick={() => setWorkspaceModal(null)} />
-          <section className="cctv-report-popup-window cctv-report-review-window" aria-label="Report edit and view">
-            <button className="cctv-report-modal-close" onClick={() => setWorkspaceModal(null)} title="Close" type="button">
-              <X size={24} />
-            </button>
-            <header className="cctv-report-review-pane-header">
-              <strong>{workspaceTitle()}</strong>
-            </header>
-            <div className="cctv-report-review-pane-body">
-              {renderWorkspace()}
-            </div>
-          </section>
         </div>
       ) : null}
 

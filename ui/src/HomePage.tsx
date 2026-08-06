@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   BarChart3,
   Check,
@@ -24,6 +24,7 @@ import {
 import stormwaterLogo from './assets/stormwater-logo.png'
 import {
   ADMIN_MANAGEMENT_ROUTE,
+  ACCOUNT_ROUTE,
   CRITICAL_ASSET_SHEET_ROUTES,
   CRITICAL_TEAM_SHEET_ROUTES,
   DASHBOARD_CATALOG,
@@ -32,13 +33,17 @@ import {
 } from './dashboardCatalog'
 import {
   clearManagementToken,
+  addMyFavorite,
   fetchMe,
   fetchMyFeaturedResources,
+  fetchMyFavorites,
   fetchMyResources,
   fetchUsers,
+  loadMyTeamFavoriteSettings,
   managementSessionTransferUrl,
   saveManagementToken,
   saveManagementUser,
+  removeMyFavorite,
   storedManagementToken,
   storedManagementUser,
   switchRole,
@@ -710,10 +715,16 @@ function ResourceCard({
   resource,
   theme,
   onOpen,
+  favorite,
+  favoriteBusy,
+  onToggleFavorite,
 }: {
   resource: PortalResource
   theme: AppTheme
   onOpen: (resource: PortalResource) => void
+  favorite?: boolean
+  favoriteBusy?: boolean
+  onToggleFavorite?: (resource: PortalResource) => void
 }) {
   const thumbnail = theme === 'dark' && resource.darkThumbnail ? resource.darkThumbnail : resource.thumbnail
 
@@ -728,6 +739,18 @@ function ResourceCard({
           <span>{resource.title}</span>
         </button>
         <div className="home-resource-footer">
+          {onToggleFavorite ? (
+            <button
+              className={`home-favorite-button ${favorite ? 'active' : ''}`}
+              type="button"
+              disabled={favoriteBusy}
+              onClick={() => onToggleFavorite(resource)}
+              aria-label={`${favorite ? 'Remove' : 'Add'} ${resource.title} ${favorite ? 'from' : 'to'} My Favorites`}
+              title={favorite ? 'Remove from My Favorites' : 'Add to My Favorites'}
+            >
+              <Star size={18} fill={favorite ? 'currentColor' : 'none'} />
+            </button>
+          ) : null}
           <button type="button" onClick={() => onOpen(resource)} aria-label={`${resource.title} details`}>
             <Info size={17} />
           </button>
@@ -839,8 +862,7 @@ function DesktopResourceWorkspace({
   )
 }
 
-const ACCOUNT_PROFILE_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=profile`
-const ACCOUNT_FAVORITES_ROUTE = `${ADMIN_MANAGEMENT_ROUTE}?tab=featured`
+const ACCOUNT_PROFILE_ROUTE = `${ACCOUNT_ROUTE}?tab=profile`
 
 function accountDisplayName(user: PortalUser) {
   return user.first_name || user.display_name || 'Account'
@@ -858,6 +880,7 @@ function isManagementRole(role: PortalRole) {
 
 function AccountMenu({
   user,
+  showAdmin,
   showSignOut,
   testAccess,
   onSignOut,
@@ -866,6 +889,7 @@ function AccountMenu({
   onStopTestAccess,
 }: {
   user: PortalUser
+  showAdmin: boolean
   showSignOut: boolean
   testAccess: PortalTestAccess | null
   onSignOut: () => void
@@ -927,7 +951,7 @@ function AccountMenu({
               {roleError ? <div className="home-account-role-error">{roleError}</div> : null}
             </div>
           ) : null}
-          {isManagementRole(user.selected_role) ? (
+          {showAdmin && isManagementRole(user.selected_role) ? (
             <a href={ADMIN_MANAGEMENT_ROUTE} role="menuitem">
               <Settings size={16} />
               Portal Admin
@@ -949,10 +973,6 @@ function AccountMenu({
           <a href={ACCOUNT_PROFILE_ROUTE} role="menuitem">
             <UserRound size={16} />
             Profile
-          </a>
-          <a href={ACCOUNT_FAVORITES_ROUTE} role="menuitem">
-            <Star size={16} />
-            Favorites
           </a>
           {showSignOut ? (
             <button type="button" role="menuitem" onClick={onSignOut}>
@@ -1039,11 +1059,16 @@ function TestAccessDialog({
 export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const desktopRuntime = isDesktopRuntime()
   const [activeCategory, setActiveCategory] = useState<ResourceCategory>('all')
+  const activeFeaturedCategory = featuredCategoryForPortalCategory(activeCategory)
+  const activeFeaturedCategoryRef = useRef(activeFeaturedCategory)
+  activeFeaturedCategoryRef.current = activeFeaturedCategory
   const [searchTerm, setSearchTerm] = useState('')
-  const [managedFeaturedResourcesByCategory, setManagedFeaturedResourcesByCategory] = useState<PortalFeaturedResourcesByCategory>({})
-  const [configuredFeaturedCategories, setConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
   const [defaultFeaturedResourcesByCategory, setDefaultFeaturedResourcesByCategory] = useState<PortalFeaturedResourcesByCategory>({})
   const [defaultConfiguredFeaturedCategories, setDefaultConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
+  const [favoriteResourceIds, setFavoriteResourceIds] = useState<string[]>([])
+  const [favoriteBusyResourceId, setFavoriteBusyResourceId] = useState<string | null>(null)
+  const [favoritesLoadingTeam, setFavoritesLoadingTeam] = useState(false)
+  const [favoritesError, setFavoritesError] = useState('')
   const [accessibleManagedResources, setAccessibleManagedResources] = useState<ManagedPortalResource[]>([])
   const [portalUser, setPortalUser] = useState<PortalUser | null>(() => storedManagementUser())
   const [previewUser, setPreviewUser] = useState<PortalUser | null>(null)
@@ -1093,8 +1118,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       .then(([resourcesResponse, featuredResponse]) => {
         if (!cancelled) {
           setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
-          setManagedFeaturedResourcesByCategory(featuredResponse.featured ?? { all: featuredResponse.resources })
-          setConfiguredFeaturedCategories(featuredResponse.configured_categories ?? (featuredResponse.resources.length ? ['all'] : []))
           setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
           setDefaultConfiguredFeaturedCategories(
             featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
@@ -1104,8 +1127,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       .catch(() => {
         if (cancelled) return
         setAccessibleManagedResources([])
-        setManagedFeaturedResourcesByCategory({})
-        setConfiguredFeaturedCategories([])
         setDefaultFeaturedResourcesByCategory({})
         setDefaultConfiguredFeaturedCategories([])
       })
@@ -1114,6 +1135,36 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       cancelled = true
     }
   }, [desktopRuntime, testAccess?.role, testAccess?.userId])
+
+  useEffect(() => {
+    if (!desktopRuntime || testAccess) {
+      setFavoriteResourceIds([])
+      setFavoritesError('')
+      return
+    }
+
+    let cancelled = false
+    setFavoriteResourceIds([])
+    setFavoritesError('')
+    fetchMyFavorites(activeFeaturedCategory)
+      .then(async (response) => {
+        const resolvedResponse = response.total === 0
+          ? await loadMyTeamFavoriteSettings(activeFeaturedCategory)
+          : response
+        if (cancelled) return
+        setFavoriteResourceIds(resolvedResponse.favorites.map((favorite) => favorite.resource_id))
+        if (resolvedResponse.loaded === false && resolvedResponse.message) setFavoritesError(resolvedResponse.message)
+      })
+      .catch((favoritesLoadError) => {
+        if (cancelled) return
+        setFavoriteResourceIds([])
+        setFavoritesError(favoritesLoadError instanceof Error ? favoritesLoadError.message : 'Could not load My Favorites.')
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeFeaturedCategory, desktopRuntime, testAccess])
 
   useEffect(() => {
     if (!popupResource) return
@@ -1138,10 +1189,10 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     clearManagementToken()
     setPortalUser(null)
     setAccessibleManagedResources([])
-    setManagedFeaturedResourcesByCategory({})
-    setConfiguredFeaturedCategories([])
     setDefaultFeaturedResourcesByCategory({})
     setDefaultConfiguredFeaturedCategories([])
+    setFavoriteResourceIds([])
+    setFavoritesError('')
     setDesktopResourceTabs([])
     setActiveDesktopResourceId(null)
     window.location.replace(PORTAL_LOGIN_ROUTE)
@@ -1174,6 +1225,53 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     }
   }
 
+  async function handleToggleFavorite(resource: PortalResource) {
+    if (!desktopRuntime || testAccess || !resource.resourceId || favoriteBusyResourceId || favoritesLoadingTeam) return
+    const resourceId = resource.resourceId
+    const favorite = favoriteResourceIds.includes(resourceId)
+    setFavoriteBusyResourceId(resourceId)
+    setFavoritesError('')
+    const category = activeFeaturedCategory
+    try {
+      const response = favorite
+        ? await removeMyFavorite(resourceId, category)
+        : await addMyFavorite(resourceId, category)
+      const resolvedResponse = response.total === 0
+        ? await loadMyTeamFavoriteSettings(category)
+        : response
+      if (activeFeaturedCategoryRef.current !== category) return
+      setFavoriteResourceIds(resolvedResponse.favorites.map((item) => item.resource_id))
+      if (resolvedResponse.loaded === false && resolvedResponse.message) setFavoritesError(resolvedResponse.message)
+    } catch (favoriteError) {
+      setFavoritesError(favoriteError instanceof Error ? favoriteError.message : 'Could not update My Favorites.')
+    } finally {
+      setFavoriteBusyResourceId(null)
+    }
+  }
+
+  async function handleLoadTeamFavoriteSettings() {
+    if (!desktopRuntime || testAccess || favoritesLoadingTeam || favoriteBusyResourceId) return
+    if (
+      favoriteResourceIds.length > 0 &&
+      !window.confirm(`Replace My Favorites for ${CATEGORY_OPTIONS.find((option) => option.key === activeCategory)?.label ?? 'this category'} with the current team settings?`)
+    ) {
+      return
+    }
+    setFavoritesLoadingTeam(true)
+    setFavoritesError('')
+    const category = activeFeaturedCategory
+    try {
+      const response = await loadMyTeamFavoriteSettings(category)
+      if (activeFeaturedCategoryRef.current !== category) return
+      setFavoriteResourceIds(response.favorites.map((item) => item.resource_id))
+      if (!response.loaded && response.message) setFavoritesError(response.message)
+    } catch (favoriteError) {
+      setFavoritesError(favoriteError instanceof Error ? favoriteError.message : 'Could not load team settings.')
+    } finally {
+      setFavoritesLoadingTeam(false)
+    }
+  }
+
   async function handlePortalRoleSwitch(role: PortalRole) {
     clearPortalTestAccess()
     setTestAccess(null)
@@ -1195,8 +1293,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       saveManagementUser(refreshedUser)
       setPortalUser(refreshedUser)
       setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
-      setManagedFeaturedResourcesByCategory(featuredResponse.featured ?? { all: featuredResponse.resources })
-      setConfiguredFeaturedCategories(featuredResponse.configured_categories ?? (featuredResponse.resources.length ? ['all'] : []))
       setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
       setDefaultConfiguredFeaturedCategories(
         featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
@@ -1205,8 +1301,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       saveManagementUser(switchedUser)
       setPortalUser(switchedUser)
       setAccessibleManagedResources([])
-      setManagedFeaturedResourcesByCategory({})
-      setConfiguredFeaturedCategories([])
       setDefaultFeaturedResourcesByCategory({})
       setDefaultConfiguredFeaturedCategories([])
     }
@@ -1256,6 +1350,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     [managedCardResources],
   )
   const availableResourceKeys = useMemo(() => new Set(allResources.map((resource) => resource.id)), [allResources])
+  const favoriteResourceIdSet = useMemo(() => new Set(favoriteResourceIds), [favoriteResourceIds])
   const visibleCategoryOptions = useMemo(
     () =>
       CATEGORY_OPTIONS.filter((option) =>
@@ -1280,34 +1375,25 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     () => orderAllResources(allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)), activeCategory),
     [activeCategory, allResources, searchTerm],
   )
-  const activeFeaturedCategory = featuredCategoryForPortalCategory(activeCategory)
-  const hasPersonalFeaturedCategory = configuredFeaturedCategories.includes(activeFeaturedCategory)
+  const favoriteResources = useMemo(() => {
+    const resourcesById = new Map(
+      allResources
+        .filter((resource) => resource.resourceId)
+        .map((resource) => [resource.resourceId as string, resource]),
+    )
+    return favoriteResourceIds
+      .map((resourceId) => resourcesById.get(resourceId))
+      .filter((resource): resource is PortalResource => Boolean(resource))
+      .filter((resource) => resourceMatches(resource, activeCategory, searchTerm))
+  }, [activeCategory, allResources, favoriteResourceIds, searchTerm])
   const hasExplicitTeamDefaultFeaturedCategory = defaultConfiguredFeaturedCategories.includes(activeFeaturedCategory)
   const hasComposedTeamDefaultForAll =
     activeFeaturedCategory === 'all' &&
     !hasExplicitTeamDefaultFeaturedCategory &&
     FEATURED_CATEGORY_COMPOSE_ORDER.some((category) => defaultConfiguredFeaturedCategories.includes(category))
   const hasTeamDefaultFeaturedCategory = hasExplicitTeamDefaultFeaturedCategory || hasComposedTeamDefaultForAll
-  const personalizedFeaturedResources = useMemo(() => {
-    if (!hasPersonalFeaturedCategory) return []
-    return featuredResourcesForDisplay(
-      managedFeaturedResourcesByCategory[activeFeaturedCategory],
-      allResources,
-      availableResourceKeys,
-      activeCategory,
-      searchTerm,
-    )
-  }, [
-    activeCategory,
-    activeFeaturedCategory,
-    allResources,
-    availableResourceKeys,
-    hasPersonalFeaturedCategory,
-    managedFeaturedResourcesByCategory,
-    searchTerm,
-  ])
   const teamDefaultFeaturedResources = useMemo(() => {
-    if (hasPersonalFeaturedCategory || !hasTeamDefaultFeaturedCategory) return []
+    if (!hasTeamDefaultFeaturedCategory) return []
     const defaultResources =
       activeFeaturedCategory === 'all' && !hasExplicitTeamDefaultFeaturedCategory
         ? composeAllFeaturedResources(defaultFeaturedResourcesByCategory)
@@ -1320,13 +1406,11 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     availableResourceKeys,
     defaultFeaturedResourcesByCategory,
     hasExplicitTeamDefaultFeaturedCategory,
-    hasPersonalFeaturedCategory,
     hasTeamDefaultFeaturedCategory,
     searchTerm,
   ])
   const featuredResourceMatches = useMemo(
     () => {
-      if (hasPersonalFeaturedCategory) return personalizedFeaturedResources
       if (hasTeamDefaultFeaturedCategory) return teamDefaultFeaturedResources
       return orderFeaturedResources(
         allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)),
@@ -1336,9 +1420,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     [
       activeCategory,
       allResources,
-      hasPersonalFeaturedCategory,
       hasTeamDefaultFeaturedCategory,
-      personalizedFeaturedResources,
       searchTerm,
       teamDefaultFeaturedResources,
     ],
@@ -1370,6 +1452,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
             {portalUser ? (
               <AccountMenu
                 user={portalUser}
+                showAdmin={!desktopRuntime}
                 showSignOut={!desktopRuntime}
                 testAccess={testAccess}
                 onSignOut={handlePortalSignOut}
@@ -1435,8 +1518,51 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       </section>
 
       <section className="home-featured">
+        {desktopRuntime && !testAccess ? (
+          <section className="home-favorites-section" aria-labelledby="my-favorites-heading">
+            <div className="home-featured-heading compact">
+              <div className="home-favorites-title-row">
+                <h2 id="my-favorites-heading">My Favorites</h2>
+                <button
+                  className="home-load-team-favorites"
+                  type="button"
+                  disabled={favoritesLoadingTeam || Boolean(favoriteBusyResourceId)}
+                  onClick={handleLoadTeamFavoriteSettings}
+                >
+                  {favoritesLoadingTeam ? 'Loading team settings…' : 'Load team settings'}
+                </button>
+              </div>
+              <p>{favoriteResources.length.toLocaleString()} {favoriteResources.length === 1 ? 'Resource' : 'Resources'} found</p>
+            </div>
+
+            {favoritesError ? <p className="home-favorites-error" role="alert">{favoritesError}</p> : null}
+
+            {favoriteResources.length ? (
+              <div className="home-resource-grid">
+                {favoriteResources.map((resource) => (
+                  <ResourceCard
+                    key={`favorite-${resource.id}`}
+                    resource={resource}
+                    theme={theme}
+                    onOpen={handleOpenResource}
+                    favorite
+                    favoriteBusy={favoriteBusyResourceId === resource.resourceId}
+                    onToggleFavorite={handleToggleFavorite}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="home-favorites-empty">
+                <Star size={22} />
+                <span>Select the star on any resource to add it here.</span>
+              </div>
+            )}
+          </section>
+        ) : null}
+
+        <section className="home-team-featured" aria-labelledby="team-featured-heading">
         <div className="home-featured-heading">
-          <h2>Featured</h2>
+          <h2 id="team-featured-heading">Team Featured</h2>
           <p>
             {featuredResources.length.toLocaleString()} {featuredResources.length === 1 ? 'Resource' : 'Resources'} found
           </p>
@@ -1445,7 +1571,15 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
         {featuredResources.length ? (
           <div className="home-resource-grid">
             {featuredResources.map((resource) => (
-              <ResourceCard key={resource.id} resource={resource} theme={theme} onOpen={handleOpenResource} />
+              <ResourceCard
+                key={resource.id}
+                resource={resource}
+                theme={theme}
+                onOpen={handleOpenResource}
+                favorite={Boolean(resource.resourceId && favoriteResourceIdSet.has(resource.resourceId))}
+                favoriteBusy={favoriteBusyResourceId === resource.resourceId}
+                onToggleFavorite={desktopRuntime && !testAccess ? handleToggleFavorite : undefined}
+              />
             ))}
           </div>
         ) : (
@@ -1468,6 +1602,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
             </button>
           </nav>
         ) : null}
+        </section>
 
         <section className="home-all-resources">
           <div className="home-all-heading">
@@ -1495,7 +1630,15 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
 
           <div className="home-resource-grid">
             {filteredResources.map((resource) => (
-              <ResourceCard key={`all-${resource.id}`} resource={resource} theme={theme} onOpen={handleOpenResource} />
+              <ResourceCard
+                key={`all-${resource.id}`}
+                resource={resource}
+                theme={theme}
+                onOpen={handleOpenResource}
+                favorite={Boolean(resource.resourceId && favoriteResourceIdSet.has(resource.resourceId))}
+                favoriteBusy={favoriteBusyResourceId === resource.resourceId}
+                onToggleFavorite={desktopRuntime && !testAccess ? handleToggleFavorite : undefined}
+              />
             ))}
           </div>
 

@@ -40,7 +40,7 @@
 - `DegradedReadOnly` 允许读取本地副本并显示最后成功同步时间，但禁止新建、编辑和正式保存，不提供离线写入；
 - 用户总数不超过 300，同时在线通常不超过 100；
 - 具有编辑权限的用户不超过 20，典型写入间隔为数分钟到数十分钟；
-- 预计有 20～30 张业务表，五年后单表理论上不超过 100 万条；
+- 首期至少按 50 张已注册业务表设计；任一业务表都可能达到数百万条，全部业务表合计必须按数千万至上亿条记录进行容量与性能规划；
 - 当前数据包括属性和点、线、面矢量数据，不存储栅格、底图和附件；
 - v1 数据文件使用 `.db` 后缀，内部保持 GeoPackage/SQLite 结构；
 - v1 不使用 SQLCipher，后续可通过数据访问层和迁移工具引入。
@@ -319,7 +319,8 @@ stateDiagram-v2
 - `gpkg_contents`、`gpkg_geometry_columns`、`gpkg_spatial_ref_sys` 等标准表必须由 GeoPackage-aware 库创建和维护；
 - Python `sqlite3` 可处理普通属性和同步表；几何编码、坐标转换和空间索引必须通过统一的 GeoPackage 数据访问适配层完成；
 - prepared outbox 与 actor_seq 分配使用一个本地事务且不改业务表；共享发布成功后，业务写入、几何/R-Tree、`applied_operation` 和 outbox applied 状态必须使用同一底层 SQLite 连接和同一事务；
-- 本地可使用 WAL；共享目录中的快照和批次不得处于打开写入状态。
+- 本地可使用 WAL；共享目录中的快照和批次不得处于打开写入状态；
+- `stormwater.db`、WAL、临时排序文件和迁移工作副本必须位于本机磁盘。启动、同步、导出、索引重建和 schema 迁移前必须检查剩余空间，并按目标最大数据库规模预留 WAL、临时索引和原子换库空间。
 
 推荐连接设置：
 
@@ -619,6 +620,8 @@ SHA-256(
 
 核心关系为：`schema_release -> table -> field/geometry/index/constraint`，表单、图层和业务规则只引用稳定的 `table_id/field_id`，不能直接依赖可重命名的物理列名。`system.db` 建议同时携带当前 release 及允许直接迁移的若干历史 release，但不能无限累积过时定义。
 
+每个可同步业务实体必须在 `sys_schema_table` 中映射到一个明确的物理表，并在 `sys_schema_field` 中映射到类型化物理列。registry 不得把一个通用 JSON/EAV 表登记为大量业务实体的权威当前状态存储。
+
 构建和发布要求：
 
 - 构建流水线对 registry 做 FK、重复 ID、SQL 标识符、migration 连续性、GeoPackage 能力和表单引用检查；
@@ -645,6 +648,19 @@ SHA-256(
 发布快照时，工作站必须从候选副本中清除自己的 `sync_actor`、outbox、draft、UI 设置及工作站路径等本机状态，再写入规范化 snapshot coverage。现有客户端换库时由 SnapshotManager 从旧库导出自己的本机状态并恢复，不能简单复制工作站行或直接覆盖。
 
 建议所有内部表使用统一保留前缀，例如 `sw_sync_`，并在 catalog 中禁止业务表或字段占用该前缀。所有业务和同步写入仍通过同一个 SQLite 连接与事务完成，不使用 `ATTACH system.db` 承担跨库原子提交。
+
+### 4.9 大规模物理存储契约
+
+以下规则是面向 50 张以上业务表、单表数百万条、总量数千万至上亿条记录的强制约束：
+
+1. 每类业务数据使用由 schema registry 注册的、具有明确 SQLite 类型的物理关系表；空间实体使用 GeoPackage 要素表。
+2. 通用 JSON、EAV、键值或单一聚合实体表不得作为业务当前状态的权威存储，也不得作为列表、筛选、排序、关联或空间查询的主要来源。
+3. Data Coordinator 是唯一写入入口，但 reducer 必须把已验证操作直接物化到注册的物理表、外键、索引和 R-Tree 中。
+4. `global_id`、`record_revision`、`deleted` 等记录级同步列放在对应业务表中；字段版本、冲突候选、游标、outbox 和包审计等跨表信息放在保留前缀的同步旁路表中。
+5. 业务 Repository 直接查询物理表。视图只能用于稳定的关系联接或计算字段，不得在查询时展开大规模 JSON 文档。
+6. 新增、删除或更改业务表、字段、索引、约束和空间定义必须通过已批准 schema release 与 migration 发布，不能依靠运行时 DDL 或隐式 JSON 结构变化。
+7. 每张表都必须具有按 `global_id` 的唯一索引、所有外键索引，以及针对真实列表/筛选/排序/联接模式的组合索引；空间表还必须具有可验证的 R-Tree。
+8. 同步、迁移、导出和快照构建必须使用分页、流式迭代或有界批次，不能把百万级结果集一次性装入内存。
 
 ## 5. 操作模型
 
@@ -687,6 +703,8 @@ SHA-256(
 ```
 
 墙上时间只用于审计和展示，不能决定操作是否有效。并发关系由基础字段版本、操作依赖和 actor 序号判断。
+
+`entity_type` 必须解析为当前 schema release 中稳定的 `table_id`，`field_changes.field` 必须解析为稳定的 `field_id`。物理表名和列名由本地已验证 registry 决定，不由操作包中的任意文本决定。操作信封是传输和归约协议，不是以 JSON/EAV 形式保存完整业务记录的持久化模型。
 
 ### 5.2 支持的操作类型
 
@@ -826,6 +844,54 @@ UNIQUE business_table(global_id)
 ```
 
 业务表的 owner、状态、区域、时间范围和外键索引由实际查询计划决定，并通过 `EXPLAIN QUERY PLAN` 验证。
+
+#### 通用资源审查事件索引
+
+跨资源的审查历史使用 `stormwater.db` 中注册的物理表
+`SYS_RESOURCE_REVIEW_EVENTS`。`resource_key` 标识报表、地图、文档或表单资源，
+`subject_global_id` 标识被审查的具体记录。`resource_id` 只能作为本地
+`SYS_RESOURCES` 目录的可选引用，不能作为跨客户端同步身份。
+
+第一版必须声明以下六个组合索引：
+
+```sql
+CREATE INDEX SYS_RRE_subject_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, subject_type, subject_global_id,
+    deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_resource_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_actor_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    actor_user_id, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_type_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, event_type, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_correlation
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, correlation_id, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_conflict
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, conflict_state, event_at DESC, global_id DESC
+);
+```
+
+`memo`、显示名称、旧状态和新状态不应在没有实测查询需求时建立索引。`event_at` 必须保存为 UTC ISO-8601 文本，事件历史
+使用 `(event_at, global_id)` 做 keyset 分页，不使用大 OFFSET。当前 registry 只支持
+普通组合索引，因此第一版把 `deleted` 作为等值筛选列，不使用未登记的 partial index。
+这些索引必须作为 schema release/migration 的一部分发布，随后执行 `ANALYZE` 和
+代表性 `EXPLAIN QUERY PLAN` 验证，禁止在路由或应用启动时隐式创建。
 
 ## 7. 共享目录协议
 
@@ -1278,7 +1344,7 @@ snapshot DB 内部的 coverage vector 是初始游标。例如前一天快照的
 5. 对 insert/delete、字段、几何、owner、状态机和跨表约束生成候选结果；
 6. 对并发版本执行表级配置的自动 reducer；没有明确配置则生成冲突；
 7. 任一关键操作冲突时，按整组事务策略保存全部候选和版本头，不做部分业务物化；
-8. 无冲突时更新全部业务表、字段版本头（包括 `$tombstone`）、几何和 R-Tree；
+8. 无冲突时通过 schema registry 将 table/field ID 解析为物理表和类型化列，并更新全部业务表、字段版本头（包括 `$tombstone`）、几何和 R-Tree；
 9. 根据排序后的版本头重新计算 `record_revision`；
 10. 写入 applied/conflict/rejected 终态并推进 terminal cursor；
 11. 所有步骤在一个 SQLite 事务中提交。
@@ -1963,17 +2029,20 @@ App 每次启动依次执行：
 
 ### 14.1 写入负载判断
 
-压力场景按 30 个用户在 5 分钟内合计更新 100 条记录计算，即 20 次业务保存/分钟、平均约 0.33 次/秒。即使短时突发达到平均值的 5～10 倍，也远低于本地 SQLite 的事务处理能力。性能瓶颈不是记录数量，而是：
+写入压力场景按 30 个用户在 5 分钟内合计更新 100 条记录计算，即 20 次业务保存/分钟、平均约 0.33 次/秒。读取、同步、迁移和快照场景则必须按至少 50 张业务表、单表数百万条、合计数千万至上亿条记录设计。低并发写入不代表数据规模可以忽略；主要性能风险包括：
 
 - 初始快照体积；
 - 无索引查询；
 - 复杂几何顶点数；
 - 100 个客户端高频轮询共享目录；
 - 批次和快照的复制与校验。
+- 大表扫描、排序、联接和聚合；
+- schema 迁移、索引重建、`ANALYZE`、备份与完整性检查的时长和临时空间。
 
 ### 14.2 数据库规则
 
 - 所有业务查询必须有可验证的索引方案；
+- 每个资源的主要查询必须在目标规模数据上保存并审查 `EXPLAIN QUERY PLAN` 结果，发布门禁禁止意外全表扫描、无界排序和未索引联接；
 - UUID 唯一索引、外键索引、状态/owner/区域常用组合索引必须显式创建；
 - 地图查询先用 R-Tree，再做精确几何判断；
 - 避免 `SELECT *` 和无上限地图范围返回；
@@ -1982,6 +2051,8 @@ App 每次启动依次执行：
 - 不在交互时自动执行全库 `VACUUM`；
 - 将数据库写入集中到一个队列，读连接保持短事务；
 - 每个远程业务事务单独提交；可在一个外层同步窗口处理多个小事务，但不能形成长时间写锁。
+- 禁止以通用 JSON/EAV/单一实体聚合表替代类型化业务表；高频查询、筛选、排序和联接必须直接命中物理列及其索引。
+- 列表必须分页，导出必须流式生成，地图和空间查询必须具有范围与候选数上限。
 
 ### 14.3 共享目录规则
 
@@ -2134,8 +2205,10 @@ App 必须明确显示：
 
 - 300 个注册客户端、100 个并行轮询、20 个编辑 actor；
 - 模拟平均 4 次业务提交/分钟及突发批量写入；
-- 单表 100 万属性记录；
-- 100 万点及具有真实顶点分布的线、面数据；
+- 至少 50 张注册业务表，并验证合计 5000 万条以上记录的启动、同步、查询、迁移、快照和恢复行为；
+- 对代表性大型属性表分别测试 100 万、500 万和 1000 万条记录；
+- 对代表性空间表分别测试 100 万和 500 万个点，以及具有真实顶点分布的线、面数据；
+- 对主要资源查询验证索引命中、分页稳定性和有界内存；
 - 长期操作包归档、百万级包链验证和快照生成；
 - 慢共享磁盘、高延迟、短时断连和低磁盘空间；
 - 记录 P50/P95/P99、CPU、内存、磁盘、网络和锁等待。

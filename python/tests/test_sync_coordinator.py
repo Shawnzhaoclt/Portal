@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import threading
 import unittest
@@ -17,6 +18,7 @@ from portal.app.sync import (
 from portal.app.sync import membership, snapshot
 from portal.app.sync.errors import SnapshotRequired
 from portal.app.sync.local_store import LocalStore
+from portal.app.sync.physical_entities import all_physical_specs
 
 
 class DataCoordinatorTests(unittest.TestCase):
@@ -42,6 +44,23 @@ class DataCoordinatorTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
+
+    def test_initial_snapshot_contains_registered_business_tables(self) -> None:
+        pointer = snapshot.load_snapshot_pointer(self.network / "protocol-v1")
+        snapshot_path = snapshot.snapshot_file(self.network / "protocol-v1", pointer)
+        connection = sqlite3.connect(snapshot_path)
+        try:
+            tables = {
+                str(row[0])
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        finally:
+            connection.close()
+
+        expected = {spec.table for spec in all_physical_specs()}
+        self.assertTrue(expected <= tables)
 
     def test_commit_pull_and_update_converge(self) -> None:
         inserted = self.alice_coordinator.commit(

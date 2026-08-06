@@ -231,6 +231,7 @@ class SchemaManager:
             raise SchemaManagerError(f"Migration handler checksum does not match catalog: {migration.migration_id}")
 
     def _prepare_connection(self, connection: sqlite3.Connection) -> None:
+        connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA trusted_schema=OFF")
         connection.execute("PRAGMA busy_timeout=5000")
@@ -341,7 +342,21 @@ class SchemaManager:
             indexes = {row[1] for row in connection.execute(f'PRAGMA index_list("{physical_table}")')}
             if index_name not in indexes:
                 raise SchemaManagerError(f"Missing required index {physical_table}.{index_name}.")
-        return {"quick_check": quick_check, "foreign_key_errors": 0, "tables": len(expected_tables), "fields": len(expected_fields), "indexes": len(expected_indexes)}
+        from portal.app.sync.physical_entities import registered_generic_entity_count
+
+        registered_generic_rows = registered_generic_entity_count(connection)
+        if registered_generic_rows:
+            raise SchemaManagerError(
+                f"Business database still has {registered_generic_rows} registered row(s) in generic JSON storage."
+            )
+        return {
+            "quick_check": quick_check,
+            "foreign_key_errors": 0,
+            "tables": len(expected_tables),
+            "fields": len(expected_fields),
+            "indexes": len(expected_indexes),
+            "registered_generic_rows": 0,
+        }
 
     def _physical_fingerprint(self, connection: sqlite3.Connection, release_id: str) -> str:
         with contextlib.closing(_readonly_connection(self.system_database)) as catalog:
@@ -350,7 +365,13 @@ class SchemaManager:
         for table in tables:
             sql = connection.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
             indexes = connection.execute("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = ? ORDER BY name", (table,)).fetchall()
-            entries.append({"table": table, "sql": sql[0] if sql else None, "indexes": indexes})
+            entries.append(
+                {
+                    "table": table,
+                    "sql": sql[0] if sql else None,
+                    "indexes": [tuple(index) for index in indexes],
+                }
+            )
         return hashlib.sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
     def _copy_to_candidate(self) -> Path:

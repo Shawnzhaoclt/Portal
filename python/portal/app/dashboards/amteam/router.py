@@ -3,7 +3,6 @@ from __future__ import annotations
 import mimetypes
 import os
 import re
-import sqlite3
 import struct
 from functools import lru_cache
 from datetime import date, datetime
@@ -11,17 +10,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
+import duckdb
+
 from portal.runtime.transport import APIRouter, FileResponse, HTTPException, Query
 
 from portal.app.core.records import clean_record
-from portal.app.core.sqlite_snapshot import open_readonly_sqlite_snapshot, resolve_sqlite_snapshot
-
-
 router = APIRouter(prefix="/api/amteam", tags=["am-team"])
 
 PIPE_TABLE = "ML"
 INSPECTION_TABLE = "MLI"
-OBSERVATION_TABLE = "MLO"
+OBSERVATION_TABLE = "ITPipes_Defects_Merged_PT"
 EXCLUDED_OBSERVATION_TEXT = ("Access", "Vermin", "Misc")
 SNAPSHOT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".wmv"}
@@ -39,11 +37,32 @@ def quote_identifier(value: str) -> str:
     return '"' + value.replace('"', '""') + '"'
 
 
-def amteam_database_path() -> Path:
-    configured = str(os.getenv("PORTAL_SOURCES_MANIFEST") or "").strip()
+def configured_database_path(environment_name: str, label: str) -> Path:
+    configured = str(os.getenv(environment_name) or "").strip()
     if not configured:
-        raise HTTPException(status_code=503, detail="Portal sources SQLite manifest is not configured in portal.settings.json.")
-    return resolve_sqlite_snapshot(configured)
+        raise HTTPException(status_code=503, detail=f"{label} is not configured in portal.settings.json.")
+    database = Path(configured).expanduser()
+    if not database.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": f"Configured {label} file was not found.",
+                "database": str(database),
+            },
+        )
+    return database
+
+
+def amteam_database_path() -> Path:
+    return configured_database_path("PORTAL_ITPIPES_DUCKDB", "ITPipes production DuckDB")
+
+
+def amteam_merged_database_path() -> Path:
+    return configured_database_path("PORTAL_ITPIPES_MERGED_DUCKDB", "ITPipes merged-defects DuckDB")
+
+
+def quote_sql_literal(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
 
 
 def amteam_media_root() -> Path:
@@ -53,25 +72,44 @@ def amteam_media_root() -> Path:
     return Path(configured)
 
 
-def connect_amteam_database() -> sqlite3.Connection:
-    manifest = str(os.getenv("PORTAL_SOURCES_MANIFEST") or "").strip()
-    if not manifest:
-        raise HTTPException(status_code=503, detail="Portal sources SQLite manifest is not configured in portal.settings.json.")
+def connect_amteam_database() -> duckdb.DuckDBPyConnection:
+    database = amteam_database_path()
+    merged_database = amteam_merged_database_path()
     try:
-        return open_readonly_sqlite_snapshot(manifest)
-    except (sqlite3.Error, OSError, RuntimeError) as error:
+        connection = duckdb.connect()
+        connection.execute(f"ATTACH {quote_sql_literal(str(database))} AS itpipes_source (READ_ONLY)")
+        connection.execute(f"ATTACH {quote_sql_literal(str(merged_database))} AS itpipes_merged (READ_ONLY)")
+        connection.execute('create temp view "ML" as select * from itpipes_source.ML')
+        connection.execute('create temp view "MLI" as select * from itpipes_source.MLI')
+        connection.execute('create temp view "MLO_Media" as select * from itpipes_source.MLO_Media')
+        connection.execute(
+            '''
+            create temp view "ITPipes_Defects_Merged_PT" as
+            select observation.*, media.Media_ID
+            from itpipes_merged.ITPipes_Defects_Merged_PT as observation
+            left join (
+                select MLO_ID, min(Media_ID) as Media_ID
+                from itpipes_source.MLO_Media
+                group by MLO_ID
+            ) as media
+              on media.MLO_ID = try_cast(observation.MLO_ID as bigint)
+            '''
+        )
+        return connection
+    except (duckdb.Error, OSError) as error:
         raise HTTPException(
             status_code=503,
             detail={
-                "message": "Could not open the published Portal SQLite datasource.",
-                "manifest": manifest,
+                "message": "Could not open the configured ITPipes DuckDB datasource.",
+                "database": str(database),
+                "merged_database": str(merged_database),
                 "error": str(error),
             },
         ) from error
 
 
 def fetch_dicts(
-    connection: sqlite3.Connection,
+    connection: duckdb.DuckDBPyConnection,
     sql: str,
     params: list[Any] | tuple[Any, ...] | None = None,
 ) -> list[dict[str, Any]]:
@@ -81,7 +119,7 @@ def fetch_dicts(
 
 
 def fetch_one(
-    connection: sqlite3.Connection,
+    connection: duckdb.DuckDBPyConnection,
     sql: str,
     params: list[Any] | tuple[Any, ...] | None = None,
 ) -> dict[str, Any]:
@@ -89,15 +127,20 @@ def fetch_one(
     return rows[0] if rows else {}
 
 
-def table_columns(connection: sqlite3.Connection, table_name: str) -> list[dict[str, Any]]:
-    rows = connection.execute(f"PRAGMA table_info({quote_identifier(table_name)})").fetchall()
-    return [
-        {"name": row[1], "data_type": row[2], "ordinal_position": int(row[0]) + 1}
-        for row in rows
-    ]
+def table_columns(connection: duckdb.DuckDBPyConnection, table_name: str) -> list[dict[str, Any]]:
+    return fetch_dicts(
+        connection,
+        """
+        select column_name as name, data_type, ordinal_position
+        from information_schema.columns
+        where lower(table_name) = lower(?)
+        order by ordinal_position
+        """,
+        [table_name],
+    )
 
 
-def available_column_lookup(connection: sqlite3.Connection, table_name: str) -> dict[str, str]:
+def available_column_lookup(connection: duckdb.DuckDBPyConnection, table_name: str) -> dict[str, str]:
     columns = table_columns(connection, table_name)
     return {normalized_column_key(str(column["name"])): str(column["name"]) for column in columns}
 
@@ -154,8 +197,8 @@ def pipe_search_where(
 ) -> tuple[str, list[Any]]:
     project_text = text_expression(table_alias, project_column)
     street_text = text_expression(table_alias, street_column)
-    normalized_project = f"PORTAL_NORMALIZE({project_text})"
-    normalized_street = f"PORTAL_NORMALIZE({street_text})"
+    normalized_project = f"regexp_replace(lower({project_text}), '[^a-z0-9]', '', 'g')"
+    normalized_street = f"regexp_replace(lower({street_text}), '[^a-z0-9]', '', 'g')"
     like_value = f"%{query}%"
     normalized_query = normalized_column_key(query)
     match_parts = [
@@ -173,8 +216,8 @@ def pipe_search_where(
     if len(normalized_query) >= 3:
         threshold = 0.82 if len(normalized_query) >= 5 else 0.9
         match_parts.extend([
-            f"PORTAL_SIMILARITY({project_text}, ?) >= ?",
-            f"PORTAL_SIMILARITY({street_text}, ?) >= ?",
+            f"jaro_winkler_similarity(lower({project_text}), lower(?)) >= ?",
+            f"jaro_winkler_similarity(lower({street_text}), lower(?)) >= ?",
         ])
         params.extend([query, threshold, query, threshold])
     return f"({' or '.join(match_parts)})", params
@@ -654,7 +697,7 @@ def observation_columns(lookup: dict[str, str]) -> dict[str, str | None]:
     }
 
 
-def inspection_context(connection: sqlite3.Connection, mli_id: str) -> dict[str, Any]:
+def inspection_context(connection: duckdb.DuckDBPyConnection, mli_id: str) -> dict[str, Any]:
     pipe_lookup = available_column_lookup(connection, PIPE_TABLE)
     inspection_lookup = available_column_lookup(connection, INSPECTION_TABLE)
     pipe_cols = pipe_columns(pipe_lookup)
@@ -695,7 +738,11 @@ def amteam_source() -> dict[str, Any]:
                 "row_count": count,
                 "columns": table_columns(connection, table_name),
             }
-        return {"database": str(amteam_database_path()), "tables": tables}
+        return {
+            "database": str(amteam_database_path()),
+            "merged_defects_database": str(amteam_merged_database_path()),
+            "tables": tables,
+        }
     finally:
         connection.close()
 
@@ -726,7 +773,7 @@ def search_pipes(
             order by
               {quote_identifier(project_column)} nulls last,
               {quote_identifier(street_column)} nulls last,
-              PORTAL_INT({quote_identifier(ml_id_column)}) nulls last
+              try_cast({quote_identifier(ml_id_column)} as bigint) nulls last
             limit ?
             """,
             [*where_params, limit],
@@ -785,8 +832,8 @@ def search_inspections(
             f"p.{quote_identifier(street_column)} nulls last",
         ]
         if inspection_cols.get("inspection_date"):
-            order_terms.append(f"PORTAL_DATETIME(i.{quote_identifier(str(inspection_cols['inspection_date']))}) desc nulls last")
-        order_terms.append(f"PORTAL_INT(i.{quote_identifier(mli_id_column)}) desc nulls last")
+            order_terms.append(f"try_cast(i.{quote_identifier(str(inspection_cols['inspection_date']))} as timestamp) desc nulls last")
+        order_terms.append(f"try_cast(i.{quote_identifier(mli_id_column)} as bigint) desc nulls last")
 
         rows = fetch_dicts(
             connection,
@@ -838,7 +885,7 @@ def search_pipe_groups(
             order by
               {quote_identifier(project_column)} nulls last,
               {quote_identifier(street_column)} nulls last,
-              PORTAL_INT({quote_identifier(pipe_ml_id)}) nulls last
+              try_cast({quote_identifier(pipe_ml_id)} as bigint) nulls last
             limit ?
             """,
             [*pipe_where_params, pipe_limit],
@@ -869,9 +916,9 @@ def search_pipe_groups(
         inspection_ml_id = str(inspection_cols["ml_id"])
         mli_id_column = str(inspection_cols["mli_id"])
         placeholders = ", ".join("?" for _ in groups_by_ml_id)
-        order_terms = [f"PORTAL_INT(i.{quote_identifier(mli_id_column)}) desc nulls last"]
+        order_terms = [f"try_cast(i.{quote_identifier(mli_id_column)} as bigint) desc nulls last"]
         if inspection_cols.get("inspection_date"):
-            order_terms.insert(0, f"PORTAL_DATETIME(i.{quote_identifier(str(inspection_cols['inspection_date']))}) desc nulls last")
+            order_terms.insert(0, f"try_cast(i.{quote_identifier(str(inspection_cols['inspection_date']))} as timestamp) desc nulls last")
 
         inspection_rows = fetch_dicts(
             connection,
@@ -915,8 +962,8 @@ def pipe_inspections(
         mli_id_column = str(columns["mli_id"])
         order_terms = []
         if columns.get("inspection_date"):
-            order_terms.append(f"PORTAL_DATETIME({quote_identifier(str(columns['inspection_date']))}) desc nulls last")
-        order_terms.append(f"PORTAL_INT({quote_identifier(mli_id_column)}) desc nulls last")
+            order_terms.append(f"try_cast({quote_identifier(str(columns['inspection_date']))} as timestamp) desc nulls last")
+        order_terms.append(f"try_cast({quote_identifier(mli_id_column)} as bigint) desc nulls last")
         rows = fetch_dicts(
             connection,
             f"""
@@ -934,7 +981,7 @@ def pipe_inspections(
 
 
 def inspection_observation_payload(
-    connection: sqlite3.Connection,
+    connection: duckdb.DuckDBPyConnection,
     mli_id: str,
     *,
     limit: int,

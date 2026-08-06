@@ -113,15 +113,18 @@ This save should be transactional:
 
 If export file creation fails after the database save, the saved latest report state should remain. The audit event can record `export_failed` if failure tracking is needed.
 
-## Legacy Table Design (Superseded)
+## Physical Relational Table Design
 
-The relational design below is retained only as historical reference. It is not used by the desktop runtime. Do not create, query, or modify these tables for new report data.
+The desktop runtime stores the current report state in the following registered, typed physical tables in `stormwater.db`. These tables are authoritative for business queries and are included in full replication. They must be created and changed only through approved schema releases and migrations.
 
 Table naming rule:
 
-- Every table owned by this report resource must start with the resource ID prefix `RPT5W1C0_`.
+- The resource ID is `RPT5W1C0`, but the physical business tables use the stable domain prefix
+  `CCTV_REVIEW_`. This keeps the storage names readable and prevents a future resource-ID
+  change from forcing a physical table rename. The resource ID remains in resource metadata,
+  managed entity types, and review-event records.
 
-### `RPT5W1C0_reports`
+### `CCTV_REVIEW_REPORTS`
 
 One row per logical report.
 
@@ -129,7 +132,7 @@ Suggested columns:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | INTEGER PK | Internal ID |
+| `global_id` | TEXT PK | Globally unique report ID used by synchronization |
 | `report_key` | TEXT UNIQUE NOT NULL | Machine key, such as `4030_Abingdon_RD@04012024-04022024` |
 | `report_name` | TEXT NOT NULL | Display name, such as `4030_Abingdon_RD @04012024 - 04022024` |
 | `binding_type` | TEXT NOT NULL | `address` or `project_title` |
@@ -144,6 +147,8 @@ Suggested columns:
 | `submitted_at` | TEXT | ISO datetime |
 | `reviewed_by_user_id` | INTEGER | Reviewer |
 | `reviewed_at` | TEXT | ISO datetime |
+| `record_revision` | TEXT NOT NULL | Coordinator-managed revision |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | Coordinator-managed tombstone |
 
 Recommended indexes:
 
@@ -152,8 +157,9 @@ Recommended indexes:
 - Index on `inspection_date_text`
 - Index on `status`
 - Index on `updated_at`
+- Composite index on `status`, `updated_at`
 
-### `RPT5W1C0_pipes`
+### `CCTV_REVIEW_PIPES`
 
 One row per reviewed pipe in the latest saved report state. Store only source keys and user-entered review state. Pipe details such as asset name, street, manholes, material, inspection date, operator, reason, and direction should be queried from ML and MLI source tables by `ml_id` and `mli_id`.
 
@@ -161,19 +167,21 @@ Suggested columns:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | INTEGER PK | Internal ID |
-| `report_id` | INTEGER NOT NULL | FK to report |
+| `global_id` | TEXT PK | Globally unique pipe-review ID |
+| `report_global_id` | TEXT NOT NULL | FK to `CCTV_REVIEW_REPORTS.global_id` |
 | `ml_id` | TEXT NOT NULL | Source pipe ID |
 | `mli_id` | TEXT NOT NULL | Source inspection ID |
 | `clogging_percent` | INTEGER NOT NULL DEFAULT 0 | User input |
 | `clogging_comment` | TEXT | User input, such as `Deposit` |
 | `clogging_frame_seconds` | REAL | Video time in seconds |
+| `record_revision` | TEXT NOT NULL | Coordinator-managed revision |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | Coordinator-managed tombstone |
 
 Important rule:
 
-Some pipes may have no observation records. These pipes still need a row in `RPT5W1C0_pipes` so their pipe-level inputs, such as clogging, can be saved. `Defects Scored 3+` should be calculated in the frontend from the latest distance group and observation review state, not stored.
+Some pipes may have no observation records. These pipes still need a row in `CCTV_REVIEW_PIPES` so their pipe-level inputs, such as clogging, can be saved. `Defects Scored 3+` should be calculated in the frontend from the latest distance group and observation review state, not stored.
 
-### `RPT5W1C0_distance_groups`
+### `CCTV_REVIEW_DISTANCE_GROUPS`
 
 One row per distance group in the latest saved report state. The distance is the minimum key needed to connect the group to observations shown in the UI.
 
@@ -181,17 +189,19 @@ Suggested columns:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | INTEGER PK | Internal ID |
-| `pipe_review_id` | INTEGER NOT NULL | FK to `RPT5W1C0_pipes.id` |
+| `global_id` | TEXT PK | Globally unique distance-group ID |
+| `pipe_global_id` | TEXT NOT NULL | FK to `CCTV_REVIEW_PIPES.global_id` |
 | `distance_key` | TEXT NOT NULL | Stable UI key |
 | `distance_feet` | REAL | Distance shown in UI |
 | `am_score` | INTEGER | User AM score, usually 3 to 5 |
 | `defect_comment` | TEXT | User comment |
 | `no_am_score_ge_3_confirmed` | INTEGER NOT NULL DEFAULT 0 | Boolean |
+| `record_revision` | TEXT NOT NULL | Coordinator-managed revision |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | Coordinator-managed tombstone |
 
 If a pipe has no observations, this table can have zero rows for that pipe.
 
-### `RPT5W1C0_observations`
+### `CCTV_REVIEW_OBSERVATIONS`
 
 One row per observation reviewed by the user in the latest saved report state. Store only the source observation key, selected picture file name when needed, and user-selected review values. Observation details such as code, observation text, grade, source distance, media path, snapshot count, selected snapshot index, and video time should be queried from MLO source data.
 
@@ -201,60 +211,145 @@ Suggested columns:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | INTEGER PK | Internal ID |
-| `distance_group_id` | INTEGER NOT NULL | FK to distance group |
+| `global_id` | TEXT PK | Globally unique observation-review ID |
+| `distance_group_global_id` | TEXT NOT NULL | FK to `CCTV_REVIEW_DISTANCE_GROUPS.global_id` |
 | `mlo_id` | TEXT | Source observation ID |
 | `source_observation_key` | TEXT NOT NULL | Stable key from source fields |
 | `defect_role` | TEXT NOT NULL | `none`, `major`, or `other` |
 | `is_extensive` | INTEGER NOT NULL DEFAULT 0 | Boolean |
 | `selected_picture_file_name` | TEXT | User-selected snapshot file name with extension, if different from the default |
+| `record_revision` | TEXT NOT NULL | Coordinator-managed revision |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | Coordinator-managed tombstone |
 
 Important rule:
 
-Do not assume `mlo_id` is globally unique. The UI has shown cases where the same MLO ID appears more than once. Use the internal `id` and `source_observation_key` for stable identity.
+Do not assume `mlo_id` is globally unique. The UI has shown cases where the same MLO ID appears more than once. Use `global_id` and `source_observation_key` for stable identity.
 
-### `RPT5W1C0_report_events`
+### Universal `SYS_RESOURCE_REVIEW_EVENTS` (current baseline)
 
-Audit log for who edited a report and when.
+Review history is shared by reports, maps, documents, and forms. The fresh business
+database creates one typed physical table in `stormwater.db` named
+`SYS_RESOURCE_REVIEW_EVENTS`. It is replicated as business data and is written only
+through the Data Coordinator. No resource-specific review-event table is created for
+CCTV reports.
+
+The stable `resource_key` identifies the resource (for example, `RPT5W1C0`), while
+`subject_global_id` identifies the reviewed report, map record, document, or form
+record. `resource_id` may link to the local system catalog, but it is not a cross-
+database foreign key and must not be the identity used for synchronization.
 
 Suggested columns:
 
 | Column | Type | Notes |
 | --- | --- | --- |
-| `id` | INTEGER PK | Internal ID |
-| `report_id` | INTEGER NOT NULL | FK to report |
-| `event_type` | TEXT NOT NULL | `report_saved`, `submitted_to_review`, `returned_to_edit`, `completed`, `export_generated`, `export_failed` |
-| `event_by_user_id` | INTEGER NOT NULL | User who performed the action |
-| `event_at` | TEXT NOT NULL | ISO datetime |
-| `from_status` | TEXT | Previous report status when applicable |
-| `to_status` | TEXT | New report status when applicable |
-| `memo` | TEXT | Optional user-entered memo for the action |
+| `global_id` | TEXT PK | Globally unique event ID |
+| `resource_id` | INTEGER | Optional local `SYS_RESOURCES.id` reference |
+| `resource_key` | TEXT NOT NULL | Stable resource key such as `RPT5W1C0` |
+| `resource_type` | TEXT NOT NULL | `report`, `map`, `document`, or `form` |
+| `subject_type` | TEXT NOT NULL | Resource-specific subject type |
+| `subject_global_id` | TEXT NOT NULL | Globally unique reviewed-record ID |
+| `subject_display_key` | TEXT | Human-readable key for filtering/display |
+| `event_type` | TEXT NOT NULL | Workflow or edit action |
+| `actor_user_id` | INTEGER | User who performed the action, when available |
+| `actor_name` | TEXT | Display name captured at event time, when available |
+| `event_at` | TEXT NOT NULL | UTC ISO-8601 timestamp |
+| `from_status` | TEXT | Previous status when applicable |
+| `to_status` | TEXT | New status when applicable |
+| `memo` | TEXT | Optional short memo; never a full page snapshot |
+| `correlation_id` | TEXT | Groups related actions in one user operation |
+| `record_revision` | TEXT NOT NULL | Coordinator-managed revision |
+| `deleted` | INTEGER NOT NULL DEFAULT 0 | Coordinator-managed tombstone |
 
-This table supports the requirement to show who edited the report status and at what time. It can store a short optional user memo for the action, but should not store full modification content or page snapshots.
+Standard event types are `created`, `saved`, `submitted_to_review`,
+`returned_to_edit`, `approved`, `completed`, `rejected`, `export_generated`,
+`export_failed`, and `deleted`. Page views are not recorded as review events; a
+separate security/audit stream may be added later for login and administration events.
+
+This table supports the requirement to show who edited a resource and at what time. It
+stores only event metadata and an optional short memo; it does not store full page
+snapshots or duplicated report content.
 
 ## Coordinator-Backed Persistence
 
-The desktop report uses the Portal Data Coordinator for every writable report operation. It does not own physical `RPT5W1C0_*` tables.
+The Portal Data Coordinator is the only writable entry point for this resource. It validates commands, performs the synchronization barrier and record locking, emits immutable operations, and applies those operations transactionally to the four report-state tables plus `SYS_RESOURCE_REVIEW_EVENTS`.
 
-One logical report is stored as one coordinator entity:
+The stable coordinator entity types map one-to-one to registered physical tables:
 
-| Coordinator field | Value |
-| --- | --- |
-| `entity_type` | `RPT5W1C0.report` |
-| `entity_id` | `report_key` |
-| entity body | Current report metadata, latest pipe review state, and report event history |
+| Entity type | Physical table | Entity ID |
+| --- | --- | --- |
+| `RPT5W1C0.report` | `CCTV_REVIEW_REPORTS` | `global_id` |
+| `RPT5W1C0.pipe` | `CCTV_REVIEW_PIPES` | `global_id` |
+| `RPT5W1C0.distance_group` | `CCTV_REVIEW_DISTANCE_GROUPS` | `global_id` |
+| `RPT5W1C0.observation` | `CCTV_REVIEW_OBSERVATIONS` | `global_id` |
+| `SYS.review_event` | `SYS_RESOURCE_REVIEW_EVENTS` | `global_id` |
 
-The `(entity_type, entity_id)` identity prevents duplicate report keys. The coordinator record revision provides optimistic-concurrency protection; its shared-repository protocol is the authoritative persistence path.
+`report_key` has a unique physical index and enforces one logical report for a binding and inspection date range. Coordinator record revisions provide optimistic-concurrency protection. Child records use globally unique IDs and physical foreign keys so independently created client copies converge without local integer-ID collisions.
 
-The entity body has three sections:
+Pipes with no observations still have physical rows so pipe-level input such as clogging is preserved. `Defects Scored 3+` is calculated from current distance-group and observation rows and is not stored independently. An `mlo_id` is not assumed globally unique; observation identity uses `global_id` and `source_observation_key`.
 
-1. `report`: binding, inspection-date text, status, owner, submitter, reviewer, and timestamps.
-2. `pipes`: the latest saved pipe, distance-group, and observation review state. Source properties are re-read from the local CCTV source database by `ml_id`, `mli_id`, and stable observation keys.
-3. `events`: the report audit trail, including action, user, timestamp, status transition, and optional memo.
+One report save is a single coordinator transaction that upserts the report and its current child rows, tombstones removed child rows, and inserts the audit event into `SYS_RESOURCE_REVIEW_EVENTS`. Direct SQL writes, route startup DDL, independent report migrations, and generic JSON/EAV aggregate persistence are prohibited.
 
-Pipes with no observations remain in `pipes` so pipe-level input such as clogging is preserved. `Defects Scored 3+` is calculated from the current review state and not stored independently. An `mlo_id` is not assumed to be globally unique; saved observations retain a stable source observation key.
+### Query and Index Contract
 
-All create, update, workflow, and delete actions must be committed as Data Coordinator mutations under its record lock. Direct SQL writes, route startup DDL, and independent report-table migrations are prohibited.
+Repositories query the physical tables directly. Optional views may provide stable relational joins or calculated display fields, but they must not flatten JSON documents at query time and are not a second persistence path.
+
+Required indexes include:
+
+- `CCTV_REVIEW_REPORTS(report_key)` as a unique index;
+- `CCTV_REVIEW_REPORTS(status, updated_at)` for the report queue;
+- binding/search indexes covering `binding_type`, `binding_text`, and `inspection_date_text`;
+- indexes on every child foreign key;
+- source-key indexes on `ml_id`, `mli_id`, `mlo_id`, and `source_observation_key` where used by reload or reconciliation queries.
+
+The universal review-event table has six indexes in the current baseline:
+
+```sql
+CREATE INDEX SYS_RRE_subject_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, subject_type, subject_global_id,
+    deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_resource_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_actor_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    actor_user_id, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_type_time
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, event_type, deleted, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_correlation
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, correlation_id, event_at DESC, global_id DESC
+);
+
+CREATE INDEX SYS_RRE_conflict
+ON SYS_RESOURCE_REVIEW_EVENTS(
+    resource_key, conflict_state, event_at DESC, global_id DESC
+);
+```
+
+`global_id` is already indexed by the primary key and is only used as the stable
+tie-breaker. `resource_key` leads resource queries because it is stable across client
+copies; `resource_id` is only a local catalog reference. `event_at` must use UTC
+ISO-8601 text so chronological ordering remains lexical. Event history screens should
+use keyset pagination with `(event_at, global_id)` rather than large `OFFSET` values.
+
+Do not index `memo`, `actor_name`, `from_status`, or `to_status` until a measured query
+requires them. The current registry supports ordinary composite indexes, so the first
+release includes `deleted` as an equality column instead of using an unregistered
+partial-index predicate. All indexes are declared in the physical entity registry,
+published through schema release/migration, followed by `ANALYZE` and representative
+`EXPLAIN QUERY PLAN` validation.
+
+Every report-list, open-report, workflow, and export query must have a reviewed `EXPLAIN QUERY PLAN` at target volume. Schema and index changes are delivered through approved coordinator migrations and become part of subsequent verified snapshots.
 
 ## Search Behavior
 
@@ -283,15 +378,15 @@ When the user clicks `Generate Report`:
 2. Ask the user to enter an optional memo.
 3. Build `report_key` and `report_name`.
 4. Find existing report by `report_key`.
-5. If no existing report entity exists, commit an `insert_entity` mutation for `RPT5W1C0.report` using `report_key` as the entity ID.
-6. If report exists with `status = pending`, update the same logical entity using its current coordinator revision.
+5. If no existing report row exists, allocate a `global_id` and insert `CCTV_REVIEW_REPORTS`; the unique `report_key` index blocks duplicates.
+6. If a report exists with `status = pending`, update the same physical report row using its current coordinator revision.
 7. If report exists with `status = ready_to_review`, require the user to use `Back to Edit` before saving changes.
 8. If report exists with `status = completed`, block the save because completed reports are read-only.
 9. Set status to `pending`.
 10. Update `updated_by_user_id` and `updated_at`.
-11. Replace the entity's `pipes` section with the latest pipe, distance-group, and observation review state.
-12. Append a `report_saved` event with the optional memo to the entity's `events` section.
-13. Commit the report aggregate through the Data Coordinator, then generate the export file.
+11. Upsert the latest rows in `CCTV_REVIEW_PIPES`, `CCTV_REVIEW_DISTANCE_GROUPS`, and `CCTV_REVIEW_OBSERVATIONS`; tombstone child rows removed from the current report state.
+12. Insert a `saved` row in `SYS_RESOURCE_REVIEW_EVENTS` with `resource_key = RPT5W1C0`, `subject_type = report`, `subject_global_id` set to the report global ID, and the optional memo.
+13. Commit all physical rows and synchronization metadata atomically through the Data Coordinator, then generate the export file.
 
 The coordinator mutation is the atomic business-data save boundary.
 

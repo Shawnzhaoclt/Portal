@@ -3,10 +3,11 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 
+python/tests/
 # Logs
 *.log
-workstation-manager/sync/logs/
-workstation-manager/sync/sync.settings.json
+portal-manager/sync/logs/
+portal-manager/sync/sync.settings.json
 
 .docs/
 
@@ -22,11 +23,20 @@ ui/node_modules/.tmp/
 /src-tauri/target/
 /python/portal/ipc/build/
 /python/portal/ipc/dist/
+/python/${PORTAL_APP_ROOT}/
 /tmp/
 /updater-layout-validation/
 /${PORTAL_DATA_ROOT}/
 /${PORTAL_APP_ROOT}/
 /python/${PORTAL_DATA_ROOT}/
+
+# Design-generation intermediates and local rollback copies
+/design-assets/app-icons/*-chroma.png
+/design-assets/app-icons/*-v1-master.png
+/design-assets/app-icons/*-gate-master.png
+/design-assets/app-icons/verification/
+/src-tauri/icons/icon-legacy.ico
+/portal-manager/src-tauri/icons/icon-legacy.ico
 
 # Local/generated dashboard data
 python/portal/data/
@@ -38,6 +48,7 @@ python/portal/app/dashboards/map_tiles/runtime/build/terrain/
 python/portal/app/dashboards/map_tiles/runtime/build/staging/
 python/portal/app/dashboards/map_tiles/runtime/build/reports/
 python/portal/app/dashboards/map_tiles/runtime/build/logs/
+
 
 # Environment/local editor files
 *.local

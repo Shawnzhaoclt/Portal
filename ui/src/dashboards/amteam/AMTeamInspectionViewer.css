@@ -1373,6 +1373,11 @@
   outline-offset: -2px;
 }
 
+.amteam-defect-observation-row.video-focused {
+  background: #fff4d7 !important;
+  box-shadow: inset 4px 0 0 #d97913, inset 0 0 0 1px rgba(217, 121, 19, 0.4);
+}
+
 .amteam-defect-cell {
   display: grid;
   align-content: center;
@@ -2024,6 +2029,17 @@
   line-height: 1.2;
 }
 
+.amteam-review-decision-progress {
+  border-left: 1px solid var(--amteam-border);
+  color: var(--amteam-muted);
+  font-size: 12px;
+  padding-left: 12px;
+}
+
+.amteam-review-decision-progress.complete {
+  color: var(--amteam-blue);
+}
+
 .amteam-review-nav button {
   display: inline-flex;
   align-items: center;
@@ -2454,6 +2470,18 @@
   color: var(--amteam-accent);
 }
 
+.amteam-distance-confirm-button.pending {
+  border-color: #ecd49f;
+  background: #fff9ea;
+  color: #875b0e;
+}
+
+.amteam-distance-confirm-button.scored {
+  border-color: #bfd2e5;
+  background: #f2f8fd;
+  color: var(--amteam-blue);
+}
+
 .amteam-distance-confirm-button.needs-review {
   border-color: rgba(201, 52, 47, 0.42);
   background: #fff4f3;
@@ -2509,6 +2537,16 @@
 
 .amteam-defect-treelist .amteam-distance-confirm-button.confirmed {
   color: var(--amteam-accent);
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button.pending {
+  color: #875b0e;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.amteam-defect-treelist .amteam-distance-confirm-button.scored {
+  color: var(--amteam-blue);
 }
 
 .amteam-defect-treelist .amteam-distance-confirm-button.needs-review {

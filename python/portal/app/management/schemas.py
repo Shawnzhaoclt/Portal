@@ -28,6 +28,7 @@ class UserCreateRequest(BaseModel):
     last_name: str
     email: EmailStr
     employee_id: str
+    # Kept for backward-compatible clients; the server derives this value from the name.
     username: str | None = None
     team_id: int | None = None
     is_admin: bool = False
@@ -39,6 +40,7 @@ class UserUpdateRequest(BaseModel):
     last_name: str | None = None
     email: EmailStr | None = None
     employee_id: str | None = None
+    # Kept for backward-compatible clients; the server derives this value from the name.
     username: str | None = None
     team_id: int | None = None
     is_active: bool | None = None
@@ -118,3 +120,33 @@ class ResourceDiscoveryApplyItem(BaseModel):
 
 class ResourceDiscoveryApplyRequest(BaseModel):
     actions: list[ResourceDiscoveryApplyItem]
+
+
+class DictionaryCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    dictionary_key: str | None = Field(default=None, max_length=64)
+    description: str | None = Field(default=None, max_length=500)
+
+
+class DictionaryUpdateRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=500)
+    is_active: bool | None = None
+
+
+class DictionaryItemCreateRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=120)
+    item_code: str | None = Field(default=None, max_length=64)
+    sort_order: int | None = Field(default=None, ge=1, le=9999)
+    metadata: dict[str, object] | None = None
+
+
+class DictionaryItemUpdateRequest(BaseModel):
+    label: str | None = Field(default=None, min_length=1, max_length=120)
+    sort_order: int | None = Field(default=None, ge=1, le=9999)
+    is_active: bool | None = None
+    metadata: dict[str, object] | None = None
+
+
+class DictionaryItemOrderRequest(BaseModel):
+    item_ids: list[int] = Field(min_length=1)

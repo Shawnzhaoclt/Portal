@@ -1,0 +1,12 @@
+{
+  "resource_id": "RPT7K2M9",
+  "resource_slug": "weekly_time_reporting",
+  "type": "report",
+  "name": "Weekly Time Reporting",
+  "url": "/report_weekly_time_reporting",
+  "category": "Operations",
+  "description": "Record weekly work, request schedule changes, submit time reports, and complete manager review.",
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

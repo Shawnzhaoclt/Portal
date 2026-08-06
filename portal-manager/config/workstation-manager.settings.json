@@ -1,0 +1,10 @@
+{
+  "syncDirectory": "../sync",
+  "syncSettingsFile": "sync.settings.json",
+  "portalSettingsFile": "../../dist/Portal-Desktop/config/portal.settings.json",
+  "portalReleaseSettingsFile": "../../dist/Portal-Desktop/config/portal.settings.json",
+  "coordinatorDirectory": "../coordinator",
+  "portalPythonWorker": "../../dist/Portal-Desktop/runtime/portal-python/portal-python.exe",
+  "pythonExecutable": "${USERPROFILE}/AppData/Local/miniconda3/envs/portal/python.exe",
+  "refreshSeconds": 5
+}

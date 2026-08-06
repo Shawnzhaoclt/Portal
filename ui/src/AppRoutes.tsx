@@ -3,6 +3,7 @@ import DashboardLinksPage from './DashboardLinksPage'
 import HomePage from './HomePage'
 import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
 import ProactiveCCTVReviewHelp from './resources/reports/proactive-team-cctv-review/ProactiveCCTVReviewHelp'
+import WeeklyTimeReporting from './resources/reports/weekly-time-reporting/WeeklyTimeReporting'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
 import GISCriticalAssetHistoryDashboard from './dashboards/gis/GISCriticalAssetHistoryDashboard'
@@ -14,6 +15,7 @@ import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
 import { clearManagementToken, fetchMe, storedManagementToken, storedManagementUser } from './management/api'
 import {
   ADMIN_MANAGEMENT_ROUTE,
+  ACCOUNT_ROUTE,
   AIF_OVERVIEW_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
   DASHBOARD_LINKS_ROUTE,
@@ -24,6 +26,7 @@ import {
   PLANNING_PENDING_AIF_QA_ROUTE,
   PROACTIVE_TEAM_CCTV_REVIEW_ROUTE,
   STM_RISK_MAP_ROUTE,
+  WEEKLY_TIME_REPORTING_ROUTE,
   criticalAssetSheetIdFromPath,
   criticalTeamSheetIdFromPath,
 } from './dashboardCatalog'
@@ -136,6 +139,11 @@ export default function AppRoutes() {
     return <ProactiveCCTVReviewHelp />
   }
 
+  if (path === WEEKLY_TIME_REPORTING_ROUTE) {
+    setPageMeta('Weekly Time Reporting')
+    return <WeeklyTimeReporting />
+  }
+
   if (path === PLANNING_PENDING_AIF_QA_ROUTE) {
     setPageMeta('Planning Pending AIF QA/QC')
     return <PlanningPendingAifQaTable />
@@ -164,6 +172,16 @@ export default function AppRoutes() {
   if (path === DASHBOARD_LINKS_ROUTE) {
     setPageMeta('Portal Dashboard Links')
     return <DashboardLinksPage />
+  }
+
+  if (path === ACCOUNT_ROUTE) {
+    setPageMeta('Portal Account')
+    return <ManagementPage accountOnly={desktopRuntime} />
+  }
+
+  if (path === ADMIN_MANAGEMENT_ROUTE && desktopRuntime) {
+    window.location.replace(ACCOUNT_ROUTE)
+    return null
   }
 
   if (path === ADMIN_MANAGEMENT_ROUTE) {

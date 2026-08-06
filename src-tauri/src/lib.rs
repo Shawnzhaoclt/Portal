@@ -20,40 +20,138 @@ use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const SYSTEM_DATABASE_WRITER_EMAIL: &str = "shawn.zhao@charlottenc.gov";
 
-fn windows_user_email() -> Result<String, String> {
-    if let Some(configured) = env::var_os("PORTAL_WINDOWS_EMAIL") {
-        let email = configured.to_string_lossy().trim().to_lowercase();
-        if email.contains('@') {
-            return Ok(email);
-        }
+fn configure_system_database_access(
+    system_database: &Path,
+    windows_email: &str,
+) -> Result<bool, String> {
+    let writable = windows_email
+        .trim()
+        .eq_ignore_ascii_case(SYSTEM_DATABASE_WRITER_EMAIL);
+    let metadata = fs::metadata(system_database).map_err(|error| {
+        format!(
+            "Could not read the Portal system database at {}: {error}",
+            system_database.display()
+        )
+    })?;
+    let mut permissions = metadata.permissions();
+    permissions.set_readonly(!writable);
+    fs::set_permissions(system_database, permissions).map_err(|error| {
+        format!(
+            "Could not set access for the Portal system database at {}: {error}",
+            system_database.display()
+        )
+    })?;
+    Ok(writable)
+}
+
+#[derive(Clone, Debug)]
+struct WindowsIdentity {
+    email: String,
+    username: String,
+    employee_id: String,
+    account: String,
+}
+
+impl WindowsIdentity {
+    fn display_value(&self) -> String {
+        [
+            self.email.as_str(),
+            self.account.as_str(),
+            self.username.as_str(),
+            self.employee_id.as_str(),
+        ]
+        .into_iter()
+        .find(|value| !value.trim().is_empty())
+        .unwrap_or("unresolved Windows account")
+        .to_string()
     }
+}
 
+fn normalize_windows_identity(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn windows_account_component(value: &str) -> String {
+    value
+        .trim()
+        .rsplit_once('\\')
+        .map(|(_, component)| component)
+        .unwrap_or(value.trim())
+        .rsplit_once('/')
+        .map(|(_, component)| component)
+        .unwrap_or_else(|| value.trim())
+        .to_string()
+}
+
+fn run_whoami(arguments: &[&str]) -> Option<String> {
     let mut command = Command::new("whoami.exe");
-    command.arg("/upn");
+    command.args(arguments);
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().map_err(|error| {
-        format!("Could not resolve the signed-in Windows account email: {error}")
-    })?;
+    let output = command.output().ok()?;
     if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(if detail.is_empty() {
-            "Windows did not return a user principal name for the signed-in account.".to_string()
-        } else {
-            format!("Windows could not resolve the signed-in account email: {detail}")
-        });
+        return None;
     }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
 
-    let email = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .to_lowercase();
-    if !email.contains('@') {
+fn windows_identity() -> Result<WindowsIdentity, String> {
+    let email = [
+        env::var("PORTAL_WINDOWS_EMAIL").ok(),
+        env::var("USERPRINCIPALNAME").ok(),
+        run_whoami(&["/upn"]),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|value| normalize_windows_identity(&value))
+    .find(|value| value.contains('@'))
+    .unwrap_or_default();
+
+    let account = [env::var("PORTAL_WINDOWS_ACCOUNT").ok(), run_whoami(&[]), {
+        let domain = env::var("USERDOMAIN").unwrap_or_default();
+        let username = env::var("USERNAME").unwrap_or_default();
+        (!domain.trim().is_empty() && !username.trim().is_empty())
+            .then(|| format!("{domain}\\{username}"))
+    }]
+    .into_iter()
+    .flatten()
+    .map(|value| normalize_windows_identity(&value))
+    .find(|value| !value.is_empty())
+    .unwrap_or_default();
+
+    let username = [
+        env::var("PORTAL_WINDOWS_USERNAME").ok(),
+        env::var("USERNAME").ok(),
+        (!account.is_empty()).then(|| windows_account_component(&account)),
+    ]
+    .into_iter()
+    .flatten()
+    .map(|value| normalize_windows_identity(&value))
+    .find(|value| !value.is_empty())
+    .unwrap_or_default();
+
+    let employee_id = env::var("PORTAL_WINDOWS_EMPLOYEE_ID")
+        .ok()
+        .map(|value| normalize_windows_identity(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| username.clone());
+
+    if email.is_empty() && username.is_empty() && employee_id.is_empty() && account.is_empty() {
         return Err(
-            "Windows did not return a valid email address for the signed-in account.".to_string(),
+            "Windows did not return an email, employee ID, or username for the signed-in account."
+                .to_string(),
         );
     }
-    Ok(email)
+
+    Ok(WindowsIdentity {
+        email,
+        username,
+        employee_id,
+        account,
+    })
 }
 
 #[derive(Serialize)]
@@ -196,7 +294,9 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
     let config_file = portal_config_path()?;
     let business_database =
         business_sync::local_business_database_path(&config_file, &application_root, &data_root)?;
-    let windows_email = windows_user_email()?;
+    let windows_identity = windows_identity()?;
+    let system_database_writable =
+        configure_system_database_access(&system_database, &windows_identity.email)?;
     let business_sync = business_sync::load_paths(&config_file, &application_root, &data_root)?;
     let mut command = Command::new(&worker);
     command
@@ -205,8 +305,15 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
         .env("PORTAL_APP_ROOT", &application_root)
         .env("PORTAL_DATA_ROOT", &data_root)
         .env("PORTAL_CONFIG_FILE", config_file)
-        .env("PORTAL_WINDOWS_EMAIL", windows_email)
+        .env("PORTAL_WINDOWS_EMAIL", &windows_identity.email)
+        .env("PORTAL_WINDOWS_USERNAME", &windows_identity.username)
+        .env("PORTAL_WINDOWS_EMPLOYEE_ID", &windows_identity.employee_id)
+        .env("PORTAL_WINDOWS_ACCOUNT", &windows_identity.account)
         .env("PORTAL_SYSTEM_DB", &system_database)
+        .env(
+            "PORTAL_SYSTEM_DB_WRITE_ENABLED",
+            if system_database_writable { "1" } else { "0" },
+        )
         .env("PORTAL_BUSINESS_DB", business_database)
         .env("PORTAL_MANAGEMENT_DB", &system_database)
         .stdin(Stdio::piped())
@@ -844,7 +951,11 @@ fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest)>,
     if !release_root.is_dir() {
         return Ok(None);
     }
-    let manifest = parse_portal_release_manifest(&release_root.join("portal-release.json"))?;
+    let manifest_path = release_root.join("portal-release.json");
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest = parse_portal_release_manifest(&manifest_path)?;
     let payload = release_root.join(&manifest.payload.file);
     if !payload.is_file() {
         return Err(format!(
@@ -942,8 +1053,11 @@ fn startup_preflight() -> Result<DesktopStartupSession, String> {
     let shared_root_check = shared_root.clone();
     let shared_check = thread::spawn(move || verify_shared_data_root(&shared_root_check));
 
-    let windows_email = windows_user_email()?;
-    env::set_var("PORTAL_WINDOWS_EMAIL", &windows_email);
+    let windows_identity = windows_identity()?;
+    env::set_var("PORTAL_WINDOWS_EMAIL", &windows_identity.email);
+    env::set_var("PORTAL_WINDOWS_USERNAME", &windows_identity.username);
+    env::set_var("PORTAL_WINDOWS_EMPLOYEE_ID", &windows_identity.employee_id);
+    env::set_var("PORTAL_WINDOWS_ACCOUNT", &windows_identity.account);
     let login_result = run_python_job(
         "request",
         &serde_json::json!({
@@ -963,8 +1077,19 @@ fn startup_preflight() -> Result<DesktopStartupSession, String> {
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(500);
     if status != 200 {
+        if status != 401 && status != 403 {
+            let detail = response
+                .get("error")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or("Portal could not initialize its local business data.");
+            return Err(format!(
+                "Portal authenticated the signed-in Windows account, but could not synchronize its business data:\n\n{detail}\n\nOpen Portal Manager > Maintenance > Repository to validate the shared repository, then retry."
+            ));
+        }
         return Err(format!(
-            "The signed-in Windows account is not registered as an active Portal user:\n\n{windows_email}\n\nContact the Portal developer for assistance."
+            "The signed-in Windows account is not registered as an active Portal user:\n\n{}\n\nContact the Portal developer for assistance.",
+            windows_identity.display_value()
         ));
     }
     let session = response
@@ -973,7 +1098,7 @@ fn startup_preflight() -> Result<DesktopStartupSession, String> {
         .ok_or_else(|| "Desktop sign-in did not return a Portal session.".to_string())?;
     Ok(DesktopStartupSession {
         shared_data_root: shared_root.display().to_string(),
-        windows_email,
+        windows_email: windows_identity.email,
         session,
     })
 }

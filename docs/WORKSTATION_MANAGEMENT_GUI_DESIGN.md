@@ -13,21 +13,48 @@ process coordination. Versioned Python commands own source
 publication, repository coordination, schema migration, snapshots, backup, restore,
 validation, and retention. The GUI and Task Scheduler must call the same commands.
 
+### 1.1 Product boundary and maintenance ownership
+
+`Portal-Desktop` is the end-user application. It presents resources and performs
+approved business operations through the local data coordinator, but it does not
+administer users, publish `system.db`, edit the schema catalog, or publish a shared
+business-data schema release.
+
+`PortalManager.exe` is the single operator application for workstation
+and portal maintenance. Portal Administration and Database Maintenance are separate
+navigation modules inside this executable, with separate permissions and task
+contracts, but they share the same trusted Python command runner, audit trail,
+configuration, maintenance lease, and progress model. A second administration
+executable is not required. Optional desktop shortcuts or deep links may open a
+specific module in the same executable.
+
+The separation is by responsibility, not by binary:
+
+| Module | Primary responsibility | Database/write boundary |
+| --- | --- | --- |
+| Portal Administration | Users, teams, roles, resources, permissions, dictionaries, holidays, and system publication settings | Writes only through approved management commands; publishes a new read-only `system.db` release |
+| Database Maintenance | Business schema catalog, table/field/index definitions, migration drafts, validation, release publication, snapshots, backups, conflicts, and recovery | The Python data coordinator remains the only component that changes `stormwater.db` |
+| Portal Desktop | Resource browsing and end-user business workflows | Reads `system.db`; reads/writes local `stormwater.db` through the coordinator |
+
+The manager must never expose an arbitrary SQL editor or execute DDL supplied by a
+resource, user, or network file. All changing operations use registered Python
+handlers and produce an auditable result.
+
 ## 2. Entry Point
 
 ```text
-workstation-manager/
-  PortalWorkstationManager.exe
+portal-manager/
+  PortalManager.exe
   config/workstation-manager.settings.json
   src/                         React UI
   src-tauri/                   Rust/Tauri host
   scripts/build-portable.ps1
 ```
 
-`PortalWorkstationManager.exe` is the portable interactive entry point. It is a
+`PortalManager.exe` is the portable interactive entry point. It is a
 Tauri executable with a React UI and Rust native host, without a local web server.
 The portable folder includes a `config` directory and the required
-`workstation-manager/sync` Python/scheduler files. Existing non-GUI launchers may remain for
+`portal-manager/sync` Python/scheduler files. Existing non-GUI launchers may remain for
 Task Scheduler, but operators normally use the workstation manager.
 
 ## 3. Navigation
@@ -48,6 +75,11 @@ work area:
 7. **Conflicts** - list, export, open, and resolve coordinator conflict reports.
 8. **Logs** - filter task results by date, task, severity, and correlation ID.
 9. **Settings** - edit validated workstation settings and test configured paths.
+10. **Portal Administration** - manage the system catalog and prepare a replacement
+    `system.db` release for users, teams, resources, permissions, dictionaries, and
+    holidays.
+11. **Database Maintenance** - design and review physical business tables, fields,
+    indexes, migration plans, schema tests, release publication, and recovery.
 
 Pages are task-focused. A long-running command does not block navigation or freeze the
 window.
@@ -76,6 +108,17 @@ command from a settings file.
 | Schema | `schema.database.migrate` | Migrate a local copy and atomically install it |
 | Schema | `schema.database.validate` | Run SQLite and GeoPackage validation |
 | Schema | `schema.database.rollback` | Restore the retained pre-migration database |
+| Schema | `schema.draft.create` | Create a date-based schema draft from the active catalog |
+| Schema | `schema.draft.update` | Add, change, deprecate, or remove approved table/field/index definitions |
+| Schema | `schema.diff` | Show the ordered structural diff and impact warnings |
+| Schema | `schema.release.approve` | Record an authorized review of a tested schema release |
+| Administration | `admin.catalog.status` | Inspect the current system catalog publication |
+| Administration | `admin.system.release.build` | Build and validate a replacement `system.db` publication |
+| Administration | `admin.system.release.publish` | Publish a verified system catalog release |
+| Administration | `admin.users.teams` | Maintain users, teams, roles, and manager relationships |
+| Administration | `admin.resources.permissions` | Maintain resources and effective permissions |
+| Administration | `admin.dictionary.values` | Maintain controlled dictionary/code values and display order |
+| Administration | `admin.holidays` | Maintain the approved holiday calendar |
 | Snapshots | `snapshot.build` | Build a full-replication candidate from operations |
 | Snapshots | `snapshot.validate` | Validate schema, coverage, hashes, and GeoPackage |
 | Snapshots | `snapshot.publish` | Activate a verified snapshot and new epoch safely |
@@ -138,6 +181,13 @@ tracebacks go to diagnostic logs and are not used as the primary operator messag
    arguments.
 9. Task settings are schema-validated before a command starts.
 10. A failed task leaves the last valid database, pointer, snapshot, or publication active.
+11. Portal Administration changes are restricted by the currently selected Portal role;
+    system-administrator-only actions cannot be authorized by Windows elevation alone.
+12. Schema drafts are never installed directly. The GUI must show the diff, affected
+    tables/indexes, data-loss warnings, test result, release ID, and rollback material
+    before publication.
+13. Destructive schema changes require a maintenance lease, a verified backup, typed
+    confirmation, and a successful migration test against a production-shaped copy.
 
 ## 8. Configuration
 
@@ -181,20 +231,34 @@ from the packaged system catalog and current operator identity. Administrative W
 rights are requested only when an operating-system action truly requires them.
 
 The initial deployment may use a workstation-maintainer allowlist. Repository bootstrap,
-schema activation, snapshot activation, restore, and retention are restricted tasks.
+schema activation, snapshot activation, restore, retention, Portal Administration, and
+system publication are restricted tasks. The manager must distinguish at least:
+
+- **Workstation maintainer**: can inspect jobs, logs, repository state, and approved
+  operational tasks;
+- **Administrator**: can manage users, teams, resources, permissions, dictionaries,
+  holidays, and system-catalog drafts;
+- **System administrator**: can perform all administrator actions, publish system and
+  business schema releases, recover databases, and change maintenance policy.
+
+The selected role is evaluated for every task. Having an elevated role on the account
+does not grant its capabilities while the operator is working under a lower selected
+role.
 
 ## 11. Initial Implementation State
 
 The current source-sync dashboard already implements scheduler state, start/stop,
 publication status, run history, logs, and date filtering. The standalone workstation
-manager exposes every documented module in its left navigation. Source Data is available;
-the other modules show their documented operations as unavailable until their registered
-Python task implementations are packaged.
+manager exposes the documented modules in its left navigation. Schema, repository,
+snapshot, backup, conflict, Portal Administration, and system-publication pages use the
+same command/progress contract even when a particular task is unavailable because a
+prerequisite, permission, release, or trusted handler is missing.
 
-Schema operations remain unavailable until the Python schema module described in
-`DATABASE_SCHEMA_MAINTENANCE_DESIGN.md` is implemented. Their GUI locations and command
-contracts are fixed now so implementation does not require redesigning the workstation
-interface.
+The Schema page is the GUI entry point for the workflow in
+`DATABASE_SCHEMA_MAINTENANCE_DESIGN.md`: inspect the catalog, create a dated draft,
+review the diff, run validation/tests, publish an immutable release, and apply or
+recover it through the coordinator. The manager does not contain a second schema
+engine.
 
 ## 12. Delivery Sequence
 
@@ -202,10 +266,12 @@ interface.
 2. Integrate the existing source-sync dashboard and configuration checks.
 3. Implement the trusted Python task runner and structured progress protocol.
 4. Add repository inspection and bootstrap tasks.
-5. Implement schema catalog, plan, validation, migration, and rollback tasks.
-6. Add snapshot, backup, restore, retention, and conflict pages.
-7. Add Task Scheduler registration and status management.
-8. Complete crash-injection, network-loss, permission, and operator usability testing.
+5. Add Portal Administration for system catalog drafts, user/team/resource/permission,
+   dictionary, holiday, and system-release management.
+6. Implement schema draft, diff, plan, validation, migration, approval, and rollback tasks.
+7. Add snapshot, backup, restore, retention, and conflict pages.
+8. Add Task Scheduler registration and status management.
+9. Complete crash-injection, network-loss, permission, and operator usability testing.
 
 ## 13. Acceptance Criteria
 
@@ -217,3 +283,7 @@ interface.
 - no configuration secret appears in process arguments, status history, or ordinary logs;
 - every task produces an auditable result and stable error code;
 - unavailable tasks explain the missing capability or prerequisite.
+- Portal Desktop contains no administrative or schema-publication surface;
+  `PortalManager.exe` is the documented operator entry point for those tasks;
+- no manager operation can execute unregistered SQL, DDL, migration code, or a network
+  supplied script.

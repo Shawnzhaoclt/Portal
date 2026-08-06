@@ -104,6 +104,21 @@ class LocalApplication(APIRouter):
 
         return decorator
 
+    def openapi(self) -> dict[str, Any]:
+        """Return the small OpenAPI-shaped view used by local discovery.
+
+        The desktop worker intentionally uses a lightweight router instead of
+        FastAPI, but management resource discovery still needs the same
+        ``paths`` surface that FastAPI exposes. Keeping this projection on
+        the application lets discovery work in the browser and local worker.
+        """
+        paths: dict[str, dict[str, dict[str, str]]] = {}
+        for route in self.routes:
+            paths.setdefault(route.path, {})[route.method.lower()] = {
+                "operationId": route.name,
+            }
+        return {"openapi": "3.0.0", "paths": paths}
+
 class URL:
     def __init__(self, value: str) -> None:
         self._value = value
@@ -124,6 +139,7 @@ class Request:
     ) -> None:
         self.app = app
         self.method = str(method).upper()
+        self.path = path
         self.headers = {str(key).lower(): str(value) for key, value in (headers or {}).items()}
         self.query_params = query or {}
         self.url = URL(f"tauri://localhost{path}")

@@ -1,0 +1,661 @@
+.weekly-time {
+  min-height: 100vh;
+  padding: 18px;
+  color: #172536;
+  background: #eef5f9;
+  font-family: "Segoe UI", Arial, sans-serif;
+}
+
+.weekly-time *,
+.weekly-time *::before,
+.weekly-time *::after {
+  box-sizing: border-box;
+}
+
+.weekly-time button,
+.weekly-time input,
+.weekly-time select,
+.weekly-time textarea {
+  border-radius: 0;
+  font: inherit;
+}
+
+.weekly-time__header,
+.weekly-time__controlbar,
+.weekly-time__metrics,
+.weekly-time__tabs,
+.weekly-time__workflow,
+.weekly-time__panel {
+  max-width: 1800px;
+  margin-inline: auto;
+}
+
+.weekly-time__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 72px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid #bdcfdd;
+}
+
+.weekly-time__eyebrow {
+  color: #1e5a8e;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.weekly-time h1,
+.weekly-time h2,
+.weekly-time h3,
+.weekly-time p {
+  margin: 0;
+}
+
+.weekly-time h1 {
+  margin-top: 2px;
+  font-size: 27px;
+  letter-spacing: 0;
+}
+
+.weekly-time__header p,
+.weekly-time__panel header p {
+  margin-top: 4px;
+  color: #5d7085;
+}
+
+.weekly-time__header-actions,
+.weekly-time__workflow > div:last-child,
+.weekly-time__table-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.button,
+.icon-button {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border: 1px solid #9cb6ca;
+  background: #fff;
+  color: #124f83;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.button {
+  padding: 0 15px;
+}
+
+.icon-button {
+  width: 40px;
+  padding: 0;
+}
+
+.button--primary {
+  border-color: #1d5f97;
+  background: #1d5f97;
+  color: #fff;
+}
+
+.button:disabled,
+.icon-button:disabled {
+  cursor: not-allowed;
+  opacity: .55;
+}
+
+.weekly-time__controlbar {
+  display: flex;
+  min-height: 58px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+}
+
+.weekly-time__week-picker {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.weekly-time__week-picker label {
+  display: flex;
+  flex: 0 0 auto;
+  height: 38px;
+  align-items: center;
+  border: 1px solid #a9bece;
+  background: #fff;
+}
+
+.weekly-time__week-picker label span {
+  padding: 0 10px;
+  color: #5d7085;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  text-transform: uppercase;
+}
+
+.weekly-time__week-picker input {
+  width: 148px;
+  min-width: 148px;
+  height: 36px;
+  border: 0;
+  border-left: 1px solid #cad8e2;
+  padding: 0 8px;
+}
+
+.weekly-time__status {
+  display: inline-flex;
+  min-height: 27px;
+  align-items: center;
+  padding: 0 9px;
+  border: 1px solid #9bb5c8;
+  color: #38556c;
+  background: #fff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.weekly-time__status--submitted,
+.weekly-time__status--pending {
+  border-color: #dbad5a;
+  background: #fff7e6;
+  color: #825409;
+}
+
+.weekly-time__status--approved {
+  border-color: #85bca0;
+  background: #edf8f2;
+  color: #17643a;
+}
+
+.weekly-time__status--returned {
+  border-color: #dc8e8e;
+  background: #fff0f0;
+  color: #9a2929;
+}
+
+.weekly-time__metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  border: 1px solid #b9cbd9;
+  background: #fff;
+}
+
+.weekly-time__metrics > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  min-height: 68px;
+  padding: 12px 18px;
+  border-right: 1px solid #d2dee7;
+}
+
+.weekly-time__metrics > div:last-child {
+  border-right: 0;
+}
+
+.weekly-time__metrics span {
+  grid-column: 1;
+  color: #597087;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.weekly-time__metrics strong {
+  grid-column: 1;
+  font-size: 25px;
+}
+
+.weekly-time__metrics small {
+  grid-column: 2;
+  grid-row: 2;
+  color: #63758a;
+}
+
+.weekly-time__metrics .is-warning strong {
+  color: #b34034;
+}
+
+.weekly-time__tabs {
+  display: flex;
+  gap: 0;
+  margin-top: 14px;
+  border-bottom: 2px solid #1d5f97;
+}
+
+.weekly-time__tabs button {
+  display: flex;
+  min-height: 43px;
+  align-items: center;
+  gap: 7px;
+  border: 1px solid #b5c8d7;
+  border-bottom: 0;
+  padding: 0 17px;
+  background: #f8fbfd;
+  color: #334b61;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.weekly-time__tabs button.is-active {
+  border-color: #1d5f97;
+  background: #1d5f97;
+  color: #fff;
+}
+
+.weekly-time__tabs button span {
+  min-width: 20px;
+  padding: 2px 5px;
+  background: #fff;
+  color: #1d5f97;
+  font-size: 11px;
+  text-align: center;
+}
+
+.weekly-time__calendar {
+  display: grid;
+  height: clamp(340px, calc(100dvh - 500px), 420px);
+  max-width: 1800px;
+  min-height: 0;
+  margin: 0 auto;
+  grid-template-columns: repeat(7, minmax(150px, 1fr));
+  border: 1px solid #afc3d3;
+  border-top: 0;
+  background: #fff;
+}
+
+.weekly-time__day {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  border-right: 1px solid #c9d7e1;
+}
+
+.weekly-time__day:last-child {
+  border-right: 0;
+}
+
+.weekly-time__day > header {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 11px;
+  background: #e4eef5;
+}
+
+.weekly-time__day.is-holiday > header {
+  background: #fff3dd;
+}
+
+.weekly-time__day header div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.weekly-time__day header strong {
+  white-space: nowrap;
+}
+
+.weekly-time__day header span,
+.weekly-time__entry span {
+  overflow: hidden;
+  color: #65788c;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.weekly-time__holiday {
+  padding: 7px 10px;
+  border-bottom: 1px solid #ecd19d;
+  background: #fff9ed;
+  color: #815d16;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.weekly-time__entries {
+  display: flex;
+  overflow-y: auto;
+  min-height: 120px;
+  flex: 1;
+  flex-direction: column;
+  overscroll-behavior: contain;
+}
+
+.weekly-time__entry {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px;
+  padding: 10px;
+  border-bottom: 1px solid #d5e0e8;
+}
+
+.weekly-time__entry > div:first-child {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.weekly-time__entry-actions {
+  display: flex;
+  grid-column: 1 / -1;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+.weekly-time__entry-actions button,
+.weekly-time__table-actions button {
+  display: inline-flex;
+  width: 30px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #b5c8d7;
+  background: #fff;
+  color: #1d5f97;
+  cursor: pointer;
+}
+
+.weekly-time__empty {
+  margin: auto;
+  color: #8090a1;
+  font-size: 12px;
+}
+
+.weekly-time__add {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  border: 0;
+  border-top: 1px solid #cad8e2;
+  background: #f8fbfd;
+  color: #1d5f97;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.weekly-time__workflow {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 12px 15px;
+  border: 1px solid #afc3d3;
+  border-top: 0;
+  background: #fff;
+}
+
+.weekly-time__workflow > div:first-child {
+  display: flex;
+  flex-direction: column;
+}
+
+.weekly-time__workflow span {
+  color: #66798c;
+}
+
+.weekly-time__notice {
+  display: flex;
+  max-width: 1800px;
+  margin: 0 auto;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid #dfbd79;
+  background: #fff7e8;
+  color: #744c05;
+}
+
+.weekly-time__panel {
+  min-height: 535px;
+  border: 1px solid #afc3d3;
+  border-top: 0;
+  background: #fff;
+}
+
+.weekly-time__panel > header {
+  display: flex;
+  min-height: 76px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #cad8e2;
+}
+
+.weekly-time__panel h3 {
+  padding: 14px 16px 8px;
+  font-size: 16px;
+}
+
+.weekly-time__table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.weekly-time__table th {
+  height: 39px;
+  padding: 8px 12px;
+  background: #dce9f2;
+  color: #174f7d;
+  font-size: 12px;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.weekly-time__table td {
+  height: 43px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #d5e0e8;
+}
+
+.weekly-time__table tbody tr:nth-child(even) {
+  background: #f4f8fb;
+}
+
+.empty-cell {
+  height: 90px !important;
+  color: #718397;
+  text-align: center;
+}
+
+.table-link {
+  border: 0;
+  border-bottom: 1px solid currentColor;
+  padding: 0;
+  background: transparent;
+  color: #155b91;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.weekly-time__history {
+  margin: 18px;
+  border: 1px solid #c6d5df;
+}
+
+.weekly-time__history h3 {
+  padding: 10px 12px;
+  background: #e9f1f6;
+}
+
+.weekly-time__history > div {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  padding: 9px 12px;
+  border-top: 1px solid #d6e0e8;
+}
+
+.weekly-time__history p {
+  grid-column: 1 / -1;
+  margin-top: 4px;
+  color: #65788c;
+}
+
+.weekly-time__modal-backdrop {
+  position: fixed;
+  z-index: 50;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(35, 48, 60, .48);
+}
+
+.weekly-time__modal {
+  width: min(560px, 96vw);
+  border: 1px solid #7898b0;
+  background: #fff;
+  box-shadow: 0 18px 50px rgba(25, 47, 66, .28);
+}
+
+.weekly-time__modal--wide {
+  width: min(900px, 96vw);
+}
+
+.weekly-time__modal--review {
+  width: min(480px, 96vw);
+}
+
+.weekly-time__modal > header {
+  display: flex;
+  min-height: 54px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  border-bottom: 1px solid #b9ccd9;
+  background: #eaf2f7;
+}
+
+.weekly-time__modal > header button {
+  border: 0;
+  background: transparent;
+  color: #164f7f;
+  cursor: pointer;
+}
+
+.weekly-time__form-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 13px;
+  padding: 18px;
+}
+
+.weekly-time__form-grid label,
+.weekly-time__reason,
+.weekly-time__schedule-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.weekly-time__form-grid label > span,
+.weekly-time__reason > span,
+.weekly-time__schedule-form label > span {
+  color: #51687d;
+  font-size: 12px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.weekly-time__form-grid input,
+.weekly-time__form-grid select,
+.weekly-time__form-grid textarea,
+.weekly-time__reason textarea,
+.weekly-time__schedule-form input {
+  min-height: 39px;
+  border: 1px solid #a9bece;
+  padding: 7px 9px;
+  background: #fff;
+}
+
+.weekly-time__form-grid .span-2 {
+  grid-column: 1 / -1;
+}
+
+.weekly-time__duration-help {
+  margin: -4px 0 0;
+  color: #4f6d83;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.weekly-time__duration-help.is-error {
+  color: #a51d1d;
+  font-weight: 700;
+}
+
+.weekly-time__form-grid input[aria-invalid='true'] {
+  border-color: #c44444;
+}
+
+.weekly-time__modal footer {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 11px 18px;
+  border-top: 1px solid #cbd8e1;
+  background: #f7fafc;
+}
+
+.weekly-time__schedule-form {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 8px;
+  padding: 18px 18px 12px;
+}
+
+.weekly-time__reason {
+  margin: 0 18px 18px;
+}
+
+.weekly-time--loading {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.is-spinning {
+  animation: weekly-spin 1s linear infinite;
+}
+
+@keyframes weekly-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1180px) {
+  .weekly-time__calendar {
+    overflow-x: auto;
+    grid-template-columns: repeat(7, 175px);
+  }
+
+  .weekly-time__metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .weekly-time__metrics > div:nth-child(2) {
+    border-right: 0;
+  }
+
+  .weekly-time__schedule-form {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}

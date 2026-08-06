@@ -16,6 +16,8 @@ import {
   consumeManagementSessionTransfer,
   saveManagementToken,
   saveManagementUser,
+  sessionManagementRole,
+  switchRole,
   type PortalUser,
 } from './management/api'
 import { applyAppTheme, getInitialTheme } from './theme'
@@ -59,6 +61,7 @@ async function bootstrap() {
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
 
     try {
+      const activeSessionRole = sessionManagementRole()
       clearManagementToken()
       await initializeClientSettings()
       if (isScheduledMaintenance()) {
@@ -77,6 +80,15 @@ async function bootstrap() {
       if (!session.token) throw new Error('Desktop sign-in did not return a Portal session token.')
       saveManagementToken(session.token, session.user.selected_role)
       saveManagementUser(session.user)
+      if (
+        activeSessionRole &&
+        activeSessionRole !== session.user.selected_role &&
+        session.user.roles.includes(activeSessionRole)
+      ) {
+        const switched = await switchRole(activeSessionRole)
+        saveManagementToken(switched.token, activeSessionRole)
+        saveManagementUser({ ...switched.user, selected_role: activeSessionRole })
+      }
       const update = await checkPortalUpdate()
       if (update.available) {
         root.render(

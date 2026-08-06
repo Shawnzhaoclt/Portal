@@ -68,6 +68,8 @@ generation and retention remain maintenance-workstation responsibilities.
 
 The coordinator owns membership validation, snapshot installation, actor registration,
 operation publication, synchronization barriers, deterministic reduction, recovery, and
-local IPC commands. Domain tables can be projected from `sw_sync_entity` by resource-specific
-adapters. Snapshot compaction/publication, five-snapshot retention, conflict-report exports,
-and signed-device operation packages belong to the maintenance workstation module.
+local IPC commands. Every business entity, including future resource tables, must be declared
+in `physical_entities.py` with typed columns and query indexes before it can be written. The
+generic `sw_sync_entity` store is protocol infrastructure and is not an approved primary store
+for resource data. Snapshot compaction/publication, five-snapshot retention, conflict-report
+exports, and signed-device operation packages belong to the maintenance workstation module.

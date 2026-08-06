@@ -305,6 +305,80 @@
   font-weight: 430;
 }
 
+.home-favorites-section {
+  margin-bottom: 38px;
+  border-bottom: 1px solid #d8dce0;
+  padding-bottom: 38px;
+}
+
+.home-featured-heading.compact {
+  margin-bottom: 18px;
+}
+
+.home-favorites-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.home-load-team-favorites {
+  min-height: 40px;
+  border: 1px solid #9fb6cf;
+  padding: 0 15px;
+  color: #0d528c;
+  background: #ffffff;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 720;
+  cursor: pointer;
+}
+
+.home-load-team-favorites:hover {
+  border-color: var(--brand-blue);
+  background: #edf5ff;
+}
+
+.home-load-team-favorites:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.home-favorites-empty {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 52px;
+  border: 1px dashed #b8c8d8;
+  padding: 0 16px;
+  color: #657386;
+  background: #f8fafc;
+  font-size: 15px;
+}
+
+.home-load-team-favorites {
+  border-color: var(--panel-border-strong);
+  color: var(--accent);
+  background: var(--panel-bg);
+}
+
+.home-load-team-favorites:hover {
+  background: var(--panel-active-bg);
+}
+
+.home-favorites-error {
+  margin: 0 0 16px;
+  border-left: 4px solid #b42318;
+  padding: 9px 12px;
+  color: #8f1f16;
+  background: #fff3f2;
+  font-size: 14px;
+}
+
+.home-team-featured {
+  display: block;
+}
+
 .home-resource-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -593,6 +667,17 @@
 .home-resource-footer button:hover {
   border-color: var(--brand-blue);
   color: var(--brand-blue);
+}
+
+.home-resource-footer .home-favorite-button.active {
+  border-color: #d89b13;
+  color: #a66b00;
+  background: #fff8df;
+}
+
+.home-resource-footer .home-favorite-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
 }
 
 .home-resource-preview:focus-visible,
@@ -950,6 +1035,16 @@
   border: 1px dashed #cfd6de;
   color: #667184;
   background: #fbfcfd;
+}
+
+.home-favorites-section {
+  border-bottom-color: var(--panel-border);
+}
+
+.home-favorites-empty {
+  border-color: var(--panel-border-strong);
+  color: var(--panel-muted);
+  background: var(--panel-bg-soft);
 }
 
 .home-empty-results strong {

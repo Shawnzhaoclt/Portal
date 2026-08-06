@@ -32,12 +32,20 @@
 }
 
 .management-page input,
-.management-page select {
+.management-page select,
+.management-page textarea {
   min-height: 34px;
   border: 1px solid #aebdcb;
   padding: 0 9px;
   background: #ffffff;
   color: #1f2933;
+}
+
+.management-page textarea {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  resize: vertical;
+  font: inherit;
 }
 
 .management-page input[type='checkbox'] {
@@ -116,7 +124,22 @@
 
 .management-header-actions {
   display: flex;
+  align-items: center;
   gap: 8px;
+}
+
+.management-header-role-select {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.management-header-role-select > span {
+  white-space: nowrap;
+}
+
+.management-header-role-select select {
+  min-width: 150px;
 }
 
 .management-header-link {
@@ -372,11 +395,22 @@
 
 .management-featured-admin-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(240px, 360px);
+  grid-template-columns: minmax(280px, 420px);
   gap: 12px;
   align-items: end;
   border-bottom: 1px solid #d6dee8;
   padding: 12px 16px;
+}
+
+.management-featured-panel .management-panel-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.management-featured-panel .management-panel-heading > div:first-child p {
+  margin: 0;
+  color: #687586;
+  font-size: 13px;
 }
 
 .management-featured-admin-row label {
@@ -539,13 +573,47 @@
 
 .management-table-toolbar.user-filters {
   grid-template-columns:
-    minmax(140px, 1fr)
-    minmax(180px, 1.15fr)
-    minmax(120px, 0.8fr)
-    minmax(180px, 1.1fr)
-    minmax(110px, 0.7fr)
-    minmax(120px, 0.75fr)
-    max-content;
+    minmax(170px, 1.05fr)
+    minmax(210px, 1.25fr)
+    minmax(140px, 0.8fr)
+    minmax(200px, 1.15fr)
+    minmax(130px, 0.75fr)
+    minmax(145px, 0.8fr)
+    72px;
+  gap: 12px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+  background: #ffffff;
+}
+
+.management-users-panel .management-panel-heading {
+  min-height: 54px;
+  padding: 9px 16px;
+}
+
+.management-users-panel .management-panel-heading-actions > span {
+  white-space: nowrap;
+}
+
+.management-table-toolbar.user-filters > label {
+  min-width: 0;
+}
+
+.management-table-toolbar.user-filters input,
+.management-table-toolbar.user-filters select {
+  width: 100%;
+  min-width: 0;
+}
+
+.management-table-toolbar.user-filters > label:last-child select {
+  padding-right: 4px;
+  padding-left: 8px;
+}
+
+@media (max-width: 1250px) and (min-width: 981px) {
+  .management-table-toolbar.user-filters {
+    grid-template-columns: repeat(3, minmax(150px, 1fr)) 72px;
+  }
 }
 
 .management-table-toolbar label {
@@ -918,6 +986,183 @@
   word-break: break-word;
 }
 
+.holiday-panel .management-panel-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.holiday-calendar-toolbar {
+  display: grid;
+  grid-template-columns: minmax(280px, 440px) minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 12px 16px;
+}
+
+.holiday-calendar-toolbar label {
+  display: grid;
+  gap: 5px;
+}
+
+.holiday-calendar-toolbar label > span,
+.holiday-calendar-summary span,
+.holiday-table-heading span {
+  color: #687586;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.holiday-calendar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.holiday-calendar-summary {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 90px 100px minmax(210px, 1fr);
+  border-bottom: 1px solid #d6dee8;
+  background: #fbfdff;
+}
+
+.holiday-calendar-summary > div {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  min-height: 68px;
+  border-right: 1px solid #d6dee8;
+  padding: 10px 14px;
+}
+
+.holiday-calendar-summary > div:last-child {
+  border-right: 0;
+}
+
+.holiday-validation {
+  display: grid;
+  gap: 6px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 10px 16px;
+  background: #fffdf7;
+}
+
+.holiday-validation > div {
+  display: grid;
+  grid-template-columns: 70px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 13px;
+}
+
+.holiday-validation-error {
+  color: #b42318;
+}
+
+.holiday-validation-warning {
+  color: #7a4f00;
+}
+
+.holiday-table-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 10px 16px;
+  background: #f8fbff;
+}
+
+.holiday-table-heading > div {
+  display: grid;
+  gap: 3px;
+}
+
+.holiday-table-heading h3 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.holiday-table {
+  min-width: 1080px;
+}
+
+.holiday-table th,
+.holiday-table td {
+  text-align: center;
+}
+
+.holiday-table td:nth-child(2) {
+  text-align: left;
+}
+
+.holiday-table td:nth-child(2) small {
+  display: block;
+  margin-top: 3px;
+  color: #687586;
+}
+
+.holiday-empty-state {
+  height: 150px;
+  color: #687586;
+  text-align: center !important;
+}
+
+.holiday-empty-state svg {
+  margin-right: 7px;
+  vertical-align: middle;
+}
+
+.holiday-empty-panel {
+  display: grid;
+  min-height: 280px;
+  place-items: center;
+  align-content: center;
+  gap: 8px;
+}
+
+.holiday-delete-button {
+  border-color: #e7a6a0 !important;
+  color: #b42318 !important;
+}
+
+.holiday-modal {
+  width: min(620px, 100%);
+}
+
+.holiday-entry-modal {
+  width: min(760px, 100%);
+}
+
+.holiday-form {
+  display: grid;
+  gap: 12px;
+}
+
+.holiday-entry-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.holiday-form-wide {
+  grid-column: 1 / -1;
+}
+
+.holiday-checkbox {
+  display: flex !important;
+  align-items: center;
+  gap: 8px !important;
+  min-height: 34px;
+}
+
+.holiday-checkbox span {
+  color: #1f2933 !important;
+  font-size: 13px !important;
+  letter-spacing: 0 !important;
+  text-transform: none !important;
+}
+
 .management-row-actions {
   display: flex;
   flex-wrap: wrap;
@@ -930,12 +1175,211 @@
   font-size: 12px;
 }
 
+.dictionary-panel .management-panel-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.dictionary-context-toolbar {
+  display: grid;
+  grid-template-columns: minmax(220px, 320px) minmax(280px, 1fr) max-content;
+  align-items: end;
+  gap: 14px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 12px 16px;
+}
+
+.dictionary-context-toolbar > label {
+  display: grid;
+  gap: 5px;
+}
+
+.dictionary-context-toolbar > label > span,
+.dictionary-list-toolbar > label > span {
+  color: #526173;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.dictionary-context-summary {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+  align-self: center;
+}
+
+.dictionary-context-summary strong {
+  color: #15283c;
+}
+
+.dictionary-context-summary span {
+  overflow: hidden;
+  color: #687586;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dictionary-list-toolbar {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) 150px max-content max-content;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 10px 16px;
+}
+
+.dictionary-search {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #b8c8da;
+  padding: 0 10px;
+  background: #fff;
+}
+
+.dictionary-search input {
+  min-width: 0;
+  flex: 1;
+  border: 0 !important;
+  padding-right: 0 !important;
+  padding-left: 0 !important;
+  outline: 0;
+}
+
+.dictionary-result-count {
+  min-width: max-content;
+  color: #526173;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.dictionary-guidance {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid #d6dee8;
+  padding: 8px 16px;
+  color: #526173;
+  font-size: 12px;
+}
+
+.dictionary-table th:first-child,
+.dictionary-table td:first-child {
+  width: 126px;
+  text-align: center;
+}
+
+.dictionary-order {
+  display: grid;
+  grid-template-columns: 28px 28px 28px;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+
+.dictionary-order span {
+  font-weight: 700;
+}
+
+.dictionary-order button {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border: 1px solid #b8c8da;
+  padding: 0;
+  color: #14558f;
+  background: #fff;
+}
+
+.dictionary-order button:disabled {
+  color: #aab5c2;
+  background: #f5f7f9;
+}
+
+.dictionary-table th:nth-child(4),
+.dictionary-table td:nth-child(4) {
+  width: 110px;
+  text-align: center;
+}
+
+.dictionary-table th:last-child,
+.dictionary-table td:last-child {
+  width: 190px;
+}
+
+.dictionary-status {
+  color: #687586;
+  font-weight: 700;
+}
+
+.dictionary-status.active {
+  color: #247a48;
+}
+
+.dictionary-empty {
+  padding: 32px !important;
+  color: #687586;
+  text-align: center !important;
+}
+
+.dictionary-modal small {
+  color: #687586;
+  font-size: 12px;
+}
+
+@media (max-width: 900px) {
+  .dictionary-context-toolbar,
+  .dictionary-list-toolbar {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .dictionary-context-toolbar .management-row-actions {
+    justify-content: flex-start;
+  }
+}
+
 .management-permission-toolbar {
   display: grid;
   grid-template-columns: minmax(220px, 2fr) 100px minmax(180px, 1fr) minmax(440px, 2fr) max-content;
   gap: 8px;
   border-bottom: 1px solid #d6dee8;
   padding: 14px 16px;
+}
+
+.management-permissions-panel .management-panel-heading {
+  min-height: 54px;
+  padding: 9px 16px;
+}
+
+.management-permission-modes {
+  display: inline-grid;
+  grid-template-columns: repeat(2, max-content);
+  overflow: hidden;
+  border: 1px solid #9fb2c5;
+  background: #ffffff;
+}
+
+.management-permission-modes button {
+  min-height: 34px;
+  border: 0;
+  border-right: 1px solid #b8c8d8;
+  padding: 0 13px;
+  background: #ffffff;
+  color: #255a8f;
+}
+
+.management-permission-modes button:last-child {
+  border-right: 0;
+}
+
+.management-permission-modes button.active {
+  background: #255a8f;
+  color: #ffffff;
 }
 
 .management-permission-type-options {
@@ -966,11 +1410,11 @@
 
 .management-permission-bulk-toolbar {
   display: grid;
-  grid-template-columns: 100px minmax(190px, 1.2fr) minmax(240px, 1.5fr) 130px 150px max-content max-content;
+  grid-template-columns: 92px minmax(220px, 1.15fr) minmax(280px, 1.7fr) 130px 150px max-content max-content;
   gap: 8px;
   align-items: center;
   border-bottom: 1px solid #d6dee8;
-  padding: 14px 16px;
+  padding: 10px 16px;
 }
 
 .management-subject-combobox {
@@ -1042,36 +1486,112 @@
 }
 
 .management-permission-bulk-actions {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
   align-items: center;
-  gap: 8px;
+  gap: 12px;
   border-bottom: 1px solid #d6dee8;
-  padding: 10px 16px;
+  padding: 8px 16px;
   background: #fbfdff;
 }
 
-.management-permission-bulk-actions span {
-  margin-right: auto;
-  color: #687586;
+.management-permission-bulk-actions button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.management-permission-selection-actions,
+.management-permission-grant-actions,
+.management-permission-save-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.management-permission-selection-summary {
+  display: grid;
+  min-width: 114px;
+  gap: 1px;
+  margin-right: 2px;
+  line-height: 1.15;
+}
+
+.management-permission-selection-summary strong {
+  color: #1f2933;
   font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
-.management-permission-matrix {
-  min-width: 1240px;
+.management-permission-selection-summary span,
+.management-permission-selection-summary small {
+  color: #687586;
+  font-size: 11px;
+  font-weight: 800;
 }
 
-.management-permission-matrix th:last-child,
-.management-permission-matrix td:last-child {
-  width: 520px;
+.management-permission-selection-summary small {
+  max-width: 190px;
+  overflow: hidden;
+  color: #255a8f;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.management-permission-grant-actions {
+  justify-content: center;
+}
+
+.management-permission-grant-actions > span {
+  margin-right: 2px;
+  color: #687586;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.management-permission-grant-actions button {
+  padding-right: 8px;
+  padding-left: 8px;
+}
+
+.management-permission-save-actions {
+  justify-content: flex-end;
+}
+
+.management-permission-matrix {
+  min-width: 1180px;
+  table-layout: fixed;
+}
+
+.management-page .management-permission-matrix th:last-child,
+.management-page .management-permission-matrix td:last-child {
+  width: 480px;
 }
 
 .management-permission-matrix td:first-child,
 .management-permission-matrix th:first-child {
-  width: 70px;
+  width: 62px;
+  text-align: center;
+}
+
+.management-permission-matrix th:nth-child(3),
+.management-permission-matrix td:nth-child(3) {
+  width: 100px;
+}
+
+.management-permission-matrix th:nth-child(4),
+.management-permission-matrix td:nth-child(4) {
+  width: 130px;
+}
+
+.management-permission-matrix th:nth-child(5),
+.management-permission-matrix td:nth-child(5) {
+  width: 132px;
 }
 
 .management-permission-matrix td:nth-child(2) strong,
@@ -1083,6 +1603,35 @@
   margin-top: 3px;
   color: #687586;
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.management-permission-matrix .management-permission-type-options {
+  display: grid;
+  grid-template-columns: repeat(7, max-content);
+  gap: 6px 9px;
+  flex-wrap: nowrap;
+}
+
+.management-permission-matrix .management-permission-type-options label {
+  font-size: 11px;
+}
+
+.management-permission-matrix .management-permission-type-options input {
+  width: 13px;
+  height: 13px;
+}
+
+@media (max-width: 1320px) {
+  .management-permission-bulk-actions {
+    grid-template-columns: 1fr max-content;
+  }
+
+  .management-permission-grant-actions {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-content: flex-start;
+  }
 }
 
 @media (max-width: 980px) {
@@ -1109,6 +1658,25 @@
   .management-permission-bulk-toolbar,
   .management-permission-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .holiday-calendar-toolbar,
+  .holiday-calendar-summary,
+  .holiday-entry-form {
+    grid-template-columns: 1fr;
+  }
+
+  .holiday-calendar-actions {
+    justify-content: flex-start;
+  }
+
+  .holiday-calendar-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid #d6dee8;
+  }
+
+  .holiday-form-wide {
+    grid-column: auto;
   }
 
   .management-pagination {

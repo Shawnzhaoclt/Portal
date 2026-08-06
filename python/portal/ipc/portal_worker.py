@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from collections.abc import Callable
@@ -31,9 +32,21 @@ def request_job(request: dict[str, Any]) -> dict[str, Any]:
     return dispatch_request(request)
 
 
+def management_job(request: dict[str, Any]) -> dict[str, Any]:
+    """Run the standalone Portal Manager against the local system catalog."""
+    from portal.app.management_runner import run
+
+    payload = dict(request)
+    settings_value = payload.pop("_settings_path", None) or os.environ.get("PORTAL_SETTINGS_PATH")
+    if not settings_value:
+        raise ValueError("Portal Manager settings were not supplied to the Python worker.")
+    return run(payload, Path(str(settings_value)))
+
+
 JOBS: dict[str, JobHandler] = {
     "request": request_job,
     "health": health_job,
+    "management": management_job,
 }
 
 

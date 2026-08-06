@@ -9,7 +9,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Iterable, Mapping, Sequence
 
 from .errors import (
     ConfigurationError,
@@ -352,6 +352,40 @@ class DataCoordinator:
     def list_entities(self, entity_type: str) -> list[dict[str, object]]:
         self.sync_if_due()
         return self.store.list_entities(entity_type)
+
+    def query_entities(
+        self,
+        entity_type: str,
+        *,
+        filters: Mapping[str, object] | None = None,
+        order_by: Sequence[tuple[str, bool]] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+        include_deleted: bool = False,
+    ) -> list[dict[str, object]]:
+        self.sync_if_due()
+        return self.store.query_entities(
+            entity_type,
+            filters=filters,
+            order_by=order_by,
+            limit=limit,
+            offset=offset,
+            include_deleted=include_deleted,
+        )
+
+    def count_entities(
+        self,
+        entity_type: str,
+        *,
+        filters: Mapping[str, object] | None = None,
+        include_deleted: bool = False,
+    ) -> int:
+        self.sync_if_due()
+        return self.store.count_entities(
+            entity_type,
+            filters=filters,
+            include_deleted=include_deleted,
+        )
 
     def _publish_transaction(
         self,

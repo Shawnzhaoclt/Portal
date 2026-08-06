@@ -3,7 +3,9 @@ import { toast } from 'sonner'
 import {
   AlertTriangle,
   ArrowUpDown,
+  ArrowLeft,
   Building2,
+  CalendarDays,
   ChevronDown,
   ChevronRight,
   ExternalLink,
@@ -18,6 +20,7 @@ import {
   Settings,
   ShieldCheck,
   Star,
+  Tags,
   Trash2,
   UserCog,
   UserRound,
@@ -38,8 +41,6 @@ import {
   fetchAdminSummary,
   fetchAuditLogs,
   fetchMe,
-  fetchMyFeaturedResources,
-  fetchMyResources,
   fetchPermissionMatrix,
   fetchResourcePermissions,
   fetchResources,
@@ -51,11 +52,12 @@ import {
   resetUserPassword,
   managementSessionTransferUrl,
   saveManagementToken,
+  saveManagementUser,
   setAdminStatus,
   storedManagementRole,
   storedManagementToken,
   storedManagementUser,
-  updateMyFeaturedResources,
+  switchRole,
   updatePermissionMatrix,
   updateResource,
   updateTeamFeaturedResources,
@@ -76,14 +78,22 @@ import {
   type ResourceDiscoveryItem,
   type ResourcePermission,
 } from './api'
+import HolidayPanel from './HolidayPanel'
+import DictionaryPanel from './DictionaryPanel'
 import './ManagementPage.css'
 
 type ManagementPageProps = {
   loginOnly?: boolean
+  accountOnly?: boolean
+  redirectOnMissingToken?: boolean
+  backLabel?: string
+  onBack?: () => void
+  showBackAction?: boolean
+  showRoleSelector?: boolean
+  showSignOutAction?: boolean
 }
 
-type TabKey = 'profile' | 'featured' | 'users' | 'teams' | 'resources' | 'permissions' | 'audit'
-type FeaturedEditorMode = 'personal' | 'team'
+type TabKey = 'profile' | 'featured' | 'users' | 'teams' | 'resources' | 'permissions' | 'holidays' | 'dictionaries' | 'audit'
 type UserSortKey = 'name' | 'email' | 'employee_id' | 'team' | 'role' | 'status'
 type SortDirection = 'asc' | 'desc'
 type UserFilters = {
@@ -95,10 +105,11 @@ type UserFilters = {
   status: '' | 'active' | 'disabled'
 }
 
-const SELF_SERVICE_TABS: TabKey[] = ['profile', 'featured']
+const SELF_SERVICE_TABS: TabKey[] = ['profile']
 
 function tabFromQuery(): TabKey {
   const tab = new URLSearchParams(window.location.search).get('tab')
+  if (tab === 'time-types') return 'dictionaries'
   if (
     tab === 'profile' ||
     tab === 'featured' ||
@@ -106,6 +117,8 @@ function tabFromQuery(): TabKey {
     tab === 'teams' ||
     tab === 'resources' ||
     tab === 'permissions' ||
+    tab === 'holidays' ||
+    tab === 'dictionaries' ||
     tab === 'audit'
   ) {
     return tab
@@ -313,10 +326,6 @@ function featuredIdsFromResources(featured: Record<PortalFeaturedCategory, Porta
   return ids
 }
 
-function hasFeaturedSelections(idsByCategory: Record<PortalFeaturedCategory, number[]>) {
-  return FEATURED_CATEGORY_OPTIONS.some((category) => (idsByCategory[category.key] ?? []).length > 0)
-}
-
 function portalFeaturedCategoryForResource(resource: PortalResource): Exclude<PortalFeaturedCategory, 'all'> {
   if (resource.resource_type === 'admin' || resource.resource_type === 'api' || resource.resource_type === 'service') return 'dashboard'
   return resource.resource_type
@@ -351,20 +360,20 @@ function featuredPayloadFromIds(idsByCategory: Record<PortalFeaturedCategory, nu
   }, {} as PortalFeaturedResourceIdsByCategory)
 }
 
-export default function ManagementPage({ loginOnly = false }: ManagementPageProps) {
+export default function ManagementPage({
+  loginOnly = false,
+  accountOnly = false,
+  redirectOnMissingToken = true,
+  backLabel = 'Back to portal',
+  onBack,
+  showBackAction = true,
+  showRoleSelector = false,
+  showSignOutAction = true,
+}: ManagementPageProps) {
   const [token, setToken] = useState(() => consumeManagementSessionTransfer()?.token ?? storedManagementToken())
   const [activeTab, setActiveTab] = useState<TabKey>(() => tabFromQuery())
   const [currentUser, setCurrentUser] = useState<PortalUser | null>(null)
-  const [myResources, setMyResources] = useState<PortalResource[]>([])
-  const [featuredResourcesByCategory, setFeaturedResourcesByCategory] = useState<Record<PortalFeaturedCategory, PortalResource[]>>(() =>
-    emptyFeaturedResourceMap(),
-  )
-  const [featuredIdsByCategory, setFeaturedIdsByCategory] = useState<Record<PortalFeaturedCategory, number[]>>(() => emptyFeaturedIdMap())
-  const [teamTemplateFeaturedIdsByCategory, setTeamTemplateFeaturedIdsByCategory] = useState<Record<PortalFeaturedCategory, number[]>>(() =>
-    emptyFeaturedIdMap(),
-  )
   const [activeFeaturedCategory, setActiveFeaturedCategory] = useState<PortalFeaturedCategory>('all')
-  const [featuredEditorMode, setFeaturedEditorMode] = useState<FeaturedEditorMode>('personal')
   const [selectedFeaturedTeamId, setSelectedFeaturedTeamId] = useState('')
   const [teamFeaturedResourcesByCategory, setTeamFeaturedResourcesByCategory] = useState<Record<PortalFeaturedCategory, PortalResource[]>>(() =>
     emptyFeaturedResourceMap(),
@@ -394,18 +403,20 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
     () =>
       [
         { key: 'profile' as const, label: 'Profile', icon: UserRound },
-        { key: 'featured' as const, label: 'Featured', icon: Star },
-        ...(canManage
+        ...(canManage && !accountOnly
           ? [
+              { key: 'featured' as const, label: 'Team Featured', icon: Star },
               { key: 'users' as const, label: 'Users', icon: Users },
               { key: 'teams' as const, label: 'Teams', icon: Settings },
               { key: 'resources' as const, label: 'Resources', icon: ExternalLink },
               { key: 'permissions' as const, label: 'Permissions', icon: ShieldCheck },
+              { key: 'holidays' as const, label: 'Holidays', icon: CalendarDays },
+              { key: 'dictionaries' as const, label: 'Dictionaries', icon: Tags },
               { key: 'audit' as const, label: 'Audit', icon: KeyRound },
             ]
           : []),
       ],
-    [canManage],
+    [accountOnly, canManage],
   )
 
   useEffect(() => {
@@ -418,19 +429,9 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
 
   async function loadSelf() {
     const cachedUser = isDesktopRuntime() ? storedManagementUser() : null
-    const [me, resourcesResponse, featuredResponse] = await Promise.all([
-      cachedUser ? Promise.resolve({ user: cachedUser }) : fetchMe(),
-      fetchMyResources(),
-      fetchMyFeaturedResources(),
-    ])
+    const me = cachedUser ? { user: cachedUser } : await fetchMe()
     const sessionUser = userWithStoredRole(me.user)
-    const nextFeaturedResources = normalizeFeaturedResources(featuredResponse.featured, featuredResponse.resources)
-    const nextTeamTemplateResources = normalizeFeaturedResources(featuredResponse.default_featured, featuredResponse.default_resources ?? [])
     setCurrentUser(sessionUser)
-    setMyResources(resourcesResponse.resources)
-    setFeaturedResourcesByCategory(nextFeaturedResources)
-    setFeaturedIdsByCategory(featuredIdsFromResources(nextFeaturedResources))
-    setTeamTemplateFeaturedIdsByCategory(featuredIdsFromResources(nextTeamTemplateResources))
     return sessionUser
   }
 
@@ -473,7 +474,7 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
     setError('')
     try {
       const user = await loadSelf()
-      if (canUseManagement(user)) {
+      if (canUseManagement(user) && !accountOnly) {
         try {
           await loadAdminData()
         } catch (adminError) {
@@ -504,20 +505,20 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
 
   useEffect(() => {
     if (token) void refreshAll()
-  }, [token])
+  }, [accountOnly, token])
 
   useEffect(() => {
-    if (!canManage || featuredEditorMode !== 'team' || !selectedFeaturedTeamId || teamFeaturedLoadedTeamId === selectedFeaturedTeamId) return
+    if (accountOnly || !canManage || !selectedFeaturedTeamId || teamFeaturedLoadedTeamId === selectedFeaturedTeamId) return
     void loadTeamFeaturedDefaults(selectedFeaturedTeamId).catch((loadError) => {
       setError(loadError instanceof Error ? loadError.message : 'Could not load team featured defaults.')
     })
-  }, [canManage, featuredEditorMode, selectedFeaturedTeamId, teamFeaturedLoadedTeamId])
+  }, [accountOnly, canManage, selectedFeaturedTeamId, teamFeaturedLoadedTeamId])
 
   useEffect(() => {
-    if (!loginOnly && !token) {
+    if (!loginOnly && redirectOnMissingToken && !token) {
       window.location.replace(PORTAL_LOGIN_ROUTE)
     }
-  }, [loginOnly, token])
+  }, [loginOnly, redirectOnMissingToken, token])
 
   useEffect(() => {
     if (loginOnly && token && currentUser) {
@@ -605,20 +606,29 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
     setStatus('Signed out.')
   }
 
-  function setFeaturedCategoryIds(category: PortalFeaturedCategory, nextIds: number[]) {
-    setFeaturedIdsByCategory((current) => ({ ...current, [category]: nextIds.slice(0, FEATURED_LIMIT_PER_CATEGORY) }))
+  async function handleRoleChange(role: PortalRole) {
+    if (!currentUser || role === currentUser.selected_role || !currentUser.roles.includes(role)) return
+    setLoading(true)
+    setError('')
+    setStatus('')
+    try {
+      const response = await switchRole(role)
+      const selectedUser = { ...response.user, selected_role: role }
+      saveManagementToken(response.token, role)
+      saveManagementUser(selectedUser)
+      setToken(response.token)
+      setCurrentUser(selectedUser)
+      await refreshAll()
+      setStatus(`Viewing Portal as ${roleText(role)}.`)
+    } catch (roleError) {
+      setError(roleError instanceof Error ? roleError.message : 'Could not switch Portal role.')
+    } finally {
+      setLoading(false)
+    }
   }
 
   function setTeamFeaturedCategoryIds(category: PortalFeaturedCategory, nextIds: number[]) {
     setTeamFeaturedIdsByCategory((current) => ({ ...current, [category]: nextIds.slice(0, FEATURED_LIMIT_PER_CATEGORY) }))
-  }
-
-  function addFeaturedResource(category: PortalFeaturedCategory, resourceId: number) {
-    setFeaturedIdsByCategory((current) => {
-      const currentIds = current[category] ?? []
-      if (currentIds.includes(resourceId) || currentIds.length >= FEATURED_LIMIT_PER_CATEGORY) return current
-      return { ...current, [category]: [...currentIds, resourceId] }
-    })
   }
 
   function addTeamFeaturedResource(category: PortalFeaturedCategory, resourceId: number) {
@@ -629,24 +639,10 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
     })
   }
 
-  function removeFeaturedResource(category: PortalFeaturedCategory, resourceId: number) {
-    setFeaturedIdsByCategory((current) => ({
-      ...current,
-      [category]: (current[category] ?? []).filter((id) => id !== resourceId),
-    }))
-  }
-
   function removeTeamFeaturedResource(category: PortalFeaturedCategory, resourceId: number) {
     setTeamFeaturedIdsByCategory((current) => ({
       ...current,
       [category]: (current[category] ?? []).filter((id) => id !== resourceId),
-    }))
-  }
-
-  function moveFeaturedResource(category: PortalFeaturedCategory, index: number, direction: -1 | 1) {
-    setFeaturedIdsByCategory((current) => ({
-      ...current,
-      [category]: moveId(current[category] ?? [], index, direction),
     }))
   }
 
@@ -659,45 +655,13 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
 
   async function saveFeaturedResources() {
     setError('')
-    if (featuredEditorMode === 'team') {
-      if (!selectedFeaturedTeamId) return
-      const response = await updateTeamFeaturedResources(Number(selectedFeaturedTeamId), featuredPayloadFromIds(teamFeaturedIdsByCategory))
-      const nextFeaturedResources = normalizeFeaturedResources(response.featured, response.resources)
-      setTeamFeaturedResourcesByCategory(nextFeaturedResources)
-      setTeamFeaturedIdsByCategory(featuredIdsFromResources(nextFeaturedResources))
-      setTeamFeaturedLoadedTeamId(selectedFeaturedTeamId)
-      setStatus('Team default featured items saved.')
-      return
-    }
-
-    const response = await updateMyFeaturedResources(featuredPayloadFromIds(featuredIdsByCategory))
+    if (!selectedFeaturedTeamId) return
+    const response = await updateTeamFeaturedResources(Number(selectedFeaturedTeamId), featuredPayloadFromIds(teamFeaturedIdsByCategory))
     const nextFeaturedResources = normalizeFeaturedResources(response.featured, response.resources)
-    const nextTeamTemplateResources = normalizeFeaturedResources(response.default_featured, response.default_resources ?? [])
-    setFeaturedResourcesByCategory(nextFeaturedResources)
-    setFeaturedIdsByCategory(featuredIdsFromResources(nextFeaturedResources))
-    setTeamTemplateFeaturedIdsByCategory(featuredIdsFromResources(nextTeamTemplateResources))
-    setStatus('Featured items saved.')
-  }
-
-  async function loadFeaturedFromTeamTemplate() {
-    setError('')
-    setStatus('')
-    if (!hasFeaturedSelections(teamTemplateFeaturedIdsByCategory)) {
-      setError('No team featured template is available for your team.')
-      return
-    }
-    const confirmed = window.confirm(
-      'Loading favorites from the team template will overwrite your current featured item settings. Continue?',
-    )
-    if (!confirmed) return
-
-    const response = await updateMyFeaturedResources(featuredPayloadFromIds(teamTemplateFeaturedIdsByCategory))
-    const nextFeaturedResources = normalizeFeaturedResources(response.featured, response.resources)
-    const nextTeamTemplateResources = normalizeFeaturedResources(response.default_featured, response.default_resources ?? [])
-    setFeaturedResourcesByCategory(nextFeaturedResources)
-    setFeaturedIdsByCategory(featuredIdsFromResources(nextFeaturedResources))
-    setTeamTemplateFeaturedIdsByCategory(featuredIdsFromResources(nextTeamTemplateResources))
-    setStatus('Featured items loaded from team template.')
+    setTeamFeaturedResourcesByCategory(nextFeaturedResources)
+    setTeamFeaturedIdsByCategory(featuredIdsFromResources(nextFeaturedResources))
+    setTeamFeaturedLoadedTeamId(selectedFeaturedTeamId)
+    setStatus('Team featured items saved.')
   }
 
   async function handleCreateUser(event: FormEvent) {
@@ -800,14 +764,15 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
 
   if (!token || !currentUser) {
     if (!loginOnly) {
-      return (
-        <main className="management-page login-only">
-          <section className="management-login-panel">
-            <h1>Portal Sign In</h1>
-            <p>Redirecting to sign in...</p>
-          </section>
-        </main>
-      )
+        return (
+          <main className="management-page login-only">
+            <section className="management-login-panel">
+              <h1>{redirectOnMissingToken ? 'Portal Sign In' : 'Portal Administration unavailable'}</h1>
+              <p>{redirectOnMissingToken ? 'Redirecting to sign in...' : error || 'The Manager could not establish the Portal Administration session.'}</p>
+              {!redirectOnMissingToken ? <button className="management-primary-button" type="button" onClick={() => window.location.reload()}>Retry</button> : null}
+            </section>
+          </main>
+        )
     }
 
     return (
@@ -835,7 +800,7 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
           ) : (
             <form onSubmit={handleLogin} className="management-form">
               <div className="management-login-tip">
-                Tip: username is your work email address, and the default password is your employee ID.
+                Tip: sign in with your work email address or generated username. The default password is your employee ID.
               </div>
               <label>
                 <span>Email</span>
@@ -865,15 +830,35 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
           <h1>{canManage ? 'Management' : 'Profile'}</h1>
         </div>
         <div className="management-header-actions">
-          <a className="management-header-link" href="/">
-            <Home size={16} />
-            Back to portal
-          </a>
+          {showRoleSelector && currentUser.roles.filter((role) => role === 'admin' || role === 'system_admin').length > 1 ? (
+            <label className="management-header-role-select">
+              <span>View as</span>
+              <select
+                value={currentUser.selected_role}
+                onChange={(event) => void handleRoleChange(event.target.value as PortalRole)}
+              >
+                {currentUser.roles
+                  .filter((role) => role === 'admin' || role === 'system_admin')
+                  .map((role) => <option key={role} value={role}>{roleText(role)}</option>)}
+              </select>
+            </label>
+          ) : null}
+          {showBackAction ? (onBack ? (
+            <button className="management-header-link" type="button" onClick={onBack}>
+              <ArrowLeft size={16} />
+              {backLabel}
+            </button>
+          ) : (
+            <a className="management-header-link" href="/">
+              <Home size={16} />
+              {backLabel}
+            </a>
+          )) : null}
           <button type="button" onClick={() => refreshAll(true)}>
             <RefreshCw size={16} />
             Refresh
           </button>
-          <button type="button" onClick={handleSignOut}>Sign out</button>
+          {showSignOutAction ? <button type="button" onClick={handleSignOut}>Sign out</button> : null}
         </div>
       </header>
 
@@ -908,24 +893,19 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
             />
           ) : null}
 
-          {activeTab === 'featured' ? (
+          {canManage && !accountOnly && activeTab === 'featured' ? (
             <FeaturedPanel
               activeCategory={activeFeaturedCategory}
-              canManage={canManage}
-              editorMode={featuredEditorMode}
-              featuredIdsByCategory={featuredEditorMode === 'team' ? teamFeaturedIdsByCategory : featuredIdsByCategory}
-              featuredResourcesByCategory={featuredEditorMode === 'team' ? teamFeaturedResourcesByCategory : featuredResourcesByCategory}
-              hasTeamTemplate={hasFeaturedSelections(teamTemplateFeaturedIdsByCategory)}
-              resources={(featuredEditorMode === 'team' ? resources : myResources).filter(isFeatureableResource)}
+              featuredIdsByCategory={teamFeaturedIdsByCategory}
+              featuredResourcesByCategory={teamFeaturedResourcesByCategory}
+              resources={resources.filter(isFeatureableResource)}
               selectedTeamId={selectedFeaturedTeamId}
               teams={teams}
-              onAdd={featuredEditorMode === 'team' ? addTeamFeaturedResource : addFeaturedResource}
+              onAdd={addTeamFeaturedResource}
               onCategoryChange={setActiveFeaturedCategory}
-              onClearCategory={(category) => (featuredEditorMode === 'team' ? setTeamFeaturedCategoryIds(category, []) : setFeaturedCategoryIds(category, []))}
-              onModeChange={setFeaturedEditorMode}
-              onLoadTeamTemplate={loadFeaturedFromTeamTemplate}
-              onMove={featuredEditorMode === 'team' ? moveTeamFeaturedResource : moveFeaturedResource}
-              onRemove={featuredEditorMode === 'team' ? removeTeamFeaturedResource : removeFeaturedResource}
+              onClearCategory={(category) => setTeamFeaturedCategoryIds(category, [])}
+              onMove={moveTeamFeaturedResource}
+              onRemove={removeTeamFeaturedResource}
               onSave={saveFeaturedResources}
               onTeamChange={(teamId) => {
                 setSelectedFeaturedTeamId(teamId)
@@ -1029,6 +1009,10 @@ export default function ManagementPage({ loginOnly = false }: ManagementPageProp
             />
           ) : null}
 
+          {canManage && activeTab === 'holidays' ? <HolidayPanel /> : null}
+
+          {canManage && activeTab === 'dictionaries' ? <DictionaryPanel /> : null}
+
           {canManage && activeTab === 'audit' ? <AuditPanel logs={auditLogs} /> : null}
         </section>
       </section>
@@ -1060,38 +1044,28 @@ function ProfilePanel({ user }: {
 
 function FeaturedPanel({
   activeCategory,
-  canManage,
-  editorMode,
   featuredIdsByCategory,
   featuredResourcesByCategory,
-  hasTeamTemplate,
   resources,
   selectedTeamId,
   teams,
   onAdd,
   onCategoryChange,
   onClearCategory,
-  onLoadTeamTemplate,
-  onModeChange,
   onMove,
   onRemove,
   onSave,
   onTeamChange,
 }: {
   activeCategory: PortalFeaturedCategory
-  canManage: boolean
-  editorMode: FeaturedEditorMode
   featuredIdsByCategory: Record<PortalFeaturedCategory, number[]>
   featuredResourcesByCategory: Record<PortalFeaturedCategory, PortalResource[]>
-  hasTeamTemplate: boolean
   resources: PortalResource[]
   selectedTeamId: string
   teams: PortalTeam[]
   onAdd: (category: PortalFeaturedCategory, resourceId: number) => void
   onCategoryChange: (category: PortalFeaturedCategory) => void
   onClearCategory: (category: PortalFeaturedCategory) => void
-  onLoadTeamTemplate: () => void
-  onModeChange: (mode: FeaturedEditorMode) => void
   onMove: (category: PortalFeaturedCategory, index: number, direction: -1 | 1) => void
   onRemove: (category: PortalFeaturedCategory, resourceId: number) => void
   onSave: () => void
@@ -1108,54 +1082,29 @@ function FeaturedPanel({
   const limitReached = selectedIds.length >= FEATURED_LIMIT_PER_CATEGORY
 
   return (
-    <section className="management-panel">
+    <section className="management-panel management-featured-panel">
       <div className="management-panel-heading">
-        <h2>{editorMode === 'team' ? 'Team Default Featured Items' : 'Featured Items'}</h2>
+        <div>
+          <h2>Team Featured Items</h2>
+          <p>Choose the resources shown to every active Portal user on the selected team.</p>
+        </div>
         <div className="management-panel-heading-actions">
-          {editorMode === 'personal' ? (
-            <button
-              className="management-warning-action"
-              type="button"
-              onClick={onLoadTeamTemplate}
-              disabled={!hasTeamTemplate}
-              title={
-                hasTeamTemplate
-                  ? 'Load your team default featured template and overwrite your current settings.'
-                  : 'No team featured template is available for your team.'
-              }
-            >
-              <AlertTriangle size={16} />
-              Load from team template
-            </button>
-          ) : null}
-          <button className="management-primary-button" type="button" onClick={onSave} disabled={editorMode === 'team' && !selectedTeamId}>
+          <button className="management-primary-button" type="button" onClick={onSave} disabled={!selectedTeamId}>
             <Save size={16} />
-            {editorMode === 'team' ? 'Save team defaults' : 'Save featured'}
+            Save team featured
           </button>
         </div>
       </div>
-      {canManage ? (
-        <div className="management-featured-admin-row">
-          <div className="management-segmented" aria-label="Featured editor mode">
-            <button className={editorMode === 'personal' ? 'active' : ''} type="button" onClick={() => onModeChange('personal')}>
-              My featured
-            </button>
-            <button className={editorMode === 'team' ? 'active' : ''} type="button" onClick={() => onModeChange('team')}>
-              Team defaults
-            </button>
-          </div>
-          {editorMode === 'team' ? (
-            <label>
-              <span>Team</span>
-              <select value={selectedTeamId} onChange={(event) => onTeamChange(event.target.value)}>
-                {teams.map((team) => (
-                  <option key={team.id} value={team.id}>{team.name}</option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-        </div>
-      ) : null}
+      <div className="management-featured-admin-row">
+        <label>
+          <span>Team</span>
+          <select value={selectedTeamId} onChange={(event) => onTeamChange(event.target.value)}>
+            {teams.map((team) => (
+              <option key={team.id} value={team.id}>{team.name}</option>
+            ))}
+          </select>
+        </label>
+      </div>
       <div className="management-featured-toolbar">
         <div className="management-segmented" aria-label="Featured item category">
           {FEATURED_CATEGORY_OPTIONS.map((category) => (
@@ -1192,9 +1141,7 @@ function FeaturedPanel({
               </div>
             )) : (
               <div className="management-empty-note">
-                {editorMode === 'team'
-                  ? 'No team defaults for this category. The portal will use the built-in default list.'
-                  : 'No personal featured items for this category. The portal will show your team default list.'}
+                No team featured items are configured for this category. The Portal will use its standard resource order.
               </div>
             )}
           </div>
@@ -1367,7 +1314,7 @@ function UsersPanel({
   }
 
   return (
-    <section className="management-panel">
+    <section className="management-panel management-users-panel">
       <div className="management-panel-heading">
         <h2>Users</h2>
         <div className="management-panel-heading-actions">
@@ -2447,16 +2394,18 @@ function PermissionsPanel({
   }
 
   return (
-    <section className="management-panel">
+    <section className="management-panel management-permissions-panel">
       <div className="management-panel-heading">
         <h2>Permissions</h2>
         <div className="management-panel-heading-actions">
-          <button className={permissionMode === 'bulk' ? 'management-primary-button' : ''} type="button" onClick={() => setPermissionMode('bulk')}>
-            Bulk permissions
-          </button>
-          <button className={permissionMode === 'resource' ? 'management-primary-button' : ''} type="button" onClick={() => setPermissionMode('resource')}>
-            Resource detail
-          </button>
+          <div className="management-permission-modes" role="group" aria-label="Permission workspace">
+            <button className={permissionMode === 'bulk' ? 'active' : ''} type="button" onClick={() => setPermissionMode('bulk')}>
+              Bulk permissions
+            </button>
+            <button className={permissionMode === 'resource' ? 'active' : ''} type="button" onClick={() => setPermissionMode('resource')}>
+              Resource detail
+            </button>
+          </div>
           {permissionMode === 'resource' ? (
             <button className="management-primary-button" type="button" onClick={onSave}>
               <Save size={16} />
@@ -2497,21 +2446,37 @@ function PermissionsPanel({
             </button>
           </div>
           <div className="management-permission-bulk-actions">
-            <span>{bulkSelectedIds.size} selected, {changedBulkAssignments.length} changed</span>
-            <button type="button" onClick={() => setBulkSelectedIds(new Set(bulkRows.map((row) => row.resource.id)))}>Select all shown</button>
-            <button type="button" onClick={() => setBulkSelectedIds(new Set())}>Clear selection</button>
-            {PERMISSION_OPTIONS.map((option) => (
-              <button key={option.value} type="button" onClick={() => addSelectedBulkPermission(option.value)}>
-                Add {option.label}
+            <div className="management-permission-selection-actions">
+              <div className="management-permission-selection-summary" aria-live="polite">
+                <strong>{bulkSelectedIds.size} selected</strong>
+                <span>{changedBulkAssignments.length} changed</span>
+                {bulkStatus ? <small>{bulkStatus}</small> : null}
+              </div>
+              <button type="button" disabled={!bulkRows.length} onClick={() => setBulkSelectedIds(new Set(bulkRows.map((row) => row.resource.id)))}>Select all</button>
+              <button type="button" disabled={!bulkSelectedIds.size} onClick={() => setBulkSelectedIds(new Set())}>Clear selection</button>
+            </div>
+            <div className="management-permission-grant-actions" aria-label="Add permissions to selected resources">
+              <span>Add permission</span>
+              {PERMISSION_OPTIONS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  disabled={!bulkSelectedIds.size}
+                  title={`Add ${option.label} to selected resources`}
+                  onClick={() => addSelectedBulkPermission(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+            <div className="management-permission-save-actions">
+              <button type="button" disabled={!bulkSelectedIds.size} onClick={clearSelectedBulkPermissions}>Clear permissions</button>
+              <button className="management-primary-button" type="button" onClick={saveBulkPermissions} disabled={!changedBulkAssignments.length || bulkLoading}>
+                <Save size={16} />
+                Save changes
               </button>
-            ))}
-            <button type="button" onClick={clearSelectedBulkPermissions}>Clear permissions</button>
-            <button className="management-primary-button" type="button" onClick={saveBulkPermissions} disabled={!changedBulkAssignments.length || bulkLoading}>
-              <Save size={16} />
-              Save changes
-            </button>
+            </div>
           </div>
-          {bulkStatus ? <div className="management-status">{bulkStatus}</div> : null}
           {bulkError ? <div className="management-error">{bulkError}</div> : null}
           <div className="management-table-wrap">
             <table className="management-permission-matrix">

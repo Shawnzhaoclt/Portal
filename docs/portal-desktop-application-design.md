@@ -116,8 +116,9 @@ opens these files directly and read-only. They are not copied into the portable 
 or `%LOCALAPPDATA%\Portal`.
 
 At build time, the former combined `portal_management.sqlite3` seed is separated:
-all `SYS_*` tables are published from `portal_system.sqlite3`, while the `RPT5W1C0_*`
-tables are registered in the business schema catalog. Portable packaging includes only
+all `SYS_*` tables are published from `portal_system.sqlite3`, while the `CCTV_REVIEW_*`
+tables are registered in the business schema catalog. `RPT5W1C0` remains the resource
+and managed-entity identifier. Portable packaging includes only
 the system publication as `config/system.db`; it never includes `stormwater.db`.
 On first launch, Portal verifies the immutable snapshot referenced by
 `businessSync.networkRoot\protocol-v1\snapshots\current.json`, verifies its SHA-256
@@ -577,7 +578,7 @@ Each workstation writes only to its own local SQLite database. No workstation op
 Recommended database split:
 
 - `portal_system.sqlite`: users, teams, resources, permissions, featured items, and system audit data.
-- `cctv_reviews.sqlite`: `RPT5W1C0_` report workflow tables.
+- `stormwater.db`: writable business tables, including the `CCTV_REVIEW_*` report workflow tables owned by resource `RPT5W1C0`.
 - Additional resource databases when a workflow benefits from independent release and conflict scope.
 - Per-user preference storage for non-shared UI settings.
 
@@ -819,7 +820,11 @@ The executable must not update itself in place while it is running.
 
 ## Maintenance Application
 
-The existing `maintenance` area should become the home for offline administrative tooling:
+The existing `maintenance` area is the design home for offline administrative tooling,
+but the operator-facing implementation is hosted by the single
+`PortalManager.exe` application. Portal Desktop remains focused on
+end-user resource use and does not grow a second administration window or schema
+editor. The maintenance modules include:
 
 - database creation;
 - schema migration;
@@ -832,7 +837,31 @@ The existing `maintenance` area should become the home for offline administrativ
 - shared reference-data manifest generation;
 - recovery and integrity checks.
 
-Maintenance commands must be versioned with the database schema and tested against copies, never directly against the only canonical file.
+### Administration and schema-maintenance boundary
+
+The workstation manager exposes two separate protected navigation modules:
+
+1. **Portal Administration** maintains users, teams, roles, resources, permissions,
+   dictionaries, holidays, and the source data used to publish the read-only
+   `config/system.db` catalog.
+2. **Database Maintenance** maintains the typed physical business-table catalog,
+   date-based schema drafts, table/field/index definitions, migration plans, tests,
+   schema releases, snapshots, backups, conflicts, and recovery.
+
+These modules share one Rust task boundary, one trusted Python coordinator, one audit
+model, and the same maintenance lease. They are not separate data engines and do not
+edit a live database through the UI. The Schema page is a controlled catalog editor:
+it generates a structural diff, estimates impact, runs a migration against a local
+production-shaped copy, records approval, and publishes an immutable release. The
+coordinator then applies that release to each local `stormwater.db` copy through the
+normal transition and rollback flow.
+
+Portal Desktop may read the installed catalog and apply an approved compatible release,
+but it must not modify `system.db`, publish a release, execute arbitrary SQL/DDL, or
+accept migration code from the network share. Maintenance commands are versioned with
+the database schema and tested against copies, never directly against the only
+canonical file. Destructive table/field changes require a verified backup, maintenance
+lease, typed confirmation, and recovery evidence.
 
 ## Logging And Audit
 

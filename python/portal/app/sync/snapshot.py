@@ -17,6 +17,7 @@ from .models import (
     SCHEMA_VERSION,
     utc_now,
 )
+from .physical_entities import initialize_physical_schema
 from .storage import read_json, sha256_file, sqlite_readonly_uri
 
 
@@ -149,6 +150,10 @@ def create_empty_snapshot(
         connection.execute("PRAGMA journal_mode=DELETE")
         connection.execute("PRAGMA synchronous=FULL")
         connection.executescript(SCHEMA_SQL)
+        # A fresh shared snapshot is also the source for a client's first
+        # local stormwater.db. Keep the registered physical business tables
+        # in that snapshot; there may be no local database yet.
+        initialize_physical_schema(connection)
         connection.executescript(
             """
             CREATE TABLE sw_snapshot_metadata (

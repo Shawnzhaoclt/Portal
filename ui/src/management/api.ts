@@ -82,6 +82,24 @@ export type PortalTeamFeaturedResourcesResponse = {
   configured_categories?: PortalFeaturedCategory[]
 }
 
+export type PortalFavorite = {
+  category: PortalFeaturedCategory
+  resource_id: string
+  sort_order: number
+  created_at: string | null
+  updated_at: string | null
+  resource: PortalResource
+}
+
+export type PortalFavoritesResponse = {
+  ok?: boolean
+  loaded?: boolean
+  message?: string
+  category: PortalFeaturedCategory
+  favorites: PortalFavorite[]
+  total: number
+}
+
 export type ResourcePermission = {
   id: number
   resource_id: string
@@ -265,6 +283,93 @@ export type AuditLog = {
   created_at: string
 }
 
+export type HolidayCalendar = {
+  calendar_id: string
+  calendar_year: number
+  label: string
+  notes: string | null
+  holiday_count?: number
+  created_by_user_id: number
+  created_by_name: string
+  created_at: string
+  updated_by_user_id: number
+  updated_by_name: string
+  updated_at: string
+}
+
+export type HolidayEntry = {
+  holiday_id: string
+  calendar_id: string
+  holiday_name: string
+  holiday_date: string
+  holiday_hours: number
+  day_type: 'full_day' | 'partial_day'
+  applies_to_weekly_target: boolean
+  extends_deliverable_deadline: boolean
+  is_active: boolean
+  notes: string | null
+  created_by_user_id: number
+  created_by_name: string
+  created_at: string
+  updated_by_user_id: number
+  updated_by_name: string
+  updated_at: string
+}
+
+export type HolidayValidationIssue = {
+  severity: 'error' | 'warning'
+  code: string
+  message: string
+  holiday_id: string | null
+}
+
+export type HolidayValidationResult = {
+  valid: boolean
+  issues: HolidayValidationIssue[]
+  active_holiday_count: number
+}
+
+export type CodeDictionary = {
+  id: number
+  dictionary_key: string
+  name: string
+  description: string | null
+  is_active: boolean
+  item_count: number
+  active_item_count: number
+  created_at: string
+  updated_at: string
+}
+
+export type CodeDictionaryItem = {
+  id: number
+  dictionary_id: number
+  item_code: string
+  label: string
+  sort_order: number
+  is_active: boolean
+  metadata: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+export type HolidayCalendarDetail = {
+  calendar: HolidayCalendar
+  holidays: HolidayEntry[]
+  validation: HolidayValidationResult
+}
+
+export type HolidaySavePayload = {
+  holiday_name: string
+  holiday_date: string
+  holiday_hours: number
+  day_type: HolidayEntry['day_type']
+  applies_to_weekly_target: boolean
+  extends_deliverable_deadline: boolean
+  is_active: boolean
+  notes?: string | null
+}
+
 export type LoginResponse = {
   token?: string
   token_type?: string
@@ -294,6 +399,11 @@ export function storedManagementToken() {
 
 export function storedManagementRole(): PortalRole | '' {
   const role = storedValue(MANAGEMENT_ROLE_KEY)
+  return role === 'user' || role === 'admin' || role === 'system_admin' ? role : ''
+}
+
+export function sessionManagementRole(): PortalRole | '' {
+  const role = window.sessionStorage.getItem(MANAGEMENT_ROLE_KEY) ?? ''
   return role === 'user' || role === 'admin' || role === 'system_admin' ? role : ''
 }
 
@@ -400,11 +510,30 @@ export function fetchMyFeaturedResources(token?: string) {
   return requestJson<PortalFeaturedResourcesResponse>('/api/me/featured-resources', {}, token)
 }
 
-export function updateMyFeaturedResources(featured: PortalFeaturedResourceIdsByCategory) {
-  return requestJson<PortalFeaturedResourcesResponse>('/api/me/featured-resources', {
+function favoritesCategoryQuery(category: PortalFeaturedCategory) {
+  return `?category=${encodeURIComponent(category)}`
+}
+
+export function fetchMyFavorites(category: PortalFeaturedCategory, token?: string) {
+  return requestJson<PortalFavoritesResponse>(`/api/me/favorites${favoritesCategoryQuery(category)}`, {}, token)
+}
+
+export function addMyFavorite(resourceId: string, category: PortalFeaturedCategory, token?: string) {
+  return requestJson<PortalFavoritesResponse>(`/api/me/favorites/${encodeURIComponent(resourceId)}${favoritesCategoryQuery(category)}`, {
     method: 'PUT',
-    body: JSON.stringify({ featured }),
-  })
+  }, token)
+}
+
+export function removeMyFavorite(resourceId: string, category: PortalFeaturedCategory, token?: string) {
+  return requestJson<PortalFavoritesResponse>(`/api/me/favorites/${encodeURIComponent(resourceId)}${favoritesCategoryQuery(category)}`, {
+    method: 'DELETE',
+  }, token)
+}
+
+export function loadMyTeamFavoriteSettings(category: PortalFeaturedCategory, token?: string) {
+  return requestJson<PortalFavoritesResponse>(`/api/me/favorites/load-team-settings${favoritesCategoryQuery(category)}`, {
+    method: 'POST',
+  }, token)
 }
 
 export function fetchAdminSummary() {
@@ -651,5 +780,161 @@ export function fetchCctvReviewReportEvents(reportId: number) {
 
 export function fetchAuditLogs() {
   return requestJson<{ logs: AuditLog[] }>('/api/admin/audit-logs?limit=100')
+}
+
+export function fetchDictionaries() {
+  return requestJson<{ dictionaries: CodeDictionary[] }>('/api/admin/dictionaries')
+}
+
+export function createDictionary(payload: {
+  name: string
+  dictionary_key?: string | null
+  description?: string | null
+}) {
+  return requestJson<{ dictionary: CodeDictionary }>('/api/admin/dictionaries', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateDictionary(
+  dictionaryKey: string,
+  payload: { name?: string; description?: string | null; is_active?: boolean },
+) {
+  return requestJson<{ dictionary: CodeDictionary }>(
+    `/api/admin/dictionaries/${encodeURIComponent(dictionaryKey)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function fetchDictionaryItems(dictionaryKey: string) {
+  return requestJson<{ dictionary: CodeDictionary; items: CodeDictionaryItem[] }>(
+    `/api/admin/dictionaries/${encodeURIComponent(dictionaryKey)}/items`,
+  )
+}
+
+export function createDictionaryItem(
+  dictionaryKey: string,
+  payload: {
+    label: string
+    item_code?: string | null
+    sort_order?: number | null
+    metadata?: Record<string, unknown> | null
+  },
+) {
+  return requestJson<{ item: CodeDictionaryItem }>(
+    `/api/admin/dictionaries/${encodeURIComponent(dictionaryKey)}/items`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function updateDictionaryItem(
+  dictionaryKey: string,
+  itemId: number,
+  payload: {
+    label?: string
+    sort_order?: number
+    is_active?: boolean
+    metadata?: Record<string, unknown> | null
+  },
+) {
+  return requestJson<{ item: CodeDictionaryItem }>(
+    `/api/admin/dictionaries/${encodeURIComponent(dictionaryKey)}/items/${itemId}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function reorderDictionaryItems(dictionaryKey: string, itemIds: number[]) {
+  return requestJson<{ items: CodeDictionaryItem[] }>(
+    `/api/admin/dictionaries/${encodeURIComponent(dictionaryKey)}/items-order`,
+    {
+    method: 'PUT',
+      body: JSON.stringify({ item_ids: itemIds }),
+    },
+  )
+}
+
+export function fetchHolidayCalendars() {
+  return requestJson<{ calendars: HolidayCalendar[]; total: number }>('/api/admin/holidays/calendars')
+}
+
+export function fetchPublishedHolidayCalendar(year: number) {
+  return requestJson<HolidayCalendarDetail>(`/api/holidays/published?year=${encodeURIComponent(year)}`)
+}
+
+export function fetchHolidayCalendar(calendarId: string) {
+  return requestJson<HolidayCalendarDetail>(`/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}`)
+}
+
+export function createHolidayCalendar(payload: {
+  calendar_year: number
+  label?: string | null
+  notes?: string | null
+  copy_from_calendar_id?: string | null
+}) {
+  return requestJson<{ ok: boolean; calendar: HolidayCalendar }>('/api/admin/holidays/calendars', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateHolidayCalendar(calendarId: string, payload: { label?: string | null; notes?: string | null }) {
+  return requestJson<{ ok: boolean; calendar: HolidayCalendar }>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function createHoliday(calendarId: string, payload: HolidaySavePayload) {
+  return requestJson<{ ok: boolean; holiday: HolidayEntry }>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}/holidays`,
+    {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function updateHoliday(calendarId: string, holidayId: string, payload: HolidaySavePayload) {
+  return requestJson<{ ok: boolean; holiday: HolidayEntry }>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}/holidays/${encodeURIComponent(holidayId)}`,
+    {
+      method: 'PATCH',
+      body: JSON.stringify(payload),
+    },
+  )
+}
+
+export function deleteHoliday(calendarId: string, holidayId: string) {
+  return requestJson<{ ok: boolean; holiday_id: string }>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}/holidays/${encodeURIComponent(holidayId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function deleteHolidayCalendar(calendarId: string) {
+  return requestJson<{ ok: boolean; calendar_id: string; deleted_holiday_count: number }>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}`,
+    { method: 'DELETE' },
+  )
+}
+
+export function validateHolidayCalendar(calendarId: string) {
+  return requestJson<HolidayValidationResult>(
+    `/api/admin/holidays/calendars/${encodeURIComponent(calendarId)}/validate`,
+    { method: 'POST' },
+  )
 }
 import { portalRequestJson } from '../desktop/request'

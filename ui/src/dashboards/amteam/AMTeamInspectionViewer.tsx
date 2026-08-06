@@ -209,6 +209,38 @@ const MIN_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
   extensive: 50,
   snapshot: 100,
 }
+const CCTV_REVIEW_LAYOUT_STORAGE_KEY = 'portal.cctv-review.workspace-layout.v1'
+
+function readCctvReviewWorkspaceLayout() {
+  const fallback = {
+    videoDefectTableWidth: VIDEO_DEFECT_TABLE_DEFAULT_WIDTH,
+    defectColumnWidths: { ...DEFAULT_DEFECT_COLUMN_WIDTHS },
+  }
+  if (typeof window === 'undefined') return fallback
+
+  try {
+    const value = window.localStorage.getItem(CCTV_REVIEW_LAYOUT_STORAGE_KEY)
+    if (!value) return fallback
+    const parsed = JSON.parse(value) as {
+      videoDefectTableWidth?: unknown
+      defectColumnWidths?: Partial<Record<DefectColumnKey, unknown>>
+    }
+    const savedVideoWidth = Number(parsed.videoDefectTableWidth)
+    const defectColumnWidths = { ...DEFAULT_DEFECT_COLUMN_WIDTHS }
+    DEFECT_COLUMN_KEYS.forEach((key) => {
+      const width = Number(parsed.defectColumnWidths?.[key])
+      if (Number.isFinite(width)) defectColumnWidths[key] = Math.max(MIN_DEFECT_COLUMN_WIDTHS[key], Math.round(width))
+    })
+    return {
+      videoDefectTableWidth: Number.isFinite(savedVideoWidth)
+        ? Math.max(VIDEO_DEFECT_TABLE_MIN_WIDTH, Math.round(savedVideoWidth))
+        : fallback.videoDefectTableWidth,
+      defectColumnWidths,
+    }
+  } catch {
+    return fallback
+  }
+}
 const EMPTY_INSPECTION_MEDIA: AmTeamInspectionMedia = {
   media_root: '',
   pipe_folder: null,
@@ -2252,6 +2284,7 @@ function PipeDefectReviewPanel({
   pipeOptions,
   selectedPipeId,
   gradeThreePlusCount,
+  distanceDecisionProgress,
   reviewInput,
   currentVideoFrame,
   pipePositionLabel,
@@ -2273,6 +2306,7 @@ function PipeDefectReviewPanel({
   pipeOptions: PipeReviewOption[]
   selectedPipeId: string
   gradeThreePlusCount: number
+  distanceDecisionProgress: { complete: number; total: number }
   reviewInput: PipeReviewInput
   currentVideoFrame: ActiveVideoFrame | null
   pipePositionLabel: string
@@ -2410,6 +2444,9 @@ function PipeDefectReviewPanel({
             Previous
           </button>
           <span>{pipePositionLabel}</span>
+          <span className={`amteam-review-decision-progress${distanceDecisionProgress.complete === distanceDecisionProgress.total ? ' complete' : ''}`}>
+            {distanceDecisionProgress.complete}/{distanceDecisionProgress.total} group decisions
+          </span>
           <button type="button" disabled={!hasNextPipe} onClick={onNextPipe}>
             Next
             <ChevronRight size={15} aria-hidden="true" />
@@ -2514,6 +2551,7 @@ type AMTeamInspectionViewerProps = {
   readOnly?: boolean
   reportSaveContext?: CctvReviewSaveContext
   onReportSaved?: (report: CctvReviewReport) => void
+  onDirtyChange?: (isDirty: boolean) => void
 }
 
 export default function AMTeamInspectionViewer({
@@ -2525,6 +2563,7 @@ export default function AMTeamInspectionViewer({
   readOnly = false,
   reportSaveContext,
   onReportSaved,
+  onDirtyChange,
 }: AMTeamInspectionViewerProps = {}) {
   const [searchTerm, setSearchTerm] = useState(initialSearchTerm)
   const [lastQuery, setLastQuery] = useState('')
@@ -2555,11 +2594,14 @@ export default function AMTeamInspectionViewer({
   const [extensiveDefectSelections, setExtensiveDefectSelections] = useState<Record<string, boolean>>({})
   const [activeVideoFrame, setActiveVideoFrame] = useState<ActiveVideoFrame | null>(null)
   const [videoSeekRequest, setVideoSeekRequest] = useState<VideoSeekRequest | null>(null)
+  const [focusedObservationKey, setFocusedObservationKey] = useState('')
   const [selectedObservationDetails, setSelectedObservationDetails] = useState<ObservationDetailsSelection | null>(null)
   const [selectedPipeDetails, setSelectedPipeDetails] = useState<PipeDetailsSelection | null>(null)
   const [isInspectionDetailsOpen, setInspectionDetailsOpen] = useState(false)
-  const [videoDefectTableWidth, setVideoDefectTableWidth] = useState(VIDEO_DEFECT_TABLE_DEFAULT_WIDTH)
-  const [defectColumnWidths, setDefectColumnWidths] = useState<Record<DefectColumnKey, number>>(DEFAULT_DEFECT_COLUMN_WIDTHS)
+  const [videoDefectTableWidth, setVideoDefectTableWidth] = useState(() => readCctvReviewWorkspaceLayout().videoDefectTableWidth)
+  const [defectColumnWidths, setDefectColumnWidths] = useState<Record<DefectColumnKey, number>>(
+    () => readCctvReviewWorkspaceLayout().defectColumnWidths,
+  )
   const documentRef = useRef<HTMLDivElement | null>(null)
   const reviewNoticeIdRef = useRef(0)
   const initialSearchLoadedRef = useRef(false)
@@ -2575,6 +2617,10 @@ export default function AMTeamInspectionViewer({
 
   function clearGeneratedReviewReport() {
     setGeneratedReviewReport(null)
+  }
+
+  function markWorkspaceDirty() {
+    onDirtyChange?.(true)
   }
 
   function clearInspectionReport() {
@@ -2596,11 +2642,13 @@ export default function AMTeamInspectionViewer({
     setExtensiveDefectSelections({})
     setActiveVideoFrame(null)
     setVideoSeekRequest(null)
+    setFocusedObservationKey('')
     setSelectedObservationDetails(null)
     setSelectedPipeDetails(null)
     setInspectionDetailsOpen(false)
     setPipeStatus('idle')
     setObservationStatus('idle')
+    onDirtyChange?.(false)
   }
 
   useEffect(() => {
@@ -2610,6 +2658,20 @@ export default function AMTeamInspectionViewer({
     }, 3000)
     return () => window.clearTimeout(timeoutId)
   }, [reviewNotice])
+
+  useEffect(() => {
+    const timeoutId = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(CCTV_REVIEW_LAYOUT_STORAGE_KEY, JSON.stringify({
+          videoDefectTableWidth,
+          defectColumnWidths,
+        }))
+      } catch {
+        // Layout preferences are optional.
+      }
+    }, 160)
+    return () => window.clearTimeout(timeoutId)
+  }, [defectColumnWidths, videoDefectTableWidth])
 
   function toggleDistanceGroup(groupKey: string) {
     setCollapsedDistanceGroups((currentGroups) => ({
@@ -2629,6 +2691,7 @@ export default function AMTeamInspectionViewer({
 
   function updateObservationDefectRole(groupKey: string, cardKey: string, role: ObservationDefectRole) {
     if (readOnly) return
+    markWorkspaceDirty()
     clearReviewNotice()
     clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
@@ -2714,6 +2777,7 @@ export default function AMTeamInspectionViewer({
     const nextValue = boundedIntegerInputValue(value, 3, 5)
     if (nextValue === null) return
 
+    markWorkspaceDirty()
     clearReviewNotice()
     clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
@@ -2734,6 +2798,7 @@ export default function AMTeamInspectionViewer({
 
   function updateDistanceGroupDefectComment(groupKey: string, value: string) {
     if (readOnly) return
+    markWorkspaceDirty()
     clearGeneratedReviewReport()
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
@@ -2751,6 +2816,7 @@ export default function AMTeamInspectionViewer({
 
   function updateObservationSnapshotSelection(cardKey: string, imageUrl: string) {
     if (readOnly) return
+    markWorkspaceDirty()
     clearGeneratedReviewReport()
     setSnapshotSelections((currentSelections) => ({
       ...currentSelections,
@@ -2761,6 +2827,7 @@ export default function AMTeamInspectionViewer({
   function updatePipeReviewInput(pipeId: string, input: Partial<PipeReviewInput>) {
     if (readOnly) return
     if (!pipeId) return
+    markWorkspaceDirty()
     clearGeneratedReviewReport()
     setPipeReviewInputs((currentInputs) => ({
       ...currentInputs,
@@ -2799,7 +2866,8 @@ export default function AMTeamInspectionViewer({
     return currentVideo ?? inspectionMedia.videos[0] ?? null
   }
 
-  function jumpToObservationFrame(observation: AmTeamObservation) {
+  function jumpToObservationFrame(observation: AmTeamObservation, scopedCardKey = '') {
+    if (scopedCardKey) setFocusedObservationKey(scopedCardKey)
     const video = selectedVideoForObservationJump()
     const seekSeconds = observationSeekSeconds(observation, video)
     if (!video || seekSeconds === null) return
@@ -2812,6 +2880,7 @@ export default function AMTeamInspectionViewer({
 
   function toggleObservationExtensive(cardKey: string) {
     if (readOnly) return
+    markWorkspaceDirty()
     clearGeneratedReviewReport()
     setExtensiveDefectSelections((currentSelections) => ({
       ...currentSelections,
@@ -2821,6 +2890,7 @@ export default function AMTeamInspectionViewer({
 
   function toggleDistanceGroupNoHighScoreConfirmation(groupKey: string) {
     if (readOnly) return
+    markWorkspaceDirty()
     clearReviewNotice()
     clearGeneratedReviewReport()
     clearDistanceGroupValidationFailure(groupKey)
@@ -2856,6 +2926,7 @@ export default function AMTeamInspectionViewer({
 
   function selectPipeDefault(group: AmTeamPipeInspectionGroup) {
     setSelectedObservationDetails(null)
+    setFocusedObservationKey('')
     setSelectedPipeId(recordId(group.ml_id))
     setSelectedInspection(inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0] ?? null)
   }
@@ -3304,6 +3375,13 @@ export default function AMTeamInspectionViewer({
     () => pipeGradeThreePlusCount(selectedPipeId, groupedObservations, observationDefectSelections),
     [groupedObservations, observationDefectSelections, selectedPipeId],
   )
+  const distanceDecisionProgress = useMemo(() => {
+    const complete = groupedObservations.reduce((total, group) => {
+      const selection = observationDefectSelections[pipeScopedKey(selectedPipeId, group.key)] ?? emptyObservationDefectSelection()
+      return total + (distanceGroupHasHighAmScore(selection) || selection.noHighScoreConfirmed ? 1 : 0)
+    }, 0)
+    return { complete, total: groupedObservations.length }
+  }, [groupedObservations, observationDefectSelections, selectedPipeId])
   const candidates = useMemo(() => pipeSearchCandidates(candidatePipes), [candidatePipes])
   const showCandidateList = candidateOpen && searchTerm.trim().length >= 2
   const selectedMediaMode = useMemo<MediaSourceMode>(() => mediaSourceMode(), [])
@@ -3557,6 +3635,7 @@ export default function AMTeamInspectionViewer({
                     pipeOptions={pipeReviewOptions}
                     selectedPipeId={selectedPipeId}
                     gradeThreePlusCount={gradeThreePlusCount}
+                    distanceDecisionProgress={distanceDecisionProgress}
                     reviewInput={pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()}
                     currentVideoFrame={activeVideoFrame}
                     pipePositionLabel={pipePositionLabel}
@@ -3684,7 +3763,9 @@ export default function AMTeamInspectionViewer({
                   const hasDistanceGroupValidationFailure = Boolean(distanceGroupValidationFailures[scopedGroupKey])
                   const distanceConfirmClasses = [
                     'amteam-distance-confirm-button',
+                    hasDistanceGroupHighAmScore ? 'scored' : '',
                     isNoHighScoreConfirmed ? 'confirmed' : '',
+                    !hasDistanceGroupHighAmScore && !isNoHighScoreConfirmed ? 'pending' : '',
                     hasDistanceGroupValidationFailure ? 'needs-review' : '',
                   ].filter(Boolean).join(' ')
 
@@ -3758,8 +3839,8 @@ export default function AMTeamInspectionViewer({
                               {hasDistanceGroupHighAmScore
                                 ? 'Scored 3+'
                                 : isNoHighScoreConfirmed
-                                  ? 'Confirmed'
-                                  : 'Confirm none'}
+                                  ? 'No 3+ confirmed'
+                                  : 'Decision required'}
                             </button>
                           </div>
                         </div>
@@ -3799,6 +3880,7 @@ export default function AMTeamInspectionViewer({
                               'amteam-defect-row',
                               'amteam-defect-observation-row',
                               canJumpToObservationFrame ? 'has-video-frame' : '',
+                              focusedObservationKey === scopedCardKey ? 'video-focused' : '',
                               isMajorDefect ? 'major-defect' : '',
                               isOtherDefect ? 'other-defect' : '',
                               isExtensiveDefect ? 'extensive-defect' : '',
@@ -3813,13 +3895,13 @@ export default function AMTeamInspectionViewer({
                                 title={canJumpToObservationFrame ? `Jump video to ${formatMediaTime(observationSeekTime ?? 0)}` : undefined}
                                 onClick={(event) => {
                                   if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
-                                  jumpToObservationFrame(observation)
+                              jumpToObservationFrame(observation, scopedCardKey)
                                 }}
                                 onKeyDown={(event) => {
                                   if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
                                   if (event.key === 'Enter' || event.key === ' ') {
                                     event.preventDefault()
-                                    jumpToObservationFrame(observation)
+                                    jumpToObservationFrame(observation, scopedCardKey)
                                   }
                                 }}
                               >

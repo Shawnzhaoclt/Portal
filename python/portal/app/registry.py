@@ -19,6 +19,9 @@ from portal.app.dashboards.gis import router as gis_router
 from portal.app.dashboards.planning import router as planning_router
 from portal.app.resources.maps.stm_risk_map import router as map_tiles_router
 from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
+from portal.app.holidays import router as holiday_router
+from portal.app.favorites import router as favorites_router
+from portal.app.weekly_time import router as weekly_time_router
 from portal.app.diagnostics.routes import router as diagnostics_router
 from portal.app.management import router as management_router
 from portal.app.sync.routes import router as sync_router
@@ -38,6 +41,9 @@ app.include_router(gis_router)
 app.include_router(planning_router)
 app.include_router(map_tiles_router)
 app.include_router(cctv_review_report_router)
+app.include_router(holiday_router)
+app.include_router(favorites_router)
+app.include_router(weekly_time_router)
 app.include_router(diagnostics_router)
 app.include_router(management_router)
 app.include_router(sync_router)

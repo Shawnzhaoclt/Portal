@@ -6,14 +6,57 @@ import sqlite3
 from contextlib import closing
 from pathlib import Path
 
+from portal.app.management.services import username_from_name
+
 
 REPORT_TABLES = (
-    "RPT5W1C0_reports",
-    "RPT5W1C0_pipes",
-    "RPT5W1C0_distance_groups",
-    "RPT5W1C0_observations",
-    "RPT5W1C0_report_events",
+    "CCTV_REVIEW_REPORTS",
+    "CCTV_REVIEW_PIPES",
+    "CCTV_REVIEW_DISTANCE_GROUPS",
+    "CCTV_REVIEW_OBSERVATIONS",
+    "SYS_RESOURCE_REVIEW_EVENTS",
 )
+
+
+def _normalize_system_usernames(connection: sqlite3.Connection) -> None:
+    """Derive stable usernames while assembling the shipped system database."""
+
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'SYS_USERS'"
+    ).fetchone()
+    if not table_exists:
+        return
+
+    users = connection.execute(
+        "SELECT id, first_name, last_name FROM SYS_USERS ORDER BY id"
+    ).fetchall()
+    generated: dict[int, str] = {}
+    for user_id, first_name, last_name in users:
+        generated[user_id] = username_from_name(first_name, last_name)
+
+    if len(set(generated.values())) != len(generated):
+        duplicates = sorted(
+            username
+            for username in set(generated.values())
+            if list(generated.values()).count(username) > 1
+        )
+        raise ValueError(
+            "Generated usernames are not unique in SYS_USERS: "
+            + ", ".join(duplicates)
+        )
+
+    # Clear the unique username values first so a rename cannot collide with
+    # another user's old value during the rebuild.
+    for user_id in generated:
+        connection.execute(
+            "UPDATE SYS_USERS SET username = ? WHERE id = ?",
+            (f"__portal_username_seed_{user_id}", user_id),
+        )
+    for user_id, username in generated.items():
+        connection.execute(
+            "UPDATE SYS_USERS SET username = ? WHERE id = ?",
+            (username, user_id),
+        )
 
 
 def build_desktop_system_seed(source: Path, system_target: Path) -> None:
@@ -32,6 +75,7 @@ def build_desktop_system_seed(source: Path, system_target: Path) -> None:
         connection.execute("PRAGMA foreign_keys=OFF")
         for table_name in reversed(REPORT_TABLES):
             connection.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+        _normalize_system_usernames(connection)
         connection.commit()
         connection.execute("VACUUM")
 

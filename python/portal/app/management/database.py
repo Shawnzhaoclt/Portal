@@ -60,6 +60,8 @@ SYSTEM_TABLES = {
     "resource_permissions": "SYS_RESOURCE_PERMISSIONS",
     "user_featured_resources": "SYS_USER_FEATURED_RESOURCES",
     "team_featured_resources": "SYS_TEAM_FEATURED_RESOURCES",
+    "dictionaries": "SYS_DICTIONARIES",
+    "dictionary_items": "SYS_DICTIONARY_ITEMS",
     "password_reset_tokens": "SYS_PASSWORD_RESET_TOKENS",
     "audit_logs": "SYS_AUDIT_LOGS",
 }
@@ -735,10 +737,66 @@ def _migrate_featured_resource_categories(table_name: str, owner_column: str, ow
             connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
+def _migrate_weekly_time_types_to_dictionary() -> None:
+    legacy_table = "SYS_WEEKLY_TIME_ENTRY_TYPES"
+    with engine.begin() as connection:
+        if not _table_exists(connection, legacy_table):
+            return
+        connection.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO SYS_DICTIONARIES (
+                    dictionary_key, name, description, is_active, created_at, updated_at
+                )
+                VALUES (
+                    'weekly_time_type',
+                    'Weekly Time Entry Types',
+                    'Activity choices used by weekly time reporting.',
+                    1,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        dictionary_id = connection.execute(
+            text("SELECT id FROM SYS_DICTIONARIES WHERE dictionary_key = 'weekly_time_type'")
+        ).scalar_one()
+        connection.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO SYS_DICTIONARY_ITEMS (
+                    dictionary_id,
+                    item_code,
+                    label,
+                    sort_order,
+                    is_active,
+                    metadata_json,
+                    created_at,
+                    updated_at
+                )
+                SELECT
+                    :dictionary_id,
+                    type_key,
+                    label,
+                    sort_order,
+                    is_active,
+                    NULL,
+                    created_at,
+                    updated_at
+                FROM SYS_WEEKLY_TIME_ENTRY_TYPES
+                """
+            ),
+            {"dictionary_id": dictionary_id},
+        )
+        connection.execute(text("DROP TABLE SYS_WEEKLY_TIME_ENTRY_TYPES"))
+
+
 def create_management_schema() -> None:
     from portal.app.management import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _migrate_weekly_time_types_to_dictionary()
     _migrate_legacy_management_tables()
     _migrate_resource_types()
     _migrate_resource_ids()

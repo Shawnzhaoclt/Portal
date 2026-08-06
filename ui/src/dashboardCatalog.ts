@@ -33,6 +33,7 @@ const RESOURCE_METADATA = Object.values(resourceMetadataModules)
 export const DASHBOARD_LINKS_ROUTE = '/dashboard_links'
 export const PROACTIVE_TEAM_CCTV_REVIEW_ROUTE = '/report_proactive_team_cctv_review'
 export const PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE = '/help_proactive_team_cctv_review'
+export const WEEKLY_TIME_REPORTING_ROUTE = '/report_weekly_time_reporting'
 export const AIF_OVERVIEW_ROUTE = '/dashboard_aif_overview'
 export const CRITICAL_ASSET_TRACKING_ROUTE = '/dashboard_critical_asset_tracking'
 export const GIS_FACILITY_ROUTE = '/map_critical_asset_facility'
@@ -40,6 +41,7 @@ export const GIS_HISTORY_ROUTE = '/map_critical_asset_history'
 export const STM_RISK_MAP_ROUTE = '/map_stm_risk'
 export const PLANNING_PENDING_AIF_QA_ROUTE = '/tab_planning_pending_aif_qa'
 export const ADMIN_MANAGEMENT_ROUTE = '/admin_management'
+export const ACCOUNT_ROUTE = '/account'
 export const PORTAL_LOGIN_ROUTE = '/login'
 
 export const CRITICAL_TEAM_SHEET_ROUTES = {
