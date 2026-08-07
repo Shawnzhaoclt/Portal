@@ -31,6 +31,7 @@ import {
   RefreshCw,
   Search,
   ScrollText,
+  Save,
   Settings,
   ShieldAlert,
   Square,
@@ -41,6 +42,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ManagerWorkspaceHub from "./ManagerWorkspaceHub";
 import PortalAdministrationPage from "./management/PortalAdministrationPage";
+import { formatDateOnly, formatDateTime, formatLocalClock, formatScheduleLabel, todayIsoDate } from "../../ui/src/lib/dateTime";
 
 type SyncRun = {
   status: string;
@@ -56,6 +58,8 @@ type SyncStatus = {
   scheduledTaskRegistered: boolean;
   scheduledTaskName: string;
   scheduledTaskTime: string;
+  scheduledTaskMinute: number;
+  intervalMinutes: number;
   scheduledTaskState: string;
   statusText: string;
   nextRunText: string;
@@ -66,7 +70,7 @@ type SyncStatus = {
   runs: SyncRun[];
 };
 
-type SourceDataAction = "service-start" | "service-stop" | "schedule-enable" | "schedule-disable" | "run" | "check";
+type SourceDataAction = "service-start" | "service-stop" | "schedule-enable" | "schedule-disable" | "run" | "check" | "interval-save";
 
 type RepositoryStatus = {
   network_root: string;
@@ -142,7 +146,6 @@ type SchemaDraftOperation =
   | {
       kind: "add_table";
       table_id: string;
-      resource_id: string;
       physical_table: string;
       dependency_order: number;
     }
@@ -204,7 +207,6 @@ type SchemaCatalogIndex = {
 
 type SchemaCatalogTable = {
   table_id: string;
-  resource_id: string;
   physical_table: string;
   dependency_order: number;
   fields: SchemaCatalogField[];
@@ -245,6 +247,10 @@ type PortalReleaseStatus = {
   bootstrapVersion?: string | null;
   portalExe: string;
   systemDb: string;
+  desktopSystemDb: string;
+  managerSystemDbWritable: boolean;
+  desktopSystemDbReadOnly: boolean;
+  desktopSystemDbCurrent: boolean;
 };
 
 type PageId =
@@ -401,7 +407,7 @@ type ManagerStartupSession = {
 type ManagerAuthorization = "checking" | "authorized" | "denied";
 type ManagerWorkspace = "hub" | "maintenance" | "portal-admin";
 
-const today = new Date().toISOString().slice(0, 10);
+const today = todayIsoDate();
 
 const navigation: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -419,7 +425,7 @@ const navigation: NavigationItem[] = [
 
 const pageDescriptions: Record<PageId, string> = {
   overview: "Monitor source synchronization and open workstation maintenance tools.",
-  "source-data": "Schedule and monitor the local publication of source data for Portal.",
+  "source-data": "Schedule and monitor resource-ready serving-table rebuilds for Portal.",
   repository: "Inspect and validate the shared business-data repository.",
   releases: "Publish approved portable Portal updates to the shared release location.",
   schema: "Validate and publish approved shared business-data schema snapshots.",
@@ -433,25 +439,11 @@ const pageDescriptions: Record<PageId, string> = {
 
 
 function formatDate(value: string) {
-  return new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date(value + "T00:00:00"));
+  return formatDateOnly(value);
 }
 
 function formatTimestamp(value?: string) {
-  if (!value) return "-";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return new Intl.DateTimeFormat("en-US", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(parsed);
+  return formatDateTime(value);
 }
 
 function formatBytes(value?: number) {
@@ -543,7 +535,6 @@ function SchemaWorkspace({
   const [editor, setEditor] = useState<"table" | "rename-table" | "field" | "rename-field" | "index" | null>(null);
   const [editingOperation, setEditingOperation] = useState<number | null>(null);
   const [tableId, setTableId] = useState("");
-  const [tableResourceId, setTableResourceId] = useState("SYS");
   const [tablePhysicalName, setTablePhysicalName] = useState("");
   const [tableDependencyOrder, setTableDependencyOrder] = useState("");
   const [fieldName, setFieldName] = useState("");
@@ -564,8 +555,6 @@ function SchemaWorkspace({
     return !search || table.physical_table.toLowerCase().includes(search) || table.table_id.toLowerCase().includes(search);
   });
   const selectedTable = catalog?.tables.find((table) => table.table_id === selectedTableId) ?? visibleTables[0] ?? null;
-  const resourceIds = Array.from(new Set(["SYS", ...(catalog?.tables ?? []).map((table) => table.resource_id)])).sort();
-
   useEffect(() => {
     if (selectedTable && selectedTable.table_id !== selectedTableId) setSelectedTableId(selectedTable.table_id);
   }, [selectedTable, selectedTableId]);
@@ -574,7 +563,6 @@ function SchemaWorkspace({
     setEditor(null);
     setEditingOperation(null);
     setTableId("");
-    setTableResourceId("SYS");
     setTablePhysicalName("");
     setTableDependencyOrder("");
     setFieldName("");
@@ -590,6 +578,7 @@ function SchemaWorkspace({
   function startAddTable() {
     resetEditor();
     const nextOrder = Math.max(0, ...(catalog?.tables ?? []).map((table) => table.dependency_order)) + 10;
+    setTableId(`tbl_${crypto.randomUUID().replaceAll("-", "")}`);
     setTableDependencyOrder(String(nextOrder));
     setEditor("table");
   }
@@ -601,7 +590,6 @@ function SchemaWorkspace({
     const operation: SchemaDraftOperation = {
       kind: "add_table",
       table_id: tableId.trim(),
-      resource_id: tableResourceId,
       physical_table: tablePhysicalName.trim().toUpperCase(),
       dependency_order: dependencyOrder,
     };
@@ -831,11 +819,9 @@ function SchemaWorkspace({
         <section className="schema-table-editor" aria-label="Add table draft">
           <div>
             <p className="eyebrow">ADD ATTRIBUTE TABLE</p>
-            <strong>Create the stable catalog identity and physical storage name.</strong>
-            <small>Resource ownership remains catalog metadata; do not include the resource ID in the physical name.</small>
+            <strong>Define the physical table structure.</strong>
+            <small>The application generates and maintains an opaque stable identity automatically.</small>
           </div>
-          <label>Stable table ID<input value={tableId} onChange={(event) => setTableId(event.target.value)} placeholder={`${tableResourceId}.business_item`} /></label>
-          <label>Owning resource<select value={tableResourceId} onChange={(event) => setTableResourceId(event.target.value)}>{resourceIds.map((resourceId) => <option key={resourceId}>{resourceId}</option>)}</select></label>
           <label>Physical table<input value={tablePhysicalName} onChange={(event) => setTablePhysicalName(event.target.value.toUpperCase())} placeholder="BUSINESS_DOMAIN_ITEMS" /></label>
           <label>Dependency order<input type="number" min="1" value={tableDependencyOrder} onChange={(event) => setTableDependencyOrder(event.target.value)} /></label>
           <div className="actions"><button className="quiet-button" onClick={resetEditor}>Cancel</button><button className="primary-button" disabled={!tableId.trim() || !tablePhysicalName.trim() || !tableDependencyOrder.trim()} onClick={() => void saveTable()}>Add table to draft</button></div>
@@ -875,7 +861,7 @@ function SchemaWorkspace({
           {editor === "rename-table" && selectedTable ? (
             <div className="schema-inline-editor rename-table-editor">
               <label className="wide">New physical table name<input value={tablePhysicalName} onChange={(event) => setTablePhysicalName(event.target.value.toUpperCase())} placeholder="BUSINESS_DOMAIN_ITEMS" /></label>
-              <p>Stable ID <strong>{selectedTable.table_id}</strong> and resource ownership will not change.</p>
+              <p>The application-maintained stable identity will not change.</p>
               <div className="actions"><button className="quiet-button" onClick={resetEditor}>Cancel</button><button className="primary-button" disabled={!tablePhysicalName.trim() || tablePhysicalName === selectedTable.physical_table} onClick={() => void saveTableRename()}>Add rename to draft</button></div>
             </div>
           ) : null}
@@ -1177,7 +1163,8 @@ function ReleaseWorkspace({
       <section className="release-details">
         <div><span>Portable folder</span><strong>{status?.portableRoot ?? "Checking configuration"}</strong></div>
         <div><span>Release folder</span><strong>{status?.releaseRoot ?? "-"}</strong></div>
-        <div><span>System database</span><strong>{status?.systemDb ?? "-"}</strong></div>
+        <div><span>Authoritative system database</span><strong>{status ? `${status.systemDb} · ${status.managerSystemDbWritable ? "Writable" : "Read-only"}` : "-"}</strong></div>
+        <div><span>Desktop system database</span><strong>{status ? `${status.desktopSystemDb} · ${status.desktopSystemDbCurrent ? "Current" : "Refresh required"} · ${status.desktopSystemDbReadOnly ? "Read-only" : "Writable"}` : "-"}</strong></div>
         <div><span>Portal executable</span><strong>{status?.portalExe ?? "-"}</strong></div>
       </section>
 
@@ -1185,7 +1172,7 @@ function ReleaseWorkspace({
         <div>
           <p className="eyebrow">PUBLISH UPDATE</p>
           <h3>Select the exact update type</h3>
-          <p>A full release is required for the Python runtime, multiple files, or structural changes.</p>
+          <p>Every publication refreshes the Desktop system.db from the authoritative Manager copy and makes the distributed copy read-only. A full release is required for the Python runtime, multiple files, or structural changes.</p>
         </div>
         <label>
           Update type
@@ -1241,6 +1228,7 @@ function SourceDataWorkspace({
   setSelectedDate,
   busy,
   execute,
+  saveInterval,
   openLogs,
   openPublication,
 }: {
@@ -1249,25 +1237,43 @@ function SourceDataWorkspace({
   setSelectedDate: (date: string) => void;
   busy: SourceDataAction | null;
   execute: (action: SourceDataAction) => void;
+  saveInterval: (intervalMinutes: number) => Promise<SyncStatus>;
   openLogs: () => void;
   openPublication: () => void;
 }) {
   const scheduleRegistered = status?.scheduledTaskRegistered ?? false;
   const taskState = status?.scheduledTaskState ?? "Checking";
   const serviceRunning = status?.schedulerRunning ?? false;
+  const [intervalDraft, setIntervalDraft] = useState("");
+  const [intervalDirty, setIntervalDirty] = useState(false);
+
+  useEffect(() => {
+    if (status?.intervalMinutes === undefined || intervalDirty) return;
+    setIntervalDraft(String(status.intervalMinutes));
+  }, [intervalDirty, status?.intervalMinutes]);
+
+  const intervalValue = Number(intervalDraft);
+  const intervalValid = Number.isInteger(intervalValue) && intervalValue >= 1 && intervalValue <= 1440;
+  const saveIntervalSetting = async () => {
+    if (!intervalValid) return;
+    const response = await saveInterval(intervalValue);
+    setIntervalDraft(String(response.intervalMinutes));
+    setIntervalDirty(false);
+  };
+
   return (
     <section className="source-workspace table-focused-workspace">
       <section className={serviceRunning ? "status running" : "status stopped"}>
         <div>
-          <p className="eyebrow">SOURCE DATA SERVICE</p>
+          <p className="eyebrow">SERVING DATA SERVICE</p>
           <h2>{serviceRunning ? "RUNNING" : "STOPPED"}</h2>
-          <p>{serviceRunning ? "The source data scheduler is running on this workstation." : "The source data scheduler is not running on this workstation."}</p>
+          <p>{serviceRunning ? "The serving-table rebuild scheduler is running on this workstation." : "The serving-table rebuild scheduler is not running on this workstation."}</p>
         </div>
         <div className="actions">
           <button className="primary-button" disabled={busy !== null || serviceRunning || !status?.startAllowed} onClick={() => execute("service-start")}><Play size={17} />{busy === "service-start" ? "Starting" : "Start"}</button>
           <button className="danger-button" disabled={busy !== null || !serviceRunning} onClick={() => execute("service-stop")}><Square size={16} />{busy === "service-stop" ? "Stopping" : "Stop"}</button>
-          <button className="quiet-button" disabled={busy !== null || serviceRunning} onClick={() => execute("run")}><Play size={16} />{busy === "run" ? "Running" : "Run now"}</button>
-          <button className="quiet-button" disabled={busy !== null || serviceRunning} onClick={() => execute("check")}><CheckCircle2 size={16} />{busy === "check" ? "Checking" : "Check sources"}</button>
+          <button className="quiet-button" disabled={busy !== null || serviceRunning} onClick={() => execute("run")}><Play size={16} />{busy === "run" ? "Rebuilding" : "Rebuild now"}</button>
+          <button className="quiet-button" disabled={busy !== null || serviceRunning} onClick={() => execute("check")}><CheckCircle2 size={16} />{busy === "check" ? "Checking" : "Check inputs"}</button>
           {scheduleRegistered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("schedule-disable")}><CalendarClock size={17} />{busy === "schedule-disable" ? "Removing" : "Disable automatic"}</button> : <button className="primary-button" disabled={busy !== null} onClick={() => execute("schedule-enable")}><CalendarClock size={17} />{busy === "schedule-enable" ? "Enabling" : "Enable automatic"}</button>}
           <button className="quiet-button" onClick={openPublication} disabled={!status?.publishedDatabase}><FolderOpen size={16} />Open publication</button>
           <button className="quiet-button" onClick={openLogs} disabled={!status?.logDirectory}>
@@ -1284,7 +1290,7 @@ function SourceDataWorkspace({
         </div>
         <div>
           <span>AUTOMATIC TASK</span>
-          <strong>{scheduleRegistered ? `${taskState} - ${status?.scheduledTaskTime ?? "Daily schedule"}` : "Not registered"}</strong>
+          <strong>{scheduleRegistered ? `${taskState} - Daily ${status ? formatLocalClock(status.scheduledTaskMinute) : "schedule"} local time` : "Not registered"}</strong>
         </div>
         <div>
           <span>PUBLISHED DATABASE</span>
@@ -1299,6 +1305,46 @@ function SourceDataWorkspace({
       <section className="source-config-details" aria-label="Source synchronization configuration">
         <span>SYNC SETTINGS</span>
         <strong title={status?.syncSettingsFile || undefined}>{status?.syncSettingsFile ?? "Checking configuration"}</strong>
+      </section>
+
+      <section className="source-schedule-settings" aria-label="Source synchronization schedule settings">
+        <div>
+          <p className="eyebrow">REBUILD INTERVAL</p>
+          <h2>Serving-table rebuild frequency</h2>
+          <p>Choose how often the scheduler rebuilds the published serving tables during the daily run window.</p>
+          <small>Allowed range: 1–1440 minutes. Stop the scheduler before saving a change.</small>
+        </div>
+        <div className="source-schedule-form">
+          <label htmlFor="source-sync-interval">Rebuild every</label>
+          <div className="source-schedule-input">
+            <input
+              id="source-sync-interval"
+              type="number"
+              min={1}
+              max={1440}
+              step={1}
+              value={intervalDraft}
+              onChange={(event) => {
+                setIntervalDraft(event.target.value);
+                setIntervalDirty(true);
+              }}
+              aria-describedby="source-sync-interval-help"
+              disabled={busy !== null || serviceRunning}
+            />
+            <span>minutes</span>
+          </div>
+          <button
+            className="primary-button"
+            disabled={busy !== null || serviceRunning || !intervalValid || !intervalDirty}
+            onClick={() => void saveIntervalSetting()}
+          >
+            <Save size={16} />
+            {busy === "interval-save" ? "Saving" : "Save interval"}
+          </button>
+          <span id="source-sync-interval-help" className="source-schedule-help">
+            {serviceRunning ? "Stop the scheduler to edit this setting." : "Changes apply the next time the scheduler starts."}
+          </span>
+        </div>
       </section>
 
       <section className="runs">
@@ -1327,8 +1373,8 @@ function SourceDataWorkspace({
               {(status?.runs ?? []).map((run, index) => (
                 <tr key={[run.startedAt, index].join("-")}>
                   <td data-status={run.status}>{run.status}</td>
-                  <td>{run.startedAt}</td>
-                  <td>{run.finishedAt}</td>
+                  <td>{formatTimestamp(run.startedAt)}</td>
+                  <td>{formatTimestamp(run.finishedAt)}</td>
                   <td>{run.duration}</td>
                   <td>{run.details}</td>
                 </tr>
@@ -1381,13 +1427,13 @@ function SnapshotWorkspace({
       </section>
       <section className="retention-controls scheduled-task-controls">
         <div className="retention-readout"><span>Task state</span><strong>{nightlySchedule?.state || "Checking"}</strong></div>
-        <div className="retention-readout"><span>Scheduled run</span><strong>{nightlySchedule?.schedule || "Daily 02:00 local time"}</strong></div>
+        <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(nightlySchedule?.schedule, `Daily ${formatLocalClock(120)} local time`)}</strong></div>
         <div className="retention-schedule-action">{nightlySchedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("nightly-schedule-disable")}><CalendarClock size={17} />{busy === "nightly-schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !nightlySchedule?.automatic_enabled} onClick={() => execute("nightly-schedule-enable")}><CalendarClock size={17} />{busy === "nightly-schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
         <p className="nightly-note">Publishes one verified checkpoint. Backups and retention run only in the Friday maintenance task.</p>
       </section>
       <section className="retention-controls scheduled-task-controls">
         <div className="retention-readout"><span>Task state</span><strong>{schedule?.state || "Checking"}</strong></div>
-        <div className="retention-readout"><span>Scheduled run</span><strong>{schedule?.schedule || status?.automatic_schedule || "Checking configuration"}</strong></div>
+        <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(schedule?.schedule || status?.automatic_schedule, "Checking configuration")}</strong></div>
         <div className="retention-schedule-action">{schedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("schedule-disable")}><CalendarClock size={17} />{busy === "schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !schedule?.automatic_enabled} onClick={() => execute("schedule-enable")}><CalendarClock size={17} />{busy === "schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
         <p className="nightly-note">Creates and verifies the protected backups, archives eligible online packages, and removes backup artifacts older than 90 days.</p>
       </section>
@@ -1451,7 +1497,7 @@ function ConflictWorkspace({ status, busy, exportConflicts, openPath }: { status
       <section className={status?.open_count ? "status stopped compact-status" : "status running compact-status"}><div><p className="eyebrow">CONFLICT STATUS</p><h2>{status?.open_count ?? "-"} OPEN</h2></div></section>
       <section className="metrics maintenance-metrics"><div><span>OPEN</span><strong>{status?.open_count ?? "-"}</strong></div><div><span>ALL CONFLICTS</span><strong>{status?.conflicts.length ?? "-"}</strong></div><div><span>ACTIVE SNAPSHOT</span><strong>{status?.active_snapshot_id || "-"}</strong></div><div><span>EXPORT</span><strong>{status?.export_path ? "Ready" : "-"}</strong></div></section>
       <section className="maintenance-table"><div className="table-toolbar"><div><p className="eyebrow">CONFLICT LIST</p><h2>Shared snapshot conflicts</h2></div>{status?.export_path && <button className="quiet-button" onClick={() => openPath(status.export_path!)}><FolderOpen size={17} />Open export</button>}</div><div className="table-scroll"><table><thead><tr><th>Conflict</th><th>Entity type</th><th>Entity ID</th><th>State</th><th>Detected</th><th>Selected operation</th></tr></thead><tbody>
-        {(status?.conflicts ?? []).map((conflict) => <tr key={conflict.conflict_id}><td>{conflict.conflict_id}</td><td>{conflict.entity_type}</td><td>{conflict.entity_id}</td><td data-status={conflict.state === "open" ? "Failed" : "Succeeded"}>{conflict.state}</td><td>{conflict.detected_at}</td><td>{conflict.selected_operation_id || "-"}</td></tr>)}
+        {(status?.conflicts ?? []).map((conflict) => <tr key={conflict.conflict_id}><td>{conflict.conflict_id}</td><td>{conflict.entity_type}</td><td>{conflict.entity_id}</td><td data-status={conflict.state === "open" ? "Failed" : "Succeeded"}>{conflict.state}</td><td>{formatTimestamp(conflict.detected_at)}</td><td>{conflict.selected_operation_id || "-"}</td></tr>)}
         {!status?.conflicts.length && <tr><td colSpan={6} className="empty">No conflicts were found in the active snapshot.</td></tr>}
       </tbody></table></div></section>
     </section>
@@ -1459,7 +1505,7 @@ function ConflictWorkspace({ status, busy, exportConflicts, openPath }: { status
 }
 
 function LogsWorkspace({ status, busy, selectedDate, setSelectedDate, openPath }: { status: LogStatus | null; busy: boolean; selectedDate: string; setSelectedDate: (value: string) => void; openPath: (path: string) => void }) {
-  return <section className="maintenance-workspace table-focused-workspace"><div className="module-actions"><div className="actions"><button className="quiet-button" disabled={!status?.log_directory} onClick={() => openPath(status?.log_directory || "")}><FolderOpen size={17} />Open log folder</button></div></div><section className="metrics maintenance-metrics"><div><span>EVENTS</span><strong>{status?.events.length ?? "-"}</strong></div><div><span>RETENTION</span><strong>{status?.retention_days ?? "-"} days</strong></div><div><span>DATE</span><strong>{formatDate(selectedDate)}</strong></div><div><span>LOG FILE</span><strong>{busy ? "Loading" : status?.log_path ? "Available" : "Checking"}</strong></div></section><section className="maintenance-table"><div className="table-toolbar"><div><p className="eyebrow">WORKSTATION EVENTS</p><h2>{formatDate(selectedDate)}</h2></div><label>Date<input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /></label></div><div className="table-scroll"><table><thead><tr><th>Recorded</th><th>Task</th><th>Status</th><th>Details</th></tr></thead><tbody>{(status?.events ?? []).map((event, index) => <tr key={`${event.recorded_at}-${index}`}><td>{event.recorded_at}</td><td>{event.task}</td><td data-status={event.status}>{event.status}</td><td>{event.details}</td></tr>)}{!status?.events.length && <tr><td colSpan={4} className="empty">No workstation events were recorded for this date.</td></tr>}</tbody></table></div></section></section>;
+  return <section className="maintenance-workspace table-focused-workspace"><div className="module-actions"><div className="actions"><button className="quiet-button" disabled={!status?.log_directory} onClick={() => openPath(status?.log_directory || "")}><FolderOpen size={17} />Open log folder</button></div></div><section className="metrics maintenance-metrics"><div><span>EVENTS</span><strong>{status?.events.length ?? "-"}</strong></div><div><span>RETENTION</span><strong>{status?.retention_days ?? "-"} days</strong></div><div><span>DATE</span><strong>{formatDate(selectedDate)}</strong></div><div><span>LOG FILE</span><strong>{busy ? "Loading" : status?.log_path ? "Available" : "Checking"}</strong></div></section><section className="maintenance-table"><div className="table-toolbar"><div><p className="eyebrow">WORKSTATION EVENTS</p><h2>{formatDate(selectedDate)}</h2></div><label>Date<input type="date" value={selectedDate} onChange={(event) => setSelectedDate(event.target.value)} /></label></div><div className="table-scroll"><table><thead><tr><th>Recorded</th><th>Task</th><th>Status</th><th>Details</th></tr></thead><tbody>{(status?.events ?? []).map((event, index) => <tr key={`${event.recorded_at}-${index}`}><td>{formatTimestamp(event.recorded_at)}</td><td>{event.task}</td><td data-status={event.status}>{event.status}</td><td>{event.details}</td></tr>)}{!status?.events.length && <tr><td colSpan={4} className="empty">No workstation events were recorded for this date.</td></tr>}</tbody></table></div></section></section>;
 }
 
 function ActivityWorkspace({ status, selectedDate, setSelectedDate, openPath, openFileLocation }: { status: ActivityStatus | null; selectedDate: string; setSelectedDate: (value: string) => void; openPath: (path: string) => void; openFileLocation: (path: string) => void }) {
@@ -1926,6 +1972,24 @@ export function App() {
     }
   };
 
+  const saveSourceSyncInterval = async (intervalMinutes: number): Promise<SyncStatus> => {
+    setBusy("interval-save");
+    try {
+      const response = await invoke<SyncStatus>("update_source_sync_interval", {
+        intervalMinutes,
+        selectedDate,
+      });
+      setStatus(response);
+      setError("");
+      return response;
+    } catch (reason) {
+      setError(String(reason));
+      throw reason;
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const openLogs = async () => {
     try {
       await invoke("open_path", { path: status?.logDirectory ?? "" });
@@ -2206,6 +2270,7 @@ export function App() {
           <SourceDataWorkspace
             busy={busy}
             execute={(action) => void execute(action)}
+            saveInterval={saveSourceSyncInterval}
             openLogs={() => void openLogs()}
             openPublication={() => void openPath(status?.publishedDatabase ?? "")}
             selectedDate={selectedDate}

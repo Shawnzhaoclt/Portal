@@ -20,6 +20,7 @@ import '../critical-team/CriticalTeamDashboard.css'
 import './PlanningPendingAifQaTable.css'
 import { portalRequestJson } from '../../desktop/request'
 import { openExternalUrl } from '../../desktop/runtime'
+import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 
 type CellValue = string | number | boolean | null
 type PendingAifRow = Record<string, CellValue> & {
@@ -175,17 +176,8 @@ function formatNumber(value: number | null | undefined) {
 
 function formatSourceTimestamp(value: string | null | undefined) {
   if (!value) return null
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return null
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    month: 'short',
-    day: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  }).format(date)
+  const formatted = formatDateTime(value, '')
+  return formatted || null
 }
 
 function cellText(value: CellValue, column: PendingAifColumn) {
@@ -193,7 +185,7 @@ function cellText(value: CellValue, column: PendingAifColumn) {
   if (typeof value === 'boolean') return value ? 'Yes' : 'No'
   if (column.type === 'number') return String(value).replace(/\.0$/, '')
   if (typeof value === 'number') return formatNumber(value)
-  if (column.type === 'date' && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10)
+  if (column.type === 'date' && /^\d{4}-\d{2}-\d{2}/.test(value)) return formatDateOnly(value, value)
   return String(value)
 }
 
@@ -275,15 +267,7 @@ function zipDateTime(date: Date) {
 }
 
 function formatGeneratedAt(date: Date) {
-  const parts = [
-    date.getMonth() + 1,
-    date.getDate(),
-    date.getFullYear(),
-    date.getHours(),
-    date.getMinutes(),
-    date.getSeconds(),
-  ].map((value, index) => (index === 2 ? String(value) : String(value).padStart(2, '0')))
-  return `${parts[0]}-${parts[1]}-${parts[2]}, ${parts[3]}:${parts[4]}:${parts[5]}`
+  return formatDateTime(date)
 }
 
 function createZip(files: Array<{ name: string; content: string }>) {

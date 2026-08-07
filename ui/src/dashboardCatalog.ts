@@ -43,17 +43,19 @@ export const PLANNING_PENDING_AIF_QA_ROUTE = '/tab_planning_pending_aif_qa'
 export const ADMIN_MANAGEMENT_ROUTE = '/admin_management'
 export const ACCOUNT_ROUTE = '/account'
 export const PORTAL_LOGIN_ROUTE = '/login'
+export const CRITICAL_TEAM_ROUTE = '/dashboard_critical_team'
+export const CRITICAL_TEAM_TABLES_ROUTE = '/tab_critical_team'
 
 export const CRITICAL_TEAM_SHEET_ROUTES = {
-  overview: '/dashboard_critical_team_overview',
-  'insp-proj-start-date': '/dashboard_critical_team_inspection_project_start_date',
-  'insp-comp-date-bar-chart': '/dashboard_critical_team_inspection_completion_date_chart',
-  'report-comp-date-chart': '/dashboard_critical_team_report_completion_date_chart',
-  'insp-comp-date-reviews': '/dashboard_critical_team_inspection_completion_date_reviews',
-  'insp-comp-date-table': '/tab_critical_team_inspection_completion_date',
-  'report-comp-date-table': '/tab_critical_team_report_completion_date',
-  'insp-comp-date-reviews-table': '/tab_critical_team_review_completion_date',
-  workorders: '/tab_critical_team_work_order_detail',
+  overview: CRITICAL_TEAM_ROUTE,
+  'insp-proj-start-date': CRITICAL_TEAM_ROUTE,
+  'insp-comp-date-bar-chart': CRITICAL_TEAM_ROUTE,
+  'report-comp-date-chart': CRITICAL_TEAM_ROUTE,
+  'insp-comp-date-reviews': CRITICAL_TEAM_ROUTE,
+  'insp-comp-date-table': CRITICAL_TEAM_TABLES_ROUTE,
+  'report-comp-date-table': CRITICAL_TEAM_TABLES_ROUTE,
+  'insp-comp-date-reviews-table': CRITICAL_TEAM_TABLES_ROUTE,
+  workorders: CRITICAL_TEAM_TABLES_ROUTE,
 } as const
 
 export const CRITICAL_ASSET_SHEET_ROUTES = {
@@ -65,9 +67,17 @@ export const CRITICAL_ASSET_SHEET_ROUTES = {
 export type CriticalTeamSheetId = keyof typeof CRITICAL_TEAM_SHEET_ROUTES
 export type CriticalAssetSheetId = keyof typeof CRITICAL_ASSET_SHEET_ROUTES
 
-const CRITICAL_TEAM_PATH_TO_SHEET_ID = Object.fromEntries(
-  Object.entries(CRITICAL_TEAM_SHEET_ROUTES).map(([sheetId, path]) => [path, sheetId]),
-) as Record<string, CriticalTeamSheetId>
+const CRITICAL_TEAM_LEGACY_PATH_TO_SHEET_ID: Record<string, CriticalTeamSheetId> = {
+  '/dashboard_critical_team_overview': 'overview',
+  '/dashboard_critical_team_inspection_project_start_date': 'insp-proj-start-date',
+  '/dashboard_critical_team_inspection_completion_date_chart': 'insp-comp-date-bar-chart',
+  '/dashboard_critical_team_report_completion_date_chart': 'report-comp-date-chart',
+  '/dashboard_critical_team_inspection_completion_date_reviews': 'insp-comp-date-reviews',
+  '/tab_critical_team_inspection_completion_date': 'insp-comp-date-table',
+  '/tab_critical_team_report_completion_date': 'report-comp-date-table',
+  '/tab_critical_team_review_completion_date': 'insp-comp-date-reviews-table',
+  '/tab_critical_team_work_order_detail': 'workorders',
+}
 
 const CRITICAL_ASSET_PATH_TO_SHEET_ID = Object.fromEntries(
   Object.entries(CRITICAL_ASSET_SHEET_ROUTES).map(([sheetId, path]) => [path, sheetId]),
@@ -78,7 +88,9 @@ export function criticalTeamSheetPath(sheetId: string) {
 }
 
 export function criticalTeamSheetIdFromPath(path: string) {
-  return CRITICAL_TEAM_PATH_TO_SHEET_ID[path] ?? null
+  if (path === CRITICAL_TEAM_ROUTE) return 'overview'
+  if (path === CRITICAL_TEAM_TABLES_ROUTE) return 'workorders'
+  return CRITICAL_TEAM_LEGACY_PATH_TO_SHEET_ID[path] ?? null
 }
 
 export function criticalAssetSheetPath(sheetId: string) {

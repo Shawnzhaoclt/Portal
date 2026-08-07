@@ -5,6 +5,7 @@ import { EChart } from '../../EChart'
 import '../critical-team/CriticalTeamDashboard.css'
 import './AifOverviewDashboard.css'
 import { portalRequestJson } from '../../desktop/request'
+import { formatDateOnly, formatDateTime, formatMonthYear } from '../../lib/dateTime'
 
 type AifOverviewPoint = {
   month_key: string
@@ -65,22 +66,7 @@ function formatNumber(value: number | null | undefined) {
 }
 
 function formatDate(value: string) {
-  const date = new Date(`${value}T00:00:00`)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: '2-digit',
-    year: 'numeric',
-  }).format(date)
-}
-
-function formatMonthYear(value: string) {
-  const date = new Date(`${value}T00:00:00`)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    year: 'numeric',
-  }).format(date)
+  return formatDateOnly(value, value)
 }
 
 function pad2(value: number) {
@@ -465,7 +451,7 @@ function createAifOverviewWorkbook(data: AifOverviewResponse, periodMode: AifPer
   <sheetData>
     <row r="1" ht="24" customHeight="1">${xlsxTextCell(0, 1, `AIF Overview Chart Data (${PERIOD_MODE_LABELS[periodMode]})`, 2)}</row>
     <row r="2">${xlsxTextCell(0, 2, `Date range: ${formatDate(data.date_from)} to ${formatDate(data.date_to)}`, 5)}</row>
-    <row r="3">${xlsxTextCell(0, 3, `Generated at: ${new Date().toLocaleString('en-US')}`, 5)}</row>
+    <row r="3">${xlsxTextCell(0, 3, `Generated at: ${formatDateTime(new Date())}`, 5)}</row>
     <row r="4">${[
       xlsxTextCell(0, 4, PERIOD_MODE_LABELS[periodMode], 3),
       xlsxTextCell(1, 4, 'AIFs Completed', 3),

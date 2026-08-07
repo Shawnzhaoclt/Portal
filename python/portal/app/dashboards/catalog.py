@@ -10,15 +10,15 @@ from portal.app.resources.metadata import catalog_resource_metadata
 router = APIRouter(prefix="/api/dashboards", tags=["dashboard-catalog"])
 
 CRITICAL_TEAM_SHEET_ROUTES = {
-    "overview": "/dashboard_critical_team_overview",
-    "insp-proj-start-date": "/dashboard_critical_team_inspection_project_start_date",
-    "insp-comp-date-bar-chart": "/dashboard_critical_team_inspection_completion_date_chart",
-    "report-comp-date-chart": "/dashboard_critical_team_report_completion_date_chart",
-    "insp-comp-date-reviews": "/dashboard_critical_team_inspection_completion_date_reviews",
-    "insp-comp-date-table": "/tab_critical_team_inspection_completion_date",
-    "report-comp-date-table": "/tab_critical_team_report_completion_date",
-    "insp-comp-date-reviews-table": "/tab_critical_team_review_completion_date",
-    "workorders": "/tab_critical_team_work_order_detail",
+    "overview": "/dashboard_critical_team",
+    "insp-proj-start-date": "/dashboard_critical_team",
+    "insp-comp-date-bar-chart": "/dashboard_critical_team",
+    "report-comp-date-chart": "/dashboard_critical_team",
+    "insp-comp-date-reviews": "/dashboard_critical_team",
+    "insp-comp-date-table": "/tab_critical_team",
+    "report-comp-date-table": "/tab_critical_team",
+    "insp-comp-date-reviews-table": "/tab_critical_team",
+    "workorders": "/tab_critical_team",
 }
 
 CRITICAL_ASSET_SHEET_ROUTES = {

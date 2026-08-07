@@ -154,7 +154,7 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .schema-test-result strong { display: block; font-size: 12px; }
 .schema-test-result p { margin-top: 2px; color: #5d7186; font-size: 11px; }
 .schema-catalog { display: grid; grid-template-columns: minmax(250px, .55fr) minmax(700px, 1.8fr); min-height: 430px; border: 1px solid #b9cddd; background: #fff; }
-.schema-table-editor { display: grid; grid-template-columns: minmax(240px, 1.2fr) minmax(190px, 1fr) 150px minmax(210px, 1fr) 130px auto; align-items: end; gap: 10px; margin-bottom: 10px; padding: 12px; border: 1px solid #b9cddd; background: #edf5fb; }
+.schema-table-editor { display: grid; grid-template-columns: minmax(280px, 1.4fr) minmax(240px, 1fr) 150px auto; align-items: end; gap: 10px; margin-bottom: 10px; padding: 12px; border: 1px solid #b9cddd; background: #edf5fb; }
 .schema-table-editor > div:first-child { display: grid; align-self: stretch; align-content: center; gap: 3px; }
 .schema-table-editor > div:first-child strong { font-size: 13px; }
 .schema-table-editor > div:first-child small { color: #60778f; font-size: 10px; line-height: 1.35; }
@@ -270,6 +270,17 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .source-config-details { display: grid; grid-template-columns: 155px minmax(0, 1fr); gap: 16px; align-items: center; min-height: 44px; margin-top: 8px; padding: 8px 14px; border: 1px solid #cbd9e5; background: #fff; }
 .source-config-details span { color: #60778f; font-size: 11px; font-weight: 700; text-transform: uppercase; }
 .source-config-details strong { min-width: 0; overflow-wrap: anywhere; color: #34536f; font-size: 12px; font-weight: 650; }
+.source-schedule-settings { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin: 8px 0; padding: 12px 14px; border: 1px solid #cbd9e5; background: #fff; }
+.source-schedule-settings h2 { margin-top: 3px; font-size: 16px; }
+.source-schedule-settings p:not(.eyebrow) { margin-top: 4px; color: #5d7186; font-size: 12px; }
+.source-schedule-settings small { display: block; margin-top: 4px; color: #687f96; font-size: 11px; }
+.source-schedule-form { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.source-schedule-form > label { color: #34536f; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.source-schedule-input { display: flex; align-items: center; gap: 7px; }
+.source-schedule-input input { width: 84px; height: 36px; border: 1px solid #a8bfd4; background: #fff; padding: 0 8px; color: #1f2f43; }
+.source-schedule-input span { color: #5d7186; font-size: 12px; white-space: nowrap; }
+.source-schedule-form .primary-button { white-space: nowrap; }
+.source-schedule-help { flex-basis: 100%; color: #687f96; font-size: 11px; text-align: right; }
 .text-button { border: 0; background: transparent; color: #16548d; font-weight: 650; text-decoration: underline; }
 .table-toolbar > label { display: flex; align-items: center; gap: 9px; color: #5c6f83; font-size: 12px; font-weight: 700; text-transform: uppercase; }
 .toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
@@ -324,6 +335,9 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
   .module-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .release-controls { grid-template-columns: 1fr; }
+  .source-schedule-settings { align-items: flex-start; flex-direction: column; }
+  .source-schedule-form { justify-content: flex-start; }
+  .source-schedule-help { text-align: left; }
 }
 
 .portal-admin-workspace {

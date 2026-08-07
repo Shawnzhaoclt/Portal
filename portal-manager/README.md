@@ -71,6 +71,13 @@ review catalog changes in Portal Administration, but the native host rechecks
 the selected system-admin capability before copying any system database,
 executable, or full-package release.
 
+Before every publication, Manager copies its authoritative writable
+`config\system.db` into the Portal Desktop portable folder and verifies that the
+two files have the same SHA-256 digest. The Desktop copy is then marked read-only.
+System-database-only releases are created from that verified Desktop copy; full
+releases include it in the portable ZIP. The authoritative Manager database remains
+writable and is never used directly by Portal Desktop.
+
 Choose the update type explicitly:
 
 - **System database only** replaces only `config\system.db`.
@@ -92,10 +99,17 @@ portable manager can later be deployed without a Conda installation.
 
 ## Scheduled Tasks
 
-The **Source Data** page manages **StormWater Portal Source Data Sync**. Use
+The **Source Data** page manages **StormWater Portal Serving Data Sync**. Each run
+rebuilds only the four approved business tables; it does not copy Cityworks or ITPipes
+source tables. Use
 **Enable automatic** to register it for the configured `allowedStartTime` and
 **Disable automatic** to remove it. The Python worker still uses its configured
 first-run time, interval, and exit time after Task Scheduler launches it.
+
+The Source Data page also provides the **Rebuild interval** control. Enter a whole
+number from 1 through 1440 minutes and save it while the scheduler is stopped. The
+setting is written to the authoritative `sync.settings.json` and takes effect the
+next time the scheduler starts.
 
 The **Snapshots** page manages the nightly checkpoint task and the weekly
 retention-and-backup task in the same way. The manager reports each task as

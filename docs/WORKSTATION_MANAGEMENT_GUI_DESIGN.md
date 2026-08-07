@@ -64,7 +64,7 @@ work area:
 
 1. **Overview** - workstation health, running jobs, current releases, latest backup,
    latest snapshot, and recent failures.
-2. **Source Data** - scheduled Cityworks/ITPipes publication, run now, source checks,
+2. **Source Data** - scheduled serving-table rebuilds, run now, input checks,
    published SQLite versions, and source logs.
 3. **Repository** - initialize or inspect the shared protocol root, membership release,
    active epoch, writers, locks, and repository health.
@@ -83,6 +83,13 @@ work area:
 
 Pages are task-focused. A long-running command does not block navigation or freeze the
 window.
+
+The Source Data implementation follows
+[`PORTAL_SOURCE_DATA_SYNC_DESIGN.md`](PORTAL_SOURCE_DATA_SYNC_DESIGN.md). It publishes
+resource-ready business tables from scoped source-side extracts; it does not maintain
+a general Cityworks or ITPipes mirror. Every run rebuilds the required serving tables
+from approved source-side business queries; it does not infer changed records or
+maintain incremental synchronization state.
 
 ## 4. Task Catalog
 
@@ -206,6 +213,10 @@ temporary file plus atomic replacement. It provides:
 
 Secret values remain in the approved credential/configuration mechanism and are shown as
 masked values.
+
+All displayed dates and timestamps use the workstation operating system's locale,
+date pattern, time pattern, and local timezone. The shared formatter omits fractional
+seconds and timezone-name suffixes; canonical stored timestamps remain ISO/UTC values.
 
 ## 9. Audit and Logs
 

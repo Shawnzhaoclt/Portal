@@ -10,6 +10,7 @@ import './GISDashboard.css'
 import './MapTilesTheme.css'
 import { Checkbox } from '@/components/ui/checkbox'
 import { clientSetting } from '@/desktop/settings'
+import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 import { fetchGISLayerFeatures, fetchGISLayers } from './api'
 import type { GISFeature, GISFeatureCollection, GISLayerMeta, GISLayerRenderer } from './types'
 import type { Geometry } from 'geojson'
@@ -557,17 +558,18 @@ function validDateParts(year: number, month: number, day: number) {
 }
 
 function formatUsDateParts(year: number, month: number, day: number) {
-  return validDateParts(year, month, day) ? `${month}/${day}/${year}` : null
+  return validDateParts(year, month, day) ? formatDateOnly(new Date(year, month - 1, day), '') : null
 }
 
 function formatUsDateOnly(value: unknown) {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return `${value.getMonth() + 1}/${value.getDate()}/${value.getFullYear()}`
+    return formatDateTime(value, '')
   }
   if (typeof value !== 'string') return null
   const text = value.trim()
   const isoMatch = text.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[T\s].*)?$/)
   if (isoMatch) {
+    if (/[T\s]/.test(text)) return formatDateTime(text, '')
     return formatUsDateParts(Number(isoMatch[1]), Number(isoMatch[2]), Number(isoMatch[3]))
   }
   const slashMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{2,4})(?:\s+.*)?$/)

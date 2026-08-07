@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ButtonHTMLAttributes, CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { Tooltip } from 'radix-ui'
 import { toast } from 'sonner'
+import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 import {
   AlertCircle,
   ArrowLeft,
@@ -206,16 +207,7 @@ function formatBindingType(value: CctvReviewReport['binding_type']) {
 
 function formatDate(value: string | null) {
   if (!value) return '-'
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(date)
+  return formatDateTime(value, value)
 }
 
 function cellText(report: CctvReviewReport, field: ReportField) {
@@ -260,9 +252,7 @@ function inspectionDateTimeFromKey(key: string) {
 }
 
 function inspectionDateLabelFromKey(key: string) {
-  const date = new Date(`${key}T00:00:00`)
-  if (Number.isNaN(date.getTime())) return key
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })
+  return formatDateOnly(key, key)
 }
 
 function inspectionPeriodLabel(dateKeys: string[]) {

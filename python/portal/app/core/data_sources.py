@@ -53,17 +53,18 @@ class CriticalTeamDataSource:
     inspection_table: str
     workorder_entity_table: str
     activity_link_table: str
+    critical_workorders_serving_table: str
+    inspection_workflows_serving_table: str
+    inspection_events_serving_table: str
     description_filter: str
 
     @property
     def source_tables(self) -> str:
         return ", ".join(
             (
-                self.workorder_table,
-                self.wocustfield_table,
-                self.inspection_table,
-                self.workorder_entity_table,
-                self.activity_link_table,
+                self.critical_workorders_serving_table,
+                self.inspection_workflows_serving_table,
+                self.inspection_events_serving_table,
             )
         )
 
@@ -155,6 +156,7 @@ def critical_team_data_source() -> CriticalTeamDataSource:
     if not isinstance(config, dict):
         raise HTTPException(status_code=503, detail={"message": "Missing `critical_team` datasource config."})
     tables = config.get("tables") if isinstance(config.get("tables"), dict) else {}
+    serving_tables = config.get("serving_tables") if isinstance(config.get("serving_tables"), dict) else {}
     return CriticalTeamDataSource(
         source_type=str(config.get("source_type", "sqlite_snapshot")),
         workbook=str(config.get("workbook", "")),
@@ -164,6 +166,15 @@ def critical_team_data_source() -> CriticalTeamDataSource:
         inspection_table=str(tables.get("inspection", "azteca_INSPECTION")),
         workorder_entity_table=str(tables.get("workorder_entity", "azteca_WORKORDERENTITY")),
         activity_link_table=str(tables.get("activity_link", "azteca_ACTIVITYLINK")),
+        critical_workorders_serving_table=str(
+            serving_tables.get("critical_workorders", "critical_asset_work_orders")
+        ),
+        inspection_workflows_serving_table=str(
+            serving_tables.get("inspection_workflows", "asset_inspection_workflows")
+        ),
+        inspection_events_serving_table=str(
+            serving_tables.get("inspection_events", "asset_inspection_events")
+        ),
         description_filter=str(config.get("description_filter", "")),
     )
 

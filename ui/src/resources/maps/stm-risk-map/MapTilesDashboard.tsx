@@ -4,6 +4,7 @@ import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSO
 import { toast } from "sonner";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./MapTilesViewer.css";
+import { formatDateTime } from "../../../lib/dateTime";
 import {
   Activity,
   ChevronRight,
@@ -7384,16 +7385,7 @@ function dateStamp(date: Date): string {
 }
 
 function formatPdfTimestamp(date: Date): string {
-  return new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/New_York",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    timeZoneName: "short",
-  }).format(date);
+  return formatDateTime(date);
 }
 
 function pdfNumber(value: number): string {

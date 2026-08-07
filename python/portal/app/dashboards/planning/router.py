@@ -11,7 +11,11 @@ from portal.runtime.transport import APIRouter, Query
 from portal.app.core.data_sources import critical_team_data_source, portal_env
 from portal.app.core.records import clean_record
 from portal.app.core.sql import duck_identifier
-from portal.app.dashboards.critical_team.router import critical_team_connection, fetch_all
+from portal.app.dashboards.critical_team.router import (
+    critical_team_connection,
+    critical_team_uses_serving_tables,
+    fetch_all,
+)
 from portal.app.management.database import SYSTEM_TABLES, management_database_path
 
 
@@ -222,6 +226,25 @@ def sorted_pending_aif_records(records: list[dict[str, Any]], sort_by: str, sort
 
 def pending_aif_source_cte() -> str:
     source = critical_team_data_source()
+    if critical_team_uses_serving_tables(source):
+        workflow_table = duck_identifier(source.inspection_workflows_serving_table)
+        return f"""
+            WITH pending_aif_forms AS (
+                SELECT
+                    inspection_id,
+                    asset_id,
+                    inspection_date,
+                    inspection_by,
+                    inspection_status,
+                    submit_to,
+                    related_workorder_id,
+                    related_wo_status,
+                    critical_team_status,
+                    investigation_id,
+                    investigation_status
+                FROM {workflow_table}
+            )
+        """
     inspection_table = duck_identifier(source.inspection_table)
     workorder_entity_table = duck_identifier(source.workorder_entity_table)
     workorder_table = duck_identifier(source.workorder_table)
@@ -487,66 +510,63 @@ def aif_overview(
 
     with critical_team_connection() as con:
         cursor = con.cursor()
-        names, rows = fetch_all(
-            cursor,
-            f"""
-            WITH aif_forms AS (
+        if critical_team_uses_serving_tables(source):
+            event_table = duck_identifier(source.inspection_events_serving_table)
+            names, rows = fetch_all(
+                cursor,
+                f"""
                 SELECT
-                    PORTAL_INT(i.INSPECTIONID) AS inspection_id,
-                    CAST(i.INSPTEMPLATENAME AS varchar(255)) AS inspection_template_name,
-                    CAST(i.INSPECTEDBY AS varchar(255)) AS inspected_by,
-                    PORTAL_DATETIME(i.INSPDATE) AS inspection_date,
-                    CAST(i.INITIATEDBY AS varchar(255)) AS initiated_by,
-                    PORTAL_DATETIME(i.DATESUBMITTO) AS date_submit_to,
-                    PORTAL_DATETIME(i.PRJSTARTDATE) AS project_start_date,
-                    PORTAL_DATETIME(i.INITIATEDATE) AS initiate_date,
-                    PORTAL_DATETIME(i.ACTFINISHDATE) AS actual_finish_date,
-                    PORTAL_DATETIME(i.DATECLOSED) AS date_closed,
-                    PORTAL_DATETIME(i.PRJFINISHDATE) AS project_finish_date,
-                    UPPER(LTRIM(RTRIM(CAST(i.STATUS AS varchar(255))))) AS status
-                FROM {inspection_table} AS i
-                WHERE i.INSPTEMPLATENAME LIKE '%Asset Insp%'
-                  AND i.ENTITYTYPE IN ('CHANNELS', 'PIPES', 'STRUCTURES')
+                    CASE WHEN event_type = 'inspection' THEN 'inspections' ELSE event_type END AS activity_key,
+                    strftime('%Y-%m', event_date) AS month_key,
+                    COUNT(DISTINCT inspection_id) AS count_value
+                FROM {event_table}
+                WHERE event_date BETWEEN ? AND ?
+                GROUP BY
+                    CASE WHEN event_type = 'inspection' THEN 'inspections' ELSE event_type END,
+                    strftime('%Y-%m', event_date)
+                ORDER BY month_key, activity_key
+                """,
+                [start_text, end_text],
             )
-            SELECT
-                activity_key,
-                strftime('%Y-%m', event_date) AS month_key,
-                COUNT(DISTINCT inspection_id) AS count_value
-            FROM (
+        else:
+            names, rows = fetch_all(
+                cursor,
+                f"""
+                WITH aif_forms AS (
+                    SELECT
+                        PORTAL_INT(i.INSPECTIONID) AS inspection_id,
+                        PORTAL_DATETIME(i.INSPDATE) AS inspection_date,
+                        PORTAL_DATETIME(i.PRJSTARTDATE) AS project_start_date,
+                        PORTAL_DATETIME(i.DATECLOSED) AS date_closed,
+                        UPPER(LTRIM(RTRIM(CAST(i.STATUS AS varchar(255))))) AS status
+                    FROM {inspection_table} AS i
+                    WHERE i.INSPTEMPLATENAME LIKE '%Asset Insp%'
+                      AND i.ENTITYTYPE IN ('CHANNELS', 'PIPES', 'STRUCTURES')
+                )
                 SELECT
-                    'completed' AS activity_key,
-                    date_closed AS event_date,
-                    inspection_id
-                FROM aif_forms
-                WHERE date_closed IS NOT NULL
-                  AND date_closed BETWEEN ? AND ?
-                  AND status IN ('COMPLETED', 'CLOSED')
-
-                UNION ALL
-
-                SELECT
-                    'inspections' AS activity_key,
-                    inspection_date AS event_date,
-                    inspection_id
-                FROM aif_forms
-                WHERE inspection_date IS NOT NULL
-                  AND inspection_date BETWEEN ? AND ?
-
-                UNION ALL
-
-                SELECT
-                    'project_started' AS activity_key,
-                    project_start_date AS event_date,
-                    inspection_id
-                FROM aif_forms
-                WHERE project_start_date IS NOT NULL
-                  AND project_start_date BETWEEN ? AND ?
-            ) AS activity_events
-            GROUP BY activity_key, strftime('%Y-%m', event_date)
-            ORDER BY month_key, activity_key
-            """,
-            [start_text, end_text, start_text, end_text, start_text, end_text],
-        )
+                    activity_key,
+                    strftime('%Y-%m', event_date) AS month_key,
+                    COUNT(DISTINCT inspection_id) AS count_value
+                FROM (
+                    SELECT 'completed' AS activity_key, date_closed AS event_date, inspection_id
+                    FROM aif_forms
+                    WHERE date_closed IS NOT NULL
+                      AND date_closed BETWEEN ? AND ?
+                      AND status IN ('COMPLETED', 'CLOSED')
+                    UNION ALL
+                    SELECT 'inspections' AS activity_key, inspection_date AS event_date, inspection_id
+                    FROM aif_forms
+                    WHERE inspection_date IS NOT NULL AND inspection_date BETWEEN ? AND ?
+                    UNION ALL
+                    SELECT 'project_started' AS activity_key, project_start_date AS event_date, inspection_id
+                    FROM aif_forms
+                    WHERE project_start_date IS NOT NULL AND project_start_date BETWEEN ? AND ?
+                ) AS activity_events
+                GROUP BY activity_key, strftime('%Y-%m', event_date)
+                ORDER BY month_key, activity_key
+                """,
+                [start_text, end_text, start_text, end_text, start_text, end_text],
+            )
 
     records = [clean_record(dict(zip(names, row))) for row in rows]
     months = aif_overview_months(start_date, end_date)

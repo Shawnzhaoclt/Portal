@@ -9,10 +9,10 @@ from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 
 from portal.app.management.database import get_db
 from portal.app.management.models import Resource, TeamFeaturedResource, User
-from portal.app.management.resource_ids import normalize_resource_id
 from portal.app.management.router import get_current_user
 from portal.app.management.security import utc_now_text
 from portal.app.management.services import effective_resource_permission, serialize_resource
+from portal.app.resources.aliases import canonical_resource_id
 from portal.app.sync.errors import (
     LockTimeout,
     RevisionChanged,
@@ -51,12 +51,12 @@ def favorite_entity_id(
     # Preserve the first release's IDs for All Resources so existing synced
     # rows are upgraded in place rather than duplicated.
     parts = (
-        (employee_number.strip(), normalize_resource_id(resource_id))
+        (employee_number.strip(), canonical_resource_id(resource_id))
         if normalized_category == "all"
         else (
             employee_number.strip(),
             normalized_category,
-            normalize_resource_id(resource_id),
+            canonical_resource_id(resource_id),
         )
     )
     return stable_global_id(
@@ -112,7 +112,7 @@ def owned_favorite_values(
         row_category = normalize_favorite_category(str(values.get("category") or "all"))
         if row_category != normalized_category:
             continue
-        resource_id = normalize_resource_id(str(values.get("resource_id") or ""))
+        resource_id = canonical_resource_id(str(values.get("resource_id") or ""))
         if not resource_id:
             continue
         favorites.append(
@@ -130,7 +130,15 @@ def owned_favorite_values(
             str(item["resource_id"]),
         )
     )
-    return favorites
+    deduplicated: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for favorite in favorites:
+        resource_id = str(favorite["resource_id"])
+        if resource_id in seen:
+            continue
+        seen.add(resource_id)
+        deduplicated.append(favorite)
+    return deduplicated
 
 
 def _favorite_entities(user: User, category: str) -> list[dict[str, object]]:
@@ -168,7 +176,7 @@ def _accessible_resource(
     db: Session, user: User, resource_id: str
 ) -> tuple[Resource, dict[str, Any]]:
     resource = db.scalar(
-        select(Resource).where(Resource.resource_id == normalize_resource_id(resource_id))
+        select(Resource).where(Resource.resource_id == canonical_resource_id(resource_id))
     )
     effective = effective_resource_permission(db, user, resource) if resource else None
     if (
@@ -283,7 +291,7 @@ def _replace_with_team_defaults(
             continue
         if str(values.get("owner_employee_number") or "") != employee_number:
             continue
-        resource_id = normalize_resource_id(str(values.get("resource_id") or ""))
+        resource_id = canonical_resource_id(str(values.get("resource_id") or ""))
         if resource_id:
             existing_by_resource[resource_id] = entity
 
@@ -291,10 +299,14 @@ def _replace_with_team_defaults(
     desired_ids = {resource.resource_id for resource in resources}
     mutations: list[Mutation] = []
     for sort_order, resource in enumerate(resources):
-        entity_id = favorite_entity_id(
-            employee_number, resource.resource_id, normalized_category
-        )
         existing = existing_by_resource.get(resource.resource_id)
+        entity_id = (
+            str(existing["entity_id"])
+            if existing is not None
+            else favorite_entity_id(
+                employee_number, resource.resource_id, normalized_category
+            )
+        )
         prior_values = (
             dict(existing.get("values"))
             if existing and isinstance(existing.get("values"), dict)
@@ -322,7 +334,7 @@ def _replace_with_team_defaults(
             == employee_number
             and normalize_favorite_category(str(prior_values.get("category") or "all"))
             == normalized_category
-            and normalize_resource_id(str(prior_values.get("resource_id") or ""))
+            and canonical_resource_id(str(prior_values.get("resource_id") or ""))
             == resource.resource_id
             and int(prior_values.get("sort_order") or 0) == sort_order
         ):
@@ -398,6 +410,17 @@ def add_my_favorite(
     entity_id = favorite_entity_id(
         employee_number, resource.resource_id, normalized_category
     )
+    current_values = owned_favorite_values(
+        _favorite_entities(current_user, normalized_category),
+        employee_number,
+        normalized_category,
+    )
+    if any(item["resource_id"] == resource.resource_id for item in current_values):
+        return {
+            "ok": True,
+            **_serialize_favorites(current_user, db, normalized_category),
+        }
+
     coordinator = _coordinator(current_user)
     try:
         existing = coordinator.get_entity(USER_FAVORITE_ENTITY_TYPE, entity_id)
@@ -412,11 +435,6 @@ def add_my_favorite(
         }
 
     now = utc_now_text()
-    current_values = owned_favorite_values(
-        _favorite_entities(current_user, normalized_category),
-        employee_number,
-        normalized_category,
-    )
     next_sort_order = max(
         (int(item.get("sort_order") or 0) for item in current_values),
         default=-1,
@@ -466,19 +484,19 @@ def remove_my_favorite(
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
     normalized_category = normalize_favorite_category(category)
-    normalized_resource_id = normalize_resource_id(resource_id)
+    normalized_resource_id = canonical_resource_id(resource_id)
     employee_number = str(current_user.employee_id)
-    entity_id = favorite_entity_id(
-        employee_number, normalized_resource_id, normalized_category
-    )
-    try:
-        existing = _coordinator(current_user).get_entity(
-            USER_FAVORITE_ENTITY_TYPE, entity_id
-        )
-    except SyncError as error:
-        _sync_error(error)
-    values = _entity_values(existing)
-    if values is None or str(values.get("owner_employee_number") or "") != employee_number:
+    matching_entities = []
+    for entity in _favorite_entities(current_user, normalized_category):
+        values = _entity_values(entity)
+        if (
+            values is not None
+            and str(values.get("owner_employee_number") or "") == employee_number
+            and canonical_resource_id(str(values.get("resource_id") or ""))
+            == normalized_resource_id
+        ):
+            matching_entities.append(entity)
+    if not matching_entities:
         return {
             "ok": True,
             **_serialize_favorites(current_user, db, normalized_category),
@@ -486,15 +504,18 @@ def remove_my_favorite(
 
     _commit(
         current_user,
-        Mutation(
-            entity_type=USER_FAVORITE_ENTITY_TYPE,
-            entity_id=entity_id,
-            operation_type="delete_entity",
-            base_record_revision=str(existing["record_revision"]),
-            unique_lock_keys=(
-                f"user-favorite:{employee_number}:{normalized_category}:{normalized_resource_id}",
-            ),
-        ),
+        [
+            Mutation(
+                entity_type=USER_FAVORITE_ENTITY_TYPE,
+                entity_id=str(existing["entity_id"]),
+                operation_type="delete_entity",
+                base_record_revision=str(existing["record_revision"]),
+                unique_lock_keys=(
+                    f"user-favorite:{employee_number}:{normalized_category}:{normalized_resource_id}",
+                ),
+            )
+            for existing in matching_entities
+        ],
     )
     return {
         "ok": True,

@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Portal Workstation Manager",
+  "productName": "Portal Manager",
   "version": "0.1.0",
   "identifier": "gov.charlottenc.stormwater.workstation-manager",
   "build": {
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Portal Workstation Manager",
+        "title": "Portal Manager",
         "width": 1280,
         "height": 820,
         "minWidth": 960,

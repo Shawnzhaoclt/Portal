@@ -54,6 +54,8 @@ struct SyncStatus {
     scheduled_task_registered: bool,
     scheduled_task_name: String,
     scheduled_task_time: String,
+    scheduled_task_minute: u16,
+    interval_minutes: u16,
     scheduled_task_state: String,
     status_text: String,
     next_run_text: String,
@@ -107,6 +109,10 @@ struct PortalReleaseStatus {
     bootstrap_version: Option<String>,
     portal_exe: String,
     system_db: String,
+    desktop_system_db: String,
+    manager_system_db_writable: bool,
+    desktop_system_db_read_only: bool,
+    desktop_system_db_current: bool,
 }
 
 struct PortalRuntimePaths {
@@ -125,7 +131,6 @@ struct PortalPythonWorker {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     next_request_id: u64,
-    system_database: PathBuf,
 }
 
 impl PortalPythonWorker {
@@ -186,7 +191,6 @@ impl Drop for PortalPythonWorker {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = set_system_database_writable(&self.system_database, false);
     }
 }
 
@@ -458,7 +462,6 @@ fn spawn_portal_python_worker() -> Result<PortalPythonWorker, String> {
         command
     } else {
         if !paths.worker_script.is_file() {
-            let _ = set_system_database_writable(&paths.system_database, false);
             return Err(format!(
                 "The Portal Python worker was not found at {} and its source script is unavailable.",
                 paths.worker_script.display()
@@ -486,19 +489,14 @@ fn spawn_portal_python_worker() -> Result<PortalPythonWorker, String> {
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => {
-            let _ = set_system_database_writable(&paths.system_database, false);
-            return Err(format!("Could not start the Portal Python worker: {error}"));
-        }
+        Err(error) => return Err(format!("Could not start the Portal Python worker: {error}")),
     };
     let stdin = child.stdin.take().ok_or_else(|| {
         let _ = child.kill();
-        let _ = set_system_database_writable(&paths.system_database, false);
         "Could not open the Portal Python worker input stream.".to_string()
     })?;
     let stdout = child.stdout.take().ok_or_else(|| {
         let _ = child.kill();
-        let _ = set_system_database_writable(&paths.system_database, false);
         "Could not open the Portal Python worker output stream.".to_string()
     })?;
     Ok(PortalPythonWorker {
@@ -506,7 +504,6 @@ fn spawn_portal_python_worker() -> Result<PortalPythonWorker, String> {
         stdin,
         stdout: BufReader::new(stdout),
         next_request_id: 0,
-        system_database: paths.system_database,
     })
 }
 
@@ -527,13 +524,7 @@ fn run_portal_python_job(job: &str, request: &Value) -> Result<Value, String> {
     if result.is_err() {
         *worker = None;
     }
-    drop(worker);
-    let readonly_result = set_system_database_writable(&paths.system_database, false);
-    match (result, readonly_result) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(error), _) => Err(error),
-        (Ok(_), Err(error)) => Err(error),
-    }
+    result
 }
 
 fn run_portal_python_request(request: &Value) -> Result<Value, String> {
@@ -738,6 +729,20 @@ fn portal_release_paths() -> Result<PortalReleasePaths, String> {
 fn synchronize_manager_system_database_to_desktop(
     paths: &PortalReleasePaths,
 ) -> Result<(), String> {
+    set_system_database_writable(&paths.system_db, true)?;
+    let same_database = match (
+        paths.system_db.canonicalize(),
+        paths.desktop_system_db.canonicalize(),
+    ) {
+        (Ok(authoritative), Ok(desktop)) => authoritative == desktop,
+        _ => false,
+    };
+    if same_database {
+        return Err(
+            "The authoritative Manager system database and Desktop distribution database must be different files."
+                .to_string(),
+        );
+    }
     if let Some(parent) = paths.desktop_system_db.parent() {
         fs::create_dir_all(parent).map_err(|error| {
             format!("Could not create the Portal system database folder: {error}")
@@ -754,7 +759,23 @@ fn synchronize_manager_system_database_to_desktop(
         Ok(())
     };
     copy_result?;
-    readonly_result
+    readonly_result?;
+    let authoritative_hash = file_sha256(&paths.system_db)?;
+    let desktop_hash = file_sha256(&paths.desktop_system_db)?;
+    if authoritative_hash != desktop_hash {
+        return Err(
+            "The Portal Desktop system.db does not match the authoritative Manager copy."
+                .to_string(),
+        );
+    }
+    let desktop_is_read_only = fs::metadata(&paths.desktop_system_db)
+        .map_err(|error| format!("Could not verify the Portal Desktop system.db: {error}"))?
+        .permissions()
+        .readonly();
+    if !desktop_is_read_only {
+        return Err("The Portal Desktop system.db was not made read-only.".to_string());
+    }
+    Ok(())
 }
 
 fn release_version_from_file(path: &Path) -> Result<String, String> {
@@ -814,6 +835,17 @@ fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
     let package_version = release_version_from_file(&paths.version_file)?;
     let current_manifest = paths.release_root.join("portal-release.json");
     let bootstrap_manifest = paths.release_root.join("portal-bootstrap.json");
+    let manager_system_db_writable = !fs::metadata(&paths.system_db)
+        .map_err(|error| format!("Could not inspect the authoritative system.db: {error}"))?
+        .permissions()
+        .readonly();
+    let desktop_system_db_read_only = paths
+        .desktop_system_db
+        .metadata()
+        .map(|metadata| metadata.permissions().readonly())
+        .unwrap_or(false);
+    let desktop_system_db_current = paths.desktop_system_db.is_file()
+        && file_sha256(&paths.system_db)? == file_sha256(&paths.desktop_system_db)?;
     Ok(PortalReleaseStatus {
         portable_root: paths.portable_root.display().to_string(),
         release_root: paths.release_root.display().to_string(),
@@ -823,6 +855,10 @@ fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
         bootstrap_version: manifest_string(&bootstrap_manifest, "version"),
         portal_exe: paths.portal_exe.display().to_string(),
         system_db: paths.system_db.display().to_string(),
+        desktop_system_db: paths.desktop_system_db.display().to_string(),
+        manager_system_db_writable,
+        desktop_system_db_read_only,
+        desktop_system_db_current,
     })
 }
 
@@ -941,6 +977,12 @@ fn publish_portal_release_value(
         }
     }
 
+    emit_release_progress(
+        app,
+        "Refreshing the read-only Desktop system database from the authoritative Manager copy.",
+    );
+    synchronize_manager_system_database_to_desktop(&paths)?;
+
     let payload = match update_mode {
         "system-db" => {
             emit_release_progress(
@@ -948,9 +990,15 @@ fn publish_portal_release_value(
                 "Copying the system database to the shared release folder.",
             );
             let destination = paths.release_root.join(format!("system-{version}.db"));
-            fs::copy(&paths.system_db, &destination)
+            fs::copy(&paths.desktop_system_db, &destination)
                 .map_err(|error| format!("Could not publish system.db: {error}"))?;
             set_system_database_writable(&destination, false)?;
+            if file_sha256(&destination)? != file_sha256(&paths.system_db)? {
+                return Err(
+                    "The published system database does not match the authoritative Manager copy."
+                        .to_string(),
+                );
+            }
             destination
         }
         "portal-exe" => {
@@ -965,7 +1013,6 @@ fn publish_portal_release_value(
                 app,
                 "Creating the full portable ZIP. This can take a few minutes.",
             );
-            synchronize_manager_system_database_to_desktop(&paths)?;
             let destination = paths
                 .release_root
                 .join(format!("Portal-Desktop-{version}.zip"));
@@ -1799,7 +1846,7 @@ fn next_scheduled_run(paths: &SyncPaths) -> Option<u16> {
 
 fn display_timestamp(value: Option<&str>) -> String {
     value
-        .map(|text| text.replace('T', " ").trim_end_matches('Z').to_string())
+        .map(str::to_string)
         .filter(|text| !text.is_empty())
         .unwrap_or_else(|| "-".to_string())
 }
@@ -1892,6 +1939,8 @@ fn sync_status(selected_date: String) -> Result<SyncStatus, String> {
             "Daily {} local time",
             format_clock(paths.allowed_start_minute)
         ),
+        scheduled_task_minute: paths.allowed_start_minute,
+        interval_minutes: paths.interval_minutes,
         scheduled_task_state,
         status_text: if running { "RUNNING" } else { "STOPPED" }.to_string(),
         next_run_text: next_scheduled_run(&paths)
@@ -1920,6 +1969,38 @@ fn sync_status(selected_date: String) -> Result<SyncStatus, String> {
         sync_settings_file: paths.sync_settings.display().to_string(),
         runs,
     })
+}
+
+#[tauri::command]
+fn update_source_sync_interval(
+    interval_minutes: u16,
+    selected_date: String,
+) -> Result<SyncStatus, String> {
+    if !(1..=1440).contains(&interval_minutes) {
+        return Err("The source-sync interval must be between 1 and 1440 minutes.".to_string());
+    }
+
+    let paths = sync_paths()?;
+    if scheduler_running(&paths) {
+        return Err(
+            "Stop the serving data scheduler before changing the synchronization interval."
+                .to_string(),
+        );
+    }
+
+    let mut settings = read_json(&paths.sync_settings)?;
+    let schedule = settings
+        .get_mut("schedule")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "The source-sync settings do not contain a schedule object.".to_string())?;
+    schedule.insert(
+        "intervalMinutes".to_string(),
+        Value::from(interval_minutes),
+    );
+    write_json_replace(&paths.sync_settings, &settings)
+        .map_err(|error| format!("Could not save source-sync settings: {error}"))?;
+
+    sync_status(selected_date)
 }
 
 #[tauri::command]
@@ -2368,6 +2449,7 @@ pub fn run() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             sync_status,
+            update_source_sync_interval,
             start_scheduler,
             run_source_sync,
             check_source_sync,
@@ -2422,5 +2504,73 @@ pub fn run() {
             open_file_location
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Portal Workstation Manager");
+        .expect("error while running Portal Manager");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        display_timestamp, set_system_database_writable,
+        synchronize_manager_system_database_to_desktop, PortalReleasePaths,
+    };
+    use std::{env, fs, process, time::SystemTime};
+
+    #[test]
+    fn desktop_release_database_is_refreshed_and_made_read_only() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "portal-manager-release-test-{}-{unique}",
+            process::id()
+        ));
+        let manager_database = root.join("manager").join("system.db");
+        let desktop_database = root.join("desktop").join("config").join("system.db");
+        fs::create_dir_all(manager_database.parent().expect("manager parent"))
+            .expect("manager directory");
+        fs::create_dir_all(desktop_database.parent().expect("desktop parent"))
+            .expect("desktop directory");
+        fs::write(&manager_database, b"authoritative-system-catalog")
+            .expect("authoritative database");
+        fs::write(&desktop_database, b"stale-desktop-catalog").expect("desktop database");
+
+        let paths = PortalReleasePaths {
+            portable_root: root.join("desktop"),
+            release_root: root.join("release"),
+            portal_exe: root.join("desktop").join("Portal.exe"),
+            system_db: manager_database.clone(),
+            desktop_system_db: desktop_database.clone(),
+            updater: root.join("desktop").join("runtime").join("PortalUpdater.exe"),
+            version_file: root.join("desktop").join("VERSION"),
+        };
+
+        synchronize_manager_system_database_to_desktop(&paths).expect("database synchronization");
+
+        assert_eq!(
+            fs::read(&desktop_database).expect("distributed database"),
+            fs::read(&manager_database).expect("authoritative database")
+        );
+        assert!(!fs::metadata(&manager_database)
+            .expect("manager metadata")
+            .permissions()
+            .readonly());
+        assert!(fs::metadata(&desktop_database)
+            .expect("desktop metadata")
+            .permissions()
+            .readonly());
+
+        set_system_database_writable(&desktop_database, true).expect("unlock cleanup file");
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
+    fn synchronization_timestamps_remain_parseable_for_os_formatting() {
+        assert_eq!(
+            display_timestamp(Some("2026-08-06T16:10:20.831727-04:00")),
+            "2026-08-06T16:10:20.831727-04:00"
+        );
+        assert_eq!(display_timestamp(Some("2026-08-06T16:10:20Z")), "2026-08-06T16:10:20Z");
+        assert_eq!(display_timestamp(None), "-");
+    }
 }

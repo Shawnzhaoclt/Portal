@@ -36,9 +36,18 @@ if (-not $PythonExecutable) {
     }
 }
 
-if (-not $OutputDirectory) {
-    $OutputDirectory = Join-Path $projectRoot "dist\Portal-Desktop"
+$defaultOutputDirectory = [System.IO.Path]::GetFullPath((Join-Path $projectRoot "dist\Portal-Desktop"))
+if ($OutputDirectory) {
+    $requestedOutputDirectory = if ([System.IO.Path]::IsPathRooted($OutputDirectory)) {
+        [System.IO.Path]::GetFullPath($OutputDirectory)
+    } else {
+        [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $OutputDirectory))
+    }
+    if ($requestedOutputDirectory -ne $defaultOutputDirectory) {
+        throw "Portal Desktop builds must use the standard output directory: $defaultOutputDirectory"
+    }
 }
+$OutputDirectory = $defaultOutputDirectory
 if (-not $SystemDatabase) {
     $SystemDatabase = Join-Path $projectRoot "portal-manager\dist\Portal-Manager\config\system.db"
 }

@@ -21,8 +21,7 @@ PHYSICAL_SCHEMA_HANDLER = "registered_physical_schema"
 COMPATIBLE_SQLITE_HANDLER = "compatible_sqlite"
 ALEMBIC_SCHEMA_HANDLER = "alembic_structural"
 _DRAFT_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_DRAFT_TABLE_ID = re.compile(r"^(?:[A-Z]{3}[A-Z0-9]{5}|SYS)\.[a-z][a-z0-9_]*$")
-_DRAFT_RESOURCE_ID = re.compile(r"^(?:[A-Z]{3}[A-Z0-9]{5}|SYS)$")
+_GENERATED_TABLE_ID = re.compile(r"^tbl_[0-9a-f]{32}$")
 _DRAFT_PHYSICAL_TABLE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
 _DRAFT_SQLITE_TYPES = {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}
 
@@ -32,7 +31,6 @@ BUSINESS_TABLES = tuple(
         spec.entity_type,
         "tombstone",
         spec.dependency_order,
-        spec.resource_id,
     )
     for spec in all_physical_specs()
 )
@@ -86,7 +84,7 @@ def _business_catalog(business_database: Path) -> list[dict[str, Any]]:
             raise RuntimeError(f"The business database is missing registered tables: {', '.join(missing)}")
 
         catalog: list[dict[str, Any]] = []
-        for physical_table, table_id, delete_policy, dependency_order, resource_id in BUSINESS_TABLES:
+        for physical_table, table_id, delete_policy, dependency_order in BUSINESS_TABLES:
             columns = []
             for ordinal, row in enumerate(connection.execute(f'PRAGMA table_info("{physical_table}")')):
                 _, column_name, sqlite_type, not_null, default_value, primary_key = row
@@ -135,7 +133,6 @@ def _business_catalog(business_database: Path) -> list[dict[str, Any]]:
                     "replication_profile": "full",
                     "reducer_policy": "coordinator_entity",
                     "dependency_order": dependency_order,
-                    "resource_id": resource_id,
                     "fields": columns,
                     "indexes": indexes,
                 }
@@ -185,7 +182,6 @@ def _create_registry_tables(connection: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS SYS_SCHEMA_TABLES (
             release_id TEXT NOT NULL,
             table_id TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
             physical_table TEXT NOT NULL,
             table_kind TEXT NOT NULL,
             sync_enabled INTEGER NOT NULL CHECK (sync_enabled IN (0, 1)),
@@ -259,6 +255,11 @@ def _create_registry_tables(connection: sqlite3.Connection) -> None:
         );
         """
     )
+    schema_table_columns = {
+        str(row[1]) for row in connection.execute('PRAGMA table_info("SYS_SCHEMA_TABLES")')
+    }
+    if "resource_id" in schema_table_columns:
+        connection.execute("ALTER TABLE SYS_SCHEMA_TABLES DROP COLUMN resource_id")
 
 
 def _available_release_identifiers(
@@ -450,14 +451,13 @@ def register_business_schema(
             connection.execute(
                 """
                 INSERT INTO SYS_SCHEMA_TABLES (
-                    release_id, table_id, resource_id, physical_table, table_kind, sync_enabled,
+                    release_id, table_id, physical_table, table_kind, sync_enabled,
                     edit_policy, delete_policy, replication_profile, reducer_policy, dependency_order
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     active_release_id,
                     table["table_id"],
-                    table["resource_id"],
                     table["physical_table"],
                     table["table_kind"],
                     int(table["sync_enabled"]),
@@ -581,7 +581,7 @@ def registered_business_catalog(
         tables = []
         for row in connection.execute(
             """
-            SELECT table_id, resource_id, physical_table, table_kind, sync_enabled,
+            SELECT table_id, physical_table, table_kind, sync_enabled,
                    edit_policy, delete_policy, replication_profile, reducer_policy,
                    dependency_order, active
             FROM SYS_SCHEMA_TABLES
@@ -637,15 +637,14 @@ def registered_business_catalog(
             tables.append(
                 {
                     "table_id": table_id,
-                    "resource_id": row[1],
-                    "physical_table": row[2],
-                    "table_kind": row[3],
-                    "sync_enabled": bool(row[4]),
-                    "edit_policy": row[5],
-                    "delete_policy": row[6],
-                    "replication_profile": row[7],
-                    "reducer_policy": row[8],
-                    "dependency_order": int(row[9]),
+                    "physical_table": row[1],
+                    "table_kind": row[2],
+                    "sync_enabled": bool(row[3]),
+                    "edit_policy": row[4],
+                    "delete_policy": row[5],
+                    "replication_profile": row[6],
+                    "reducer_policy": row[7],
+                    "dependency_order": int(row[8]),
                     "fields": fields,
                     "indexes": indexes,
                 }
@@ -684,13 +683,11 @@ def _new_table_system_fields(table_id: str) -> list[dict[str, Any]]:
     ]
 
 
-def _validate_new_physical_table(name: str, resource_id: str) -> None:
+def _validate_new_physical_table(name: str) -> None:
     if not _DRAFT_PHYSICAL_TABLE.fullmatch(name):
         raise ValueError(
             "Physical table names must use uppercase business-domain words separated by underscores."
         )
-    if resource_id != "SYS" and name.startswith(f"{resource_id}_"):
-        raise ValueError("Physical table names must not embed their resource ID.")
 
 
 def apply_schema_draft(
@@ -721,19 +718,14 @@ def apply_schema_draft(
         kind = str(operation.get("kind") or "")
         table_id = str(operation.get("table_id") or "")
         if kind == "add_table":
-            resource_id = str(operation.get("resource_id") or "").strip().upper()
             physical_table = str(operation.get("physical_table") or "").strip().upper()
             try:
                 dependency_order = int(operation.get("dependency_order"))
             except (TypeError, ValueError) as error:
                 raise ValueError("A new table needs an integer dependency order.") from error
-            if not _DRAFT_TABLE_ID.fullmatch(table_id):
-                raise ValueError(f"Invalid stable table ID: {table_id!r}.")
-            if not _DRAFT_RESOURCE_ID.fullmatch(resource_id):
-                raise ValueError(f"Invalid owning resource ID: {resource_id!r}.")
-            if not table_id.startswith(f"{resource_id}."):
-                raise ValueError("The stable table ID must belong to the selected resource ID.")
-            _validate_new_physical_table(physical_table, resource_id)
+            if not _GENERATED_TABLE_ID.fullmatch(table_id):
+                raise ValueError("A new table requires an application-generated stable identity.")
+            _validate_new_physical_table(physical_table)
             if table_id in table_by_id:
                 raise ValueError(f"Stable table ID already exists: {table_id}.")
             if physical_table.lower() in physical_tables:
@@ -747,7 +739,6 @@ def apply_schema_draft(
                 )
             table = {
                 "table_id": table_id,
-                "resource_id": resource_id,
                 "physical_table": physical_table,
                 "table_kind": "attribute",
                 "sync_enabled": True,
@@ -771,7 +762,7 @@ def apply_schema_draft(
             raise ValueError(f"Draft change {position} references an unknown table: {table_id}.")
         if kind == "rename_table":
             physical_table = str(operation.get("physical_table") or "").strip().upper()
-            _validate_new_physical_table(physical_table, str(table["resource_id"]))
+            _validate_new_physical_table(physical_table)
             current_name = str(table["physical_table"])
             owner = physical_tables.get(physical_table.lower())
             if owner is not None and owner != table_id:

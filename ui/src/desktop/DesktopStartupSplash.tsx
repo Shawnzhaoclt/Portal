@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AlertTriangle, LoaderCircle, LogOut, RotateCw } from 'lucide-react'
 import stormwaterLogo from '../assets/stormwater-logo.png'
+import { formatLocalClock } from '../lib/dateTime'
 import './DesktopStartupSplash.css'
 
 const STARTUP_MESSAGES = [
@@ -20,6 +21,8 @@ type DesktopStartupSplashProps = {
 
 export default function DesktopStartupSplash({ error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
+  const maintenanceStart = formatLocalClock(20 * 60)
+  const maintenanceEnd = formatLocalClock(5 * 60)
 
   useEffect(() => {
     if (error || maintenance) return
@@ -40,8 +43,9 @@ export default function DesktopStartupSplash({ error, message, maintenance = fal
             <AlertTriangle className="desktop-startup-maintenance-icon" aria-hidden="true" />
             <h2>System under maintenance</h2>
             <p className="desktop-startup-maintenance-message">
-              {message ?? 'The Portal is under maintenance daily from 8:00 PM through 5:00 AM. Please try again after 5:00 AM.'}
+              {message ?? `The Portal is under maintenance daily from ${maintenanceStart} through ${maintenanceEnd}. Please try again after ${maintenanceEnd}.`}
             </p>
+            <p className="desktop-startup-maintenance-message">Portal will close automatically in 15 seconds.</p>
             <div className="desktop-startup-actions">
               <button onClick={onExit} type="button">
                 <LogOut size={18} /> Exit

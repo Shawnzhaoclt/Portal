@@ -28,6 +28,7 @@ import {
 } from 'lucide-react'
 import { ADMIN_MANAGEMENT_ROUTE, PORTAL_LOGIN_ROUTE } from '../dashboardCatalog'
 import { isDesktopRuntime } from '../desktop/runtime'
+import { formatDateTime } from '../lib/dateTime'
 import {
   applyResourceDiscovery,
   clearManagementToken,
@@ -264,22 +265,7 @@ function userWithStoredRole(user: PortalUser) {
 
 function formatDate(value: string | null | undefined) {
   if (!value) return '-'
-  const trimmed = value.trim()
-  const hasTimeZone = /(?:z|[+-]\d{2}:?\d{2})$/i.test(trimmed)
-  const isoText = trimmed.includes('T') ? trimmed : trimmed.replace(' ', 'T')
-  const parsed = new Date(hasTimeZone ? isoText : `${isoText}Z`)
-  if (Number.isNaN(parsed.getTime())) return trimmed
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: true,
-    timeZoneName: 'short',
-  }).format(parsed)
+  return formatDateTime(value, value)
 }
 
 function emptyFeaturedResourceMap(): Record<PortalFeaturedCategory, PortalResource[]> {

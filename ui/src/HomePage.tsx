@@ -71,12 +71,8 @@ import criticalTeamProjectStartDarkThumb from './assets/portal-thumbnails/critic
 import criticalTeamProjectStartThumb from './assets/portal-thumbnails/critical-team-project-start.png'
 import criticalTeamReportCompletionChartDarkThumb from './assets/portal-thumbnails/critical-team-report-completion-chart-dark.png'
 import criticalTeamReportCompletionChartThumb from './assets/portal-thumbnails/critical-team-report-completion-chart.png'
-import criticalTeamReportCompletionTableDarkThumb from './assets/portal-thumbnails/critical-team-report-completion-table-dark.png'
-import criticalTeamReportCompletionTableThumb from './assets/portal-thumbnails/critical-team-report-completion-table.png'
 import criticalTeamReviewsChartDarkThumb from './assets/portal-thumbnails/critical-team-reviews-chart-dark.png'
 import criticalTeamReviewsChartThumb from './assets/portal-thumbnails/critical-team-reviews-chart.png'
-import criticalTeamReviewsTableDarkThumb from './assets/portal-thumbnails/critical-team-reviews-table-dark.png'
-import criticalTeamReviewsTableThumb from './assets/portal-thumbnails/critical-team-reviews-table.png'
 import criticalTeamWorkordersDarkThumb from './assets/portal-thumbnails/critical-team-workorders-dark.png'
 import criticalTeamWorkordersThumb from './assets/portal-thumbnails/critical-team-workorders.png'
 import gisCriticalAssetFacilityThumb from './assets/portal-thumbnails/gis-critical-asset-facility.png'
@@ -148,29 +144,20 @@ const CATEGORY_OPTIONS: Array<{ key: ResourceCategory; label: string }> = [
 ]
 
 const FEATURED_TABLE_RESOURCE_ORDER = [
-  'critical_team_work_order_detail',
-  'critical_team_report_completion_date',
-  'critical_team_review_completion_date',
+  'critical_team_tables',
   'critical_asset_history_both',
 ]
 const FEATURED_DASHBOARD_RESOURCE_ORDER = [
-  'critical_team_inspection_project_start_date',
-  'critical_team_report_completion_date_chart',
-  'critical_team_inspection_completion_date_reviews',
+  'critical_team_dashboard',
   'critical_asset_condition_facility_aggregate_both',
 ]
 const FEATURED_ALL_RESOURCE_ORDER = [
-  'critical_team_inspection_project_start_date',
-  'critical_team_report_completion_date_chart',
+  'critical_team_dashboard',
   'gis_critical_asset_facility',
-  'critical_team_work_order_detail',
+  'critical_team_tables',
 ]
 const DASHBOARD_ALL_RESOURCE_ORDER = [
-  'critical_team_overview',
-  'critical_team_inspection_project_start_date',
-  'critical_team_inspection_completion_date_chart',
-  'critical_team_report_completion_date_chart',
-  'critical_team_inspection_completion_date_reviews',
+  'critical_team_dashboard',
   'critical_asset_condition_facility_aggregate_both',
   'critical_asset_clog_facility_aggregate_pipes',
 ]
@@ -193,9 +180,9 @@ const FEATURED_CATEGORY_COMPOSE_ORDER: Exclude<PortalFeaturedCategory, 'all'>[] 
 
 const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
   {
-    id: 'critical_team_overview',
-    title: 'Critical Team Overview',
-    description: 'Cityworks Critical Asset Inspection work-order source and completion summary.',
+    id: 'critical_team_dashboard',
+    title: 'Critical Team Dashboard',
+    description: 'Critical Asset Inspection overview, milestone charts, reviews, and operational details.',
     href: CRITICAL_TEAM_SHEET_ROUTES.overview,
     category: 'dashboards',
     type: 'Dashboard',
@@ -205,93 +192,9 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     meta: 'Critical Team',
   },
   {
-    id: 'critical_team_inspection_project_start_date',
-    title: 'Inspection Project Start Date',
-    description: 'Count of inspection work orders by project start month and assigned submitter.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['insp-proj-start-date'],
-    category: 'dashboards',
-    type: 'Dashboard',
-    preview: 'dashboard',
-    thumbnail: criticalTeamInspectionCompletionChartThumb,
-    darkThumbnail: criticalTeamInspectionCompletionChartDarkThumb,
-    meta: 'Chart',
-  },
-  {
-    id: 'critical_team_inspection_completion_date_chart',
-    title: 'Inspection Completion Date Chart',
-    description: 'Inspection completion date counts grouped by submitter.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-bar-chart'],
-    category: 'dashboards',
-    type: 'Dashboard',
-    preview: 'dashboard',
-    thumbnail: criticalTeamProjectStartThumb,
-    darkThumbnail: criticalTeamProjectStartDarkThumb,
-    meta: 'Chart',
-  },
-  {
-    id: 'critical_team_report_completion_date_chart',
-    title: 'Report Completion Date Chart',
-    description: 'Report completion date counts grouped by submitter.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['report-comp-date-chart'],
-    category: 'dashboards',
-    type: 'Dashboard',
-    preview: 'dashboard',
-    thumbnail: criticalTeamReportCompletionChartThumb,
-    darkThumbnail: criticalTeamReportCompletionChartDarkThumb,
-    meta: 'Chart',
-  },
-  {
-    id: 'critical_team_inspection_completion_date_reviews',
-    title: 'Inspection Completion Date Reviews',
-    description: 'Ready-for-review and review-complete work orders by closed date and reviewer.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-reviews'],
-    category: 'dashboards',
-    type: 'Dashboard',
-    preview: 'dashboard',
-    thumbnail: criticalTeamReviewsChartThumb,
-    darkThumbnail: criticalTeamReviewsChartDarkThumb,
-    meta: 'Chart',
-  },
-  {
-    id: 'critical_team_inspection_completion_date',
-    title: 'Inspection Completion Date',
-    description: 'Inspection completion date cross-tab by submitter.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-table'],
-    category: 'tables',
-    type: 'Table',
-    preview: 'table',
-    thumbnail: criticalTeamInspectionCompletionTableThumb,
-    darkThumbnail: criticalTeamInspectionCompletionTableDarkThumb,
-    meta: 'Critical Team',
-  },
-  {
-    id: 'critical_team_report_completion_date',
-    title: 'Report Completion Date',
-    description: 'Report completion date cross-tab by submitter.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['report-comp-date-table'],
-    category: 'tables',
-    type: 'Table',
-    preview: 'table',
-    thumbnail: criticalTeamReportCompletionTableThumb,
-    darkThumbnail: criticalTeamReportCompletionTableDarkThumb,
-    meta: 'Critical Team',
-  },
-  {
-    id: 'critical_team_review_completion_date',
-    title: 'Review Completion Date',
-    description: 'Review-complete cross-tab by reviewer and closed month.',
-    href: CRITICAL_TEAM_SHEET_ROUTES['insp-comp-date-reviews-table'],
-    category: 'tables',
-    type: 'Table',
-    preview: 'table',
-    thumbnail: criticalTeamReviewsTableThumb,
-    darkThumbnail: criticalTeamReviewsTableDarkThumb,
-    meta: 'Critical Team',
-  },
-  {
-    id: 'critical_team_work_order_detail',
-    title: 'Work Order Detail',
-    description: 'Operational detail rows from the Cityworks Critical Asset Inspection source.',
+    id: 'critical_team_tables',
+    title: 'Critical Team Tables',
+    description: 'Work-order details and inspection, report, and review completion cross-tabs.',
     href: CRITICAL_TEAM_SHEET_ROUTES.workorders,
     category: 'tables',
     type: 'Table',

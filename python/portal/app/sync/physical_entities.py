@@ -26,7 +26,6 @@ class PhysicalEntitySpec:
     table: str
     value_columns: tuple[str, ...]
     dependency_order: int
-    resource_id: str
     integer_columns: frozenset[str] = frozenset()
     real_columns: frozenset[str] = frozenset()
     boolean_columns: frozenset[str] = frozenset()
@@ -65,9 +64,7 @@ SCHEDULE_DAY_COLUMNS = tuple(f"schedule_day_{index}" for index in range(7))
 MANAGED_ENTITY_TYPE_PATTERN = re.compile(
     r"^(?:[A-Z]{3}[A-Z0-9]{5}|SYS)\.[a-z][a-z0-9_]*$"
 )
-RESOURCE_ID_PATTERN = re.compile(r"^[A-Z]{3}[A-Z0-9]{5}$")
 SQL_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-SYSTEM_RESOURCE_ID = "SYS"
 SYSTEM_STORAGE_COLUMNS = (
     "global_id",
     "record_revision",
@@ -233,7 +230,6 @@ PHYSICAL_ENTITY_SPECS = {
         "CCTV_REVIEW_REPORTS",
         REPORT_COLUMNS,
         100,
-        "RPT5W1C0",
         integer_columns=frozenset({"id", "created_by_user_id", "updated_by_user_id", "submitted_by_user_id", "reviewed_by_user_id"}),
         indexes=(
             ("binding", ("binding_type", "binding_text"), False),
@@ -247,7 +243,6 @@ PHYSICAL_ENTITY_SPECS = {
         "CCTV_REVIEW_PIPES",
         PIPE_COLUMNS,
         110,
-        "RPT5W1C0",
         integer_columns=frozenset({"id", "report_id", "clogging_percent"}),
         real_columns=frozenset({"clogging_frame_seconds"}),
         indexes=(
@@ -260,7 +255,6 @@ PHYSICAL_ENTITY_SPECS = {
         "CCTV_REVIEW_DISTANCE_GROUPS",
         DISTANCE_GROUP_COLUMNS,
         120,
-        "RPT5W1C0",
         integer_columns=frozenset({"id", "report_id", "pipe_review_id", "am_score", "no_am_score_ge_3_confirmed"}),
         real_columns=frozenset({"distance_feet"}),
         boolean_columns=frozenset({"no_am_score_ge_3_confirmed"}),
@@ -274,7 +268,6 @@ PHYSICAL_ENTITY_SPECS = {
         "CCTV_REVIEW_OBSERVATIONS",
         OBSERVATION_COLUMNS,
         130,
-        "RPT5W1C0",
         integer_columns=frozenset({"id", "report_id", "pipe_review_id", "distance_group_id", "is_extensive"}),
         real_columns=frozenset({"distance_feet"}),
         boolean_columns=frozenset({"is_extensive"}),
@@ -289,7 +282,6 @@ PHYSICAL_ENTITY_SPECS = {
         "SYS_RESOURCE_REVIEW_EVENTS",
         REVIEW_EVENT_COLUMNS,
         140,
-        SYSTEM_RESOURCE_ID,
         integer_columns=frozenset({"resource_id", "actor_user_id"}),
         indexes=(
             (
@@ -329,7 +321,6 @@ PHYSICAL_ENTITY_SPECS = {
         "AIF_PROACTIVE_INSPECTIONS",
         AIF_PROACTIVE_INSPECTION_COLUMNS,
         150,
-        SYSTEM_RESOURCE_ID,
         integer_columns=frozenset({"inspection_direction"}),
         real_columns=frozenset({"defect_stationing", "clogging"}),
         datetime_columns=frozenset({
@@ -349,7 +340,6 @@ PHYSICAL_ENTITY_SPECS = {
         "PORTAL_USER_FAVORITES",
         USER_FAVORITE_COLUMNS,
         160,
-        SYSTEM_RESOURCE_ID,
         integer_columns=frozenset({"owner_user_id", "sort_order"}),
         datetime_columns=frozenset({"created_at", "updated_at"}),
         indexes=(
@@ -363,7 +353,6 @@ PHYSICAL_ENTITY_SPECS = {
         "MLO",
         MLO_COLUMNS,
         400,
-        "RPT5W1C0",
         real_columns=frozenset(
             {
                 "Distance",
@@ -387,7 +376,6 @@ PHYSICAL_ENTITY_SPECS = {
         "Media",
         MEDIA_COLUMNS,
         410,
-        "RPT5W1C0",
         boolean_columns=frozenset({"MediaExists"}),
         indexes=(("Media_ID", ("Media_ID",), True),),
     ),
@@ -396,7 +384,6 @@ PHYSICAL_ENTITY_SPECS = {
         "MLO_Media",
         MLO_MEDIA_COLUMNS,
         420,
-        "RPT5W1C0",
         indexes=(
             ("Media_ID", ("Media_ID",), False),
             ("MLO_ID", ("MLO_ID",), False),
@@ -412,7 +399,6 @@ PHYSICAL_ENTITY_SPECS = {
             "updated_by_user_id", "updated_by_name", "updated_at",
         ),
         200,
-        "ADMBSHVR",
         integer_columns=frozenset({"calendar_year", "created_by_user_id", "updated_by_user_id"}),
         indexes=(("year", ("calendar_year",), True),),
     ),
@@ -426,7 +412,6 @@ PHYSICAL_ENTITY_SPECS = {
             "updated_by_user_id", "updated_by_name", "updated_at",
         ),
         210,
-        "ADMBSHVR",
         integer_columns=frozenset({"created_by_user_id", "updated_by_user_id"}),
         real_columns=frozenset({"holiday_hours"}),
         boolean_columns=frozenset({"applies_to_weekly_target", "extends_deliverable_deadline", "is_active"}),
@@ -445,7 +430,6 @@ PHYSICAL_ENTITY_SPECS = {
             "submitted_target_hours", "submitted_schedule_days",
         ),
         300,
-        "RPT7K2M9",
         integer_columns=frozenset({"user_id", "team_id", "reviewed_by_user_id"}),
         real_columns=frozenset({"submitted_target_hours", *SCHEDULE_DAY_COLUMNS}),
         sequence_columns=(("submitted_schedule_days", SCHEDULE_DAY_COLUMNS),),
@@ -462,7 +446,6 @@ PHYSICAL_ENTITY_SPECS = {
             "hours", "start_time", "end_time", "notes", "created_at", "updated_at",
         ),
         310,
-        "RPT7K2M9",
         integer_columns=frozenset({"user_id"}),
         real_columns=frozenset({"hours"}),
         indexes=(
@@ -479,7 +462,6 @@ PHYSICAL_ENTITY_SPECS = {
             "submitted_at", "reviewed_at", "reviewed_by_user_id", "reviewed_by_name", "review_comments",
         ),
         320,
-        "RPT7K2M9",
         integer_columns=frozenset({"user_id", "team_id", "reviewed_by_user_id"}),
         real_columns=frozenset(DAY_HOUR_COLUMNS),
         sequence_columns=(("daily_hours", DAY_HOUR_COLUMNS),),
@@ -496,7 +478,6 @@ PHYSICAL_ENTITY_SPECS = {
             "approved_by_user_id", "approved_by_name", "approved_at",
         ),
         330,
-        "RPT7K2M9",
         integer_columns=frozenset({"user_id", "approved_by_user_id"}),
         real_columns=frozenset(DAY_HOUR_COLUMNS),
         sequence_columns=(("daily_hours", DAY_HOUR_COLUMNS),),
@@ -513,7 +494,6 @@ PHYSICAL_ENTITY_SPECS = {
             "from_status", "to_status", "memo", "actor_user_id", "actor_name", "event_at",
         ),
         340,
-        "RPT7K2M9",
         integer_columns=frozenset({"subject_user_id", "actor_user_id"}),
         indexes=(
             ("submission_time", ("submission_id", "event_at"), False),
@@ -676,14 +656,6 @@ def validate_physical_registry(
             errors.append(f"Registry key {key!r} does not match {spec.entity_type!r}.")
         if not MANAGED_ENTITY_TYPE_PATTERN.fullmatch(spec.entity_type):
             errors.append(f"Invalid managed entity type: {spec.entity_type!r}.")
-        valid_resource_id = (
-            spec.resource_id == SYSTEM_RESOURCE_ID
-            or RESOURCE_ID_PATTERN.fullmatch(spec.resource_id)
-        )
-        if not valid_resource_id:
-            errors.append(f"Invalid resource ID for {spec.entity_type}: {spec.resource_id!r}.")
-        elif not spec.entity_type.startswith(f"{spec.resource_id}."):
-            errors.append(f"Resource ID does not own entity type {spec.entity_type!r}.")
         if not SQL_IDENTIFIER_PATTERN.fullmatch(spec.table):
             errors.append(f"Invalid physical table name: {spec.table!r}.")
         elif spec.table in tables:

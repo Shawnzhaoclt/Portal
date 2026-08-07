@@ -3,9 +3,150 @@ from __future__ import annotations
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portal.app.management.models import CodeDictionary, CodeDictionaryItem, Resource
+from portal.app.management.models import (
+    CodeDictionary,
+    CodeDictionaryItem,
+    Resource,
+    ResourcePermission,
+    TeamFeaturedResource,
+    UserFeaturedResource,
+)
 from portal.app.management.resource_ids import normalize_resource_id, resource_id_validation_error
+from portal.app.resources.aliases import (
+    CRITICAL_TEAM_DASHBOARD_LEGACY_RESOURCE_IDS,
+    CRITICAL_TEAM_DASHBOARD_RESOURCE_ID,
+    CRITICAL_TEAM_TABLES_LEGACY_RESOURCE_IDS,
+    CRITICAL_TEAM_TABLES_RESOURCE_ID,
+)
 from portal.app.resources.metadata import load_resource_metadata
+
+
+def _merge_featured_resource_rows(
+    db: Session,
+    model: type[TeamFeaturedResource] | type[UserFeaturedResource],
+    owner_field: str,
+    canonical_resource: Resource,
+    legacy_resources: list[Resource],
+) -> None:
+    resource_record_ids = [canonical_resource.id, *(resource.id for resource in legacy_resources)]
+    rows = db.scalars(
+        select(model).where(model.resource_record_id.in_(resource_record_ids))
+    ).all()
+    groups: dict[tuple[int, str], list[TeamFeaturedResource | UserFeaturedResource]] = {}
+    for row in rows:
+        groups.setdefault((int(getattr(row, owner_field)), str(row.category)), []).append(row)
+
+    for group_rows in groups.values():
+        group_rows.sort(key=lambda row: (int(row.sort_order), int(row.id)))
+        canonical_row = next(
+            (
+                row
+                for row in group_rows
+                if row.resource_record_id == canonical_resource.id
+            ),
+            None,
+        )
+        retained = canonical_row or group_rows[0]
+        retained.sort_order = min(int(row.sort_order) for row in group_rows)
+        for row in group_rows:
+            if row is not retained:
+                db.delete(row)
+        db.flush()
+        retained.resource_record_id = canonical_resource.id
+
+
+def _consolidate_resource_group(
+    db: Session,
+    canonical_resource_id: str,
+    legacy_resource_ids: tuple[str, ...],
+) -> None:
+    canonical_resource = db.scalar(
+        select(Resource).where(
+            Resource.resource_id == canonical_resource_id
+        )
+    )
+    if canonical_resource is None:
+        return
+
+    legacy_resources = db.scalars(
+        select(Resource).where(
+            Resource.resource_id.in_(legacy_resource_ids)
+        )
+    ).all()
+    if not legacy_resources:
+        return
+
+    merged_resource_ids = {
+        canonical_resource_id,
+        *(resource.resource_id for resource in legacy_resources),
+    }
+    permissions = db.scalars(
+        select(ResourcePermission).where(
+            ResourcePermission.resource_id.in_(merged_resource_ids)
+        )
+    ).all()
+    permission_groups: dict[
+        tuple[int | None, int | None], list[ResourcePermission]
+    ] = {}
+    for permission in permissions:
+        permission_groups.setdefault(
+            (permission.user_id, permission.team_id), []
+        ).append(permission)
+
+    for group_permissions in permission_groups.values():
+        group_permissions.sort(key=lambda permission: int(permission.id))
+        canonical_permission = next(
+            (
+                permission
+                for permission in group_permissions
+                if permission.resource_id == canonical_resource_id
+            ),
+            None,
+        )
+        retained = canonical_permission or group_permissions[0]
+        permission_mask = 0
+        for permission in group_permissions:
+            permission_mask |= int(permission.permission_level)
+            if permission is not retained:
+                db.delete(permission)
+        db.flush()
+        retained.resource_id = canonical_resource_id
+        retained.permission_level = permission_mask
+
+    _merge_featured_resource_rows(
+        db,
+        TeamFeaturedResource,
+        "team_id",
+        canonical_resource,
+        legacy_resources,
+    )
+    _merge_featured_resource_rows(
+        db,
+        UserFeaturedResource,
+        "user_id",
+        canonical_resource,
+        legacy_resources,
+    )
+
+    for resource in legacy_resources:
+        db.delete(resource)
+    db.flush()
+
+
+def consolidate_critical_team_dashboard_resources(db: Session) -> None:
+    _consolidate_resource_group(
+        db,
+        CRITICAL_TEAM_DASHBOARD_RESOURCE_ID,
+        CRITICAL_TEAM_DASHBOARD_LEGACY_RESOURCE_IDS,
+    )
+
+
+def consolidate_critical_team_table_resources(db: Session) -> None:
+    _consolidate_resource_group(
+        db,
+        CRITICAL_TEAM_TABLES_RESOURCE_ID,
+        CRITICAL_TEAM_TABLES_LEGACY_RESOURCE_IDS,
+    )
 
 
 def seed_resources(db: Session) -> None:
@@ -103,4 +244,6 @@ def initialize_management_database() -> None:
     create_management_schema()
     with session_scope() as db:
         seed_resources(db)
+        consolidate_critical_team_dashboard_resources(db)
+        consolidate_critical_team_table_resources(db)
         seed_system_dictionaries(db)

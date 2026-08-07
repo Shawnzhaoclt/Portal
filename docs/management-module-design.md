@@ -95,7 +95,7 @@ Each Portal item should have one resource record.
 Examples:
 
 ```text
-/dashboard_critical_team_overview
+/dashboard_critical_team
 /map_stm_risk
 /tab_asset_inventory
 /doc_cctv_review_guide

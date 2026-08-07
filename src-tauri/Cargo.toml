@@ -32,7 +32,7 @@ tauri = { version = "2", features = [] }
 url = "2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [patch.crates-io]
 # The corporate proxy resets this generated bindings crate on static.crates.io.

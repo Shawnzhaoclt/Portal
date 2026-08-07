@@ -193,14 +193,14 @@ metadata.
 ### 4.3 Platform-Wide Table Registration and Add Table Workflow
 
 The physical-table rule applies to all current and future business tables, not only
-the CCTV review tables. Physical names use stable business-domain prefixes and do not
-embed resource IDs. Ownership is recorded separately through stable `table_id` and
-`resource_id` catalog fields.
+the CCTV review tables. Physical names use stable business-domain terms. The schema
+catalog describes database structure only; it does not model which Portal resources
+read or write a table.
 
 Portal Workstation Manager must provide an **Add table** action on the Schema page. The
 action opens a typed table designer containing:
 
-- stable logical table ID and owning resource;
+- application-generated opaque table identity, maintained internally and never typed by an administrator;
 - physical table name, validated against the domain-prefix convention;
 - business fields, SQLite affinities, nullability, defaults, and business keys;
 - indexes, unique constraints, foreign keys, dependency order, and delete policy;
@@ -216,7 +216,7 @@ A new resource must complete this workflow before its first formal save is enabl
 1. Create the table draft in Portal Workstation Manager. Until the Manager designer is
    implemented, add one reviewed `PhysicalEntitySpec` to the packaged registry in
    `python/portal/app/sync/physical_entities.py`. The specification must define a stable
-   entity type, resource ownership, domain-prefixed physical table name, logical
+   entity type, domain-prefixed physical table name, logical
    columns, SQLite types, dependency order, delete behavior, and required indexes.
    Sequence fields are expanded into explicitly typed physical columns.
 2. Add the entity's trusted application/repository adapter. It may use the generic
@@ -311,7 +311,7 @@ The Schema page edits a versioned desired catalog rather than the live business 
 The editor provides:
 
 - an **Add table** action and typed table designer;
-- a table tree showing physical table name, stable entity key, ownership resource,
+- a table tree showing physical table name, application-maintained stable identity,
   row-volume estimate, geometry metadata, and current indexes;
 - explicit **Rename table**, **Deprecate table**, and guarded **Remove table** actions;
 - a field editor for name, SQLite affinity, nullability, default, uniqueness, and
@@ -425,7 +425,7 @@ fatal.
 - entity type and physical table name;
 - attribute/spatial table kind;
 - synchronization and delete policies;
-- ownership, permission, and reducer policy.
+- synchronization, conflict, and reducer policy.
 
 ### `SYS_SCHEMA_FIELDS`
 
@@ -650,5 +650,6 @@ The module is ready for production only when:
 - no resource or shared file can execute unregistered DDL or migration code;
 - the Manager supports typed Add Table, Rename Table, and Rename Field drafts without
   accepting arbitrary SQL;
-- physical table names use stable business-domain prefixes and do not embed resource
-  IDs, while stable logical table/field IDs preserve ownership and references.
+- physical table names use stable business-domain terms, while opaque table and field
+  identities are generated and maintained by the application to preserve references
+  across table and field renames.

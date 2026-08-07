@@ -7,6 +7,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Mutex, OnceLock},
     thread,
+    time::Duration,
 };
 use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, StatusCode};
 
@@ -15,20 +16,53 @@ mod business_sync;
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::Foundation::SYSTEMTIME;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
-const SYSTEM_DATABASE_WRITER_EMAIL: &str = "shawn.zhao@charlottenc.gov";
+const MAINTENANCE_SPLASH_DURATION: Duration = Duration::from_secs(15);
+const MAINTENANCE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 
-fn configure_system_database_access(
-    system_database: &Path,
-    windows_email: &str,
-) -> Result<bool, String> {
-    let writable = windows_email
-        .trim()
-        .eq_ignore_ascii_case(SYSTEM_DATABASE_WRITER_EMAIL);
+fn is_scheduled_maintenance_hour(hour: u16) -> bool {
+    hour >= 20 || hour < 5
+}
+
+#[cfg(target_os = "windows")]
+fn local_hour() -> Option<u16> {
+    let mut local_time: SYSTEMTIME = unsafe { std::mem::zeroed() };
+    unsafe { GetLocalTime(&mut local_time) };
+    Some(local_time.wHour)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn local_hour() -> Option<u16> {
+    None
+}
+
+fn start_maintenance_exit_monitor(app: tauri::AppHandle) {
+    thread::spawn(move || {
+        if local_hour().is_some_and(is_scheduled_maintenance_hour) {
+            thread::sleep(MAINTENANCE_SPLASH_DURATION);
+            app.exit(0);
+            return;
+        }
+
+        loop {
+            thread::sleep(MAINTENANCE_MONITOR_INTERVAL);
+            if local_hour().is_some_and(is_scheduled_maintenance_hour) {
+                app.exit(0);
+                return;
+            }
+        }
+    });
+}
+
+fn configure_system_database_access(system_database: &Path) -> Result<(), String> {
     let metadata = fs::metadata(system_database).map_err(|error| {
         format!(
             "Could not read the Portal system database at {}: {error}",
@@ -36,14 +70,14 @@ fn configure_system_database_access(
         )
     })?;
     let mut permissions = metadata.permissions();
-    permissions.set_readonly(!writable);
+    permissions.set_readonly(true);
     fs::set_permissions(system_database, permissions).map_err(|error| {
         format!(
             "Could not set access for the Portal system database at {}: {error}",
             system_database.display()
         )
     })?;
-    Ok(writable)
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -295,8 +329,7 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
     let business_database =
         business_sync::local_business_database_path(&config_file, &application_root, &data_root)?;
     let windows_identity = windows_identity()?;
-    let system_database_writable =
-        configure_system_database_access(&system_database, &windows_identity.email)?;
+    configure_system_database_access(&system_database)?;
     let business_sync = business_sync::load_paths(&config_file, &application_root, &data_root)?;
     let mut command = Command::new(&worker);
     command
@@ -310,10 +343,7 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
         .env("PORTAL_WINDOWS_EMPLOYEE_ID", &windows_identity.employee_id)
         .env("PORTAL_WINDOWS_ACCOUNT", &windows_identity.account)
         .env("PORTAL_SYSTEM_DB", &system_database)
-        .env(
-            "PORTAL_SYSTEM_DB_WRITE_ENABLED",
-            if system_database_writable { "1" } else { "0" },
-        )
+        .env("PORTAL_SYSTEM_DB_WRITE_ENABLED", "0")
         .env("PORTAL_BUSINESS_DB", business_database)
         .env("PORTAL_MANAGEMENT_DB", &system_database)
         .stdin(Stdio::piped())
@@ -1112,7 +1142,7 @@ async fn desktop_startup_session() -> Result<DesktopStartupSession, String> {
 
 #[tauri::command]
 fn exit_application(app: tauri::AppHandle) {
-    app.exit(1);
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -1281,6 +1311,10 @@ async fn python_request(request: serde_json::Value) -> Result<serde_json::Value,
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            start_maintenance_exit_monitor(app.handle().clone());
+            Ok(())
+        })
         .register_uri_scheme_protocol("portal-data", |_context, request| {
             local_protocol_response(request)
         })
@@ -1298,4 +1332,46 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running the Portal desktop application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configure_system_database_access, is_scheduled_maintenance_hour};
+    use std::{env, fs, process, time::SystemTime};
+
+    #[test]
+    fn scheduled_maintenance_spans_eight_pm_through_five_am() {
+        assert!(is_scheduled_maintenance_hour(20));
+        assert!(is_scheduled_maintenance_hour(23));
+        assert!(is_scheduled_maintenance_hour(0));
+        assert!(is_scheduled_maintenance_hour(4));
+        assert!(!is_scheduled_maintenance_hour(5));
+        assert!(!is_scheduled_maintenance_hour(19));
+    }
+
+    #[test]
+    fn desktop_system_database_is_always_read_only() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let database = env::temp_dir().join(format!(
+            "portal-desktop-system-db-test-{}-{unique}.db",
+            process::id()
+        ));
+        fs::write(&database, b"published-system-catalog").expect("test database");
+
+        configure_system_database_access(&database).expect("read-only configuration");
+
+        assert!(fs::metadata(&database)
+            .expect("database metadata")
+            .permissions()
+            .readonly());
+        let mut permissions = fs::metadata(&database)
+            .expect("cleanup metadata")
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&database, permissions).expect("cleanup permissions");
+        fs::remove_file(database).expect("test cleanup");
+    }
 }

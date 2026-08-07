@@ -12,6 +12,7 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { formatDateTime } from '../lib/dateTime'
 import {
   createDictionary,
   createDictionaryItem,
@@ -49,13 +50,7 @@ function suggestedCode(value: string) {
 }
 
 function formatTimestamp(value: string) {
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(parsed)
+  return formatDateTime(value, value)
 }
 
 export default function DictionaryPanel() {

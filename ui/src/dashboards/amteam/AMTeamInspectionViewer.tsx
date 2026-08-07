@@ -17,6 +17,7 @@ import {
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 import {
   fetchAmTeamObservations,
   fetchAmTeamObservationsBatch,
@@ -310,9 +311,7 @@ function displayValue(value: AmTeamCellValue | undefined) {
 function compactDate(value: AmTeamCellValue | undefined) {
   const text = displayValue(value)
   if (text === '-') return text
-  const date = new Date(text)
-  if (Number.isNaN(date.getTime())) return text
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })
+  return formatDateOnly(text, text)
 }
 
 function recordId(value: AmTeamCellValue | undefined) {
@@ -576,9 +575,7 @@ function inspectionDateKey(value: AmTeamCellValue | undefined) {
 
 function inspectionDateLabelFromKey(key: string) {
   if (!key) return '-'
-  const date = new Date(`${key}T00:00:00`)
-  if (Number.isNaN(date.getTime())) return key
-  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: '2-digit' })
+  return formatDateOnly(key, key)
 }
 
 function inspectionDateTimeFromKey(key: string) {
@@ -1309,7 +1306,7 @@ async function buildReviewReportFile({
   const reportTitle = `[${reportTitleAddress(firstInspection?.street)}] - CCTV Review`
 
   addParagraph(reportTitle, { bold: true, fontSize: 16, outlineLevel: 1, alignment: 'center' })
-  addParagraph(`Generated: ${new Date().toLocaleString()}`)
+  addParagraph(`Generated: ${formatDateTime(new Date())}`)
   addParagraph('')
 
   const reportPipeGroups = sortedPipeGroupsForReport(

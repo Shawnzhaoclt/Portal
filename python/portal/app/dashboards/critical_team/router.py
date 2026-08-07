@@ -4,6 +4,7 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
+from functools import lru_cache
 from typing import Any, Iterator
 
 import duckdb
@@ -47,6 +48,7 @@ CRITICAL_TEAM_WORKORDER_SORT_EXPRESSIONS = {
     "inspection_complete_date": "inspection_complete_date",
     "report_complete_date": "report_complete_date",
     "wo_closed_date": "wo_closed_date",
+    "condition_risk": "condition_risk",
 }
 CRITICAL_TEAM_DEFAULT_YEARS = [str(date.today().year - 1), str(date.today().year)]
 CRITICAL_TEAM_OVERVIEW_SERIES = [
@@ -213,6 +215,33 @@ def normalize_facility_id(value: Any) -> str:
     return str(value).strip()
 
 
+@lru_cache(maxsize=16)
+def snapshot_table_exists(database_path: str, modified_ns: int, table_name: str) -> bool:
+    del modified_ns  # The value invalidates the cache when a version changes in place.
+    connection = sqlite3.connect(database_path)
+    connection.execute("PRAGMA query_only = ON")
+    try:
+        return connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('table', 'view') AND name = ? LIMIT 1",
+            [table_name],
+        ).fetchone() is not None
+    finally:
+        connection.close()
+
+
+def critical_team_uses_serving_tables(source: CriticalTeamDataSource | None = None) -> bool:
+    source = source or critical_team_data_source()
+    try:
+        database = source.database
+        return snapshot_table_exists(
+            str(database),
+            database.stat().st_mtime_ns,
+            source.critical_workorders_serving_table,
+        )
+    except (OSError, sqlite3.Error):
+        return False
+
+
 @contextmanager
 def critical_team_connection() -> Iterator[sqlite3.Connection]:
     source = critical_team_data_source()
@@ -240,6 +269,27 @@ def critical_team_connection() -> Iterator[sqlite3.Connection]:
 
 def critical_team_source_cte(source: CriticalTeamDataSource | None = None) -> str:
     source = source or critical_team_data_source()
+    if critical_team_uses_serving_tables(source):
+        table = duck_identifier(source.critical_workorders_serving_table)
+        return f"""
+            WITH critical_team_workorders AS (
+                SELECT
+                    workorder_id,
+                    workorders_id,
+                    description,
+                    submit_to,
+                    wo_closed_by,
+                    status,
+                    project_start_date,
+                    wo_closed_date,
+                    facility_id,
+                    inspection_complete_date,
+                    report_complete_date,
+                    critical_team_status,
+                    condition_risk
+                FROM {table}
+            )
+        """
     workorder_table = duck_identifier(source.workorder_table)
     wocustfield_table = duck_identifier(source.wocustfield_table)
 
@@ -269,7 +319,8 @@ def critical_team_source_cte(source: CriticalTeamDataSource | None = None) -> st
                 CAST(cf.FACILITY_ID AS varchar(255)) AS facility_id,
                 PORTAL_DATE(cf.INSP_COMP_DATE) AS inspection_complete_date,
                 PORTAL_DATE(cf.REPORT_COMP_DATE) AS report_complete_date,
-                CAST(cf.CRITICAL_TEAM_STATUS AS varchar(255)) AS critical_team_status
+                CAST(cf.CRITICAL_TEAM_STATUS AS varchar(255)) AS critical_team_status,
+                CAST(NULL AS real) AS condition_risk
             FROM {workorder_table} AS wo
             LEFT JOIN custom_fields AS cf
                 ON cf.WORKORDERID = wo.WORKORDERID
@@ -280,6 +331,8 @@ def critical_team_source_cte(source: CriticalTeamDataSource | None = None) -> st
 
 def critical_team_base_params(source: CriticalTeamDataSource | None = None) -> list[Any]:
     source = source or critical_team_data_source()
+    if critical_team_uses_serving_tables(source):
+        return []
     return [source.description_filter]
 
 
@@ -1185,6 +1238,7 @@ def critical_team_workorders(
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
     source = critical_team_data_source()
+    uses_serving_tables = critical_team_uses_serving_tables(source)
     clauses = []
     params: list[Any] = []
 
@@ -1279,13 +1333,21 @@ def critical_team_workorders(
 
     add_number_filter("workorders_id", workorder_id_mode, workorder_id_from, workorder_id_to)
     add_number_filter("PORTAL_INT(facility_id)", facility_id_mode, facility_id_from, facility_id_to)
-    add_facility_id_set_filter(
-        critical_facility_ids_for_condition_risk_filter(
+    if uses_serving_tables:
+        add_number_filter(
+            "condition_risk",
             condition_risk_mode,
             condition_risk_from,
             condition_risk_to,
         )
-    )
+    else:
+        add_facility_id_set_filter(
+            critical_facility_ids_for_condition_risk_filter(
+                condition_risk_mode,
+                condition_risk_from,
+                condition_risk_to,
+            )
+        )
     add_category_filter("submit_to", submit_to_filter)
     add_category_filter("wo_closed_by", wo_closed_by_filter)
     add_category_filter("critical_team_status", critical_team_status_filter)
@@ -1328,7 +1390,8 @@ def critical_team_workorders(
                 project_start_date,
                 inspection_complete_date,
                 report_complete_date,
-                wo_closed_date
+                wo_closed_date,
+                condition_risk
     """
 
     with critical_team_connection() as con:
@@ -1340,7 +1403,7 @@ def critical_team_workorders(
             """,
             [*critical_team_base_params(source), *params],
         ).fetchone()[0])
-        if sort_by == "condition_risk":
+        if sort_by == "condition_risk" and not uses_serving_tables:
             names, rows = fetch_all(
                 cursor,
                 f"""
@@ -1370,8 +1433,9 @@ def critical_team_workorders(
             )
 
     records = [clean_record(dict(zip(names, row))) for row in rows]
-    records = attach_condition_risk_to_workorders(records)
-    if sort_by == "condition_risk":
+    if not uses_serving_tables:
+        records = attach_condition_risk_to_workorders(records)
+    if sort_by == "condition_risk" and not uses_serving_tables:
         records = sort_workorders_by_condition_risk(records, sort_dir)[offset:offset + limit]
     workorder_url_template = str(portal_env("PORTAL_CITYWORKS_WORKORDER_URL_TEMPLATE") or "")
     for record in records:

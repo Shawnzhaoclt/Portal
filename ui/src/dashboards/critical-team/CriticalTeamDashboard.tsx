@@ -40,6 +40,7 @@ import {
 import './CriticalTeamDashboard.css'
 import { EChart, type EChartHandle } from '../../EChart'
 import { openExternalUrl } from '../../desktop/runtime'
+import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
@@ -49,7 +50,9 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import {
   Select,
   SelectContent,
+  SelectGroup,
   SelectItem,
+  SelectLabel,
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
@@ -260,6 +263,20 @@ const SHEETS: SheetDefinition[] = [
   },
 ]
 
+const CRITICAL_TEAM_DASHBOARD_SHEET_IDS = new Set([
+  'overview',
+  'insp-proj-start-date',
+  'insp-comp-date-bar-chart',
+  'report-comp-date-chart',
+  'insp-comp-date-reviews',
+])
+const CRITICAL_TEAM_TABLE_SHEET_IDS = new Set([
+  'workorders',
+  'insp-comp-date-table',
+  'report-comp-date-table',
+  'insp-comp-date-reviews-table',
+])
+
 const SUBMIT_TO_SCOPED_SHEET_IDS = new Set([
   'insp-proj-start-date',
   'insp-comp-date-bar-chart',
@@ -278,7 +295,9 @@ function initialSheetIdFromUrl(initialSheetId?: string) {
   const requestedPathSheetId = criticalTeamSheetIdFromPath(window.location.pathname)
   if (requestedPathSheetId) return requestedPathSheetId
   const requestedSheetId = new URLSearchParams(window.location.search).get('sheet')
-  return SHEETS.some((sheet) => sheet.id === requestedSheetId) ? requestedSheetId : 'overview'
+  return requestedSheetId && SHEETS.some((sheet) => sheet.id === requestedSheetId)
+    ? requestedSheetId
+    : 'overview'
 }
 
 function syncSheetIdToUrl(sheetId: string) {
@@ -409,24 +428,15 @@ function valueText(value: AssetRow[string], column?: DetailColumnKey) {
     return formatNumber(value)
   }
   if (/^\d{4}-\d{2}-\d{2}/.test(value)) {
-    return value.slice(0, 10)
+    return formatDateOnly(value, value)
   }
   return value
 }
 
 function formatSourceTimestamp(value: string | null | undefined) {
   if (!value) return null
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return null
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    month: 'short',
-    day: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZoneName: 'short',
-  }).format(date)
+  const formatted = formatDateTime(value, '')
+  return formatted || null
 }
 
 function workOrderStatusClass(value: AssetRow[string]) {
@@ -574,15 +584,7 @@ function workOrderHref(row: AssetRow) {
 }
 
 function formatExcelGeneratedAt(date: Date) {
-  const parts = [
-    date.getMonth() + 1,
-    date.getDate(),
-    date.getFullYear(),
-    date.getHours(),
-    date.getMinutes(),
-    date.getSeconds(),
-  ].map((value, index) => (index === 2 ? String(value) : String(value).padStart(2, '0')))
-  return `${parts[0]}-${parts[1]}-${parts[2]}, ${parts[3]}:${parts[4]}:${parts[5]}`
+  return formatDateTime(date)
 }
 
 function xlsxTextCell(columnIndex: number, rowIndex: number, value: string) {
@@ -1884,7 +1886,9 @@ type CriticalTeamDashboardProps = {
 }
 
 function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
-  const [selectedSheetId, setSelectedSheetId] = useState(() => initialSheetIdFromUrl(initialSheetId))
+  const initialSelection = useMemo(() => initialSheetIdFromUrl(initialSheetId), [initialSheetId])
+  const resourceMode = CRITICAL_TEAM_TABLE_SHEET_IDS.has(initialSelection) ? 'tables' : 'dashboard'
+  const [selectedSheetId, setSelectedSheetId] = useState(initialSelection)
   const [filters, setFilters] = useState<CriticalTeamFilters>(INITIAL_FILTERS)
   const [overviewFilters, setOverviewFilters] = useState<CriticalTeamOverviewFilters>(
     createDefaultOverviewFilters,
@@ -1906,7 +1910,16 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
   const [loadingSheet, setLoadingSheet] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const selectedSheet = SHEETS.find((sheet) => sheet.id === selectedSheetId) ?? SHEETS[1]
+  const availableSheets = useMemo(
+    () =>
+      SHEETS.filter((sheet) =>
+        resourceMode === 'tables'
+          ? CRITICAL_TEAM_TABLE_SHEET_IDS.has(sheet.id)
+          : CRITICAL_TEAM_DASHBOARD_SHEET_IDS.has(sheet.id),
+      ),
+    [resourceMode],
+  )
+  const selectedSheet = availableSheets.find((sheet) => sheet.id === selectedSheetId) ?? availableSheets[0]
   const sheetConfig = source?.sheets[selectedSheet.id]
 
   useEffect(() => {
@@ -2025,11 +2038,21 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
   }, [selectedSheet.kind, details, detailPage, detailPageSize])
 
   const sheetGroups = useMemo(() => {
-    return SHEETS.reduce<Record<string, SheetDefinition[]>>((groups, sheet) => {
+    return availableSheets.reduce<Record<string, SheetDefinition[]>>((groups, sheet) => {
       groups[sheet.category] = [...(groups[sheet.category] ?? []), sheet]
       return groups
     }, {})
-  }, [])
+  }, [availableSheets])
+
+  function selectSheet(sheetId: string) {
+    if (!availableSheets.some((sheet) => sheet.id === sheetId)) return
+    setSelectedSheetId(sheetId)
+    setDetailPage(1)
+    setDetailColumnFilters(createEmptyDetailColumnFilters())
+    setDetailSort(DEFAULT_DETAIL_SORT)
+    setFilters(INITIAL_FILTERS)
+    setOverviewFilters(createDefaultOverviewFilters())
+  }
 
   function updateFilters(next: CriticalTeamFilters | ((current: CriticalTeamFilters) => CriticalTeamFilters)) {
     setDetailPage(1)
@@ -2188,14 +2211,7 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
                   key={sheet.id}
                   className={selectedSheet.id === sheet.id ? 'active' : ''}
                   type="button"
-                  onClick={() => {
-                    setSelectedSheetId(sheet.id)
-                    setDetailPage(1)
-                    setDetailColumnFilters(createEmptyDetailColumnFilters())
-                    setDetailSort(DEFAULT_DETAIL_SORT)
-                    setFilters(INITIAL_FILTERS)
-                    setOverviewFilters(createDefaultOverviewFilters())
-                  }}
+                  onClick={() => selectSheet(sheet.id)}
                 >
                   {sheet.kind === 'chart' ? <BarChart3 size={16} /> : null}
                   {sheet.kind === 'table' ? <Table2 size={16} /> : null}
@@ -2210,6 +2226,39 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
       </aside>
 
       <main className="sheet-canvas">
+        <div className="critical-team-view-toolbar">
+          <div className="critical-team-view-context">
+            {resourceMode === 'tables' ? <Table2 size={18} /> : <LayoutDashboard size={18} />}
+            <div>
+              <span>{resourceMode === 'tables' ? 'Critical Team Tables' : 'Critical Team Dashboard'}</span>
+              <strong>{selectedSheet.title}</strong>
+            </div>
+          </div>
+          <div className="critical-team-view-picker">
+            <span>View</span>
+            <Select value={selectedSheet.id} onValueChange={selectSheet}>
+              <SelectTrigger className="critical-team-view-trigger" aria-label="Select Critical Team view">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent align="end">
+                {Object.entries(sheetGroups).map(([group, sheets]) => (
+                  <SelectGroup key={group}>
+                    <SelectLabel>{group}</SelectLabel>
+                    {sheets.map((sheet) => (
+                      <SelectItem key={sheet.id} value={sheet.id}>
+                        {sheet.kind === 'chart' ? <BarChart3 size={15} /> : null}
+                        {sheet.kind === 'table' ? <Table2 size={15} /> : null}
+                        {sheet.kind === 'overview' ? <LayoutDashboard size={15} /> : null}
+                        {sheet.kind === 'details' ? <ClipboardList size={15} /> : null}
+                        {sheet.title}
+                      </SelectItem>
+                    ))}
+                  </SelectGroup>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        </div>
         {/*
               {selectedSheet.kind} · {sheetConfig?.date_key ?? 'source'}
         */}

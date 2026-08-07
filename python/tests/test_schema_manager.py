@@ -60,6 +60,39 @@ def test_initialize_validate_and_plan(tmp_path: Path) -> None:
     with sqlite3.connect(business) as connection:
         history = connection.execute("SELECT migration_id, status FROM SW_SCHEMA_MIGRATION_HISTORY").fetchall()
     assert history == [(dated_migration_id(published_at), "installed")]
+    with sqlite3.connect(system) as connection:
+        schema_table_columns = {
+            row[1] for row in connection.execute('PRAGMA table_info("SYS_SCHEMA_TABLES")')
+        }
+    assert "resource_id" not in schema_table_columns
+    assert all("resource_id" not in table for table in registered_business_catalog(system)["tables"])
+
+
+def test_registration_removes_legacy_schema_ownership_column(tmp_path: Path) -> None:
+    system = tmp_path / "system.db"
+    business = tmp_path / "stormwater.db"
+    _create_business_database(business)
+    register_business_schema(system, business)
+
+    with sqlite3.connect(system) as connection:
+        connection.execute(
+            "ALTER TABLE SYS_SCHEMA_TABLES ADD COLUMN resource_id TEXT NOT NULL DEFAULT 'legacy'"
+        )
+        connection.commit()
+
+    register_business_schema(
+        system,
+        business,
+        release_id="legacy-compatible-release",
+        migration_id="LEGACY_COMPATIBLE_MIGRATION",
+    )
+
+    with sqlite3.connect(system) as connection:
+        schema_table_columns = {
+            row[1] for row in connection.execute('PRAGMA table_info("SYS_SCHEMA_TABLES")')
+        }
+    assert "resource_id" not in schema_table_columns
+    assert all("resource_id" not in table for table in registered_business_catalog(system)["tables"])
 
 
 def test_validate_detects_missing_registered_table(tmp_path: Path) -> None:
@@ -391,14 +424,13 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
     add_operations = [
         {
             "kind": "add_table",
-            "table_id": "SYS.schema_test_item",
-            "resource_id": "SYS",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "physical_table": "SCHEMA_TEST_ITEMS",
             "dependency_order": 900,
         },
         {
             "kind": "add_column",
-            "table_id": "SYS.schema_test_item",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "column": "item_name",
             "sqlite_type": "TEXT",
             "nullable": True,
@@ -406,7 +438,7 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
         },
         {
             "kind": "create_index",
-            "table_id": "SYS.schema_test_item",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "index": "IX_SCHEMA_TEST_ITEMS_NAME",
             "columns": ["item_name"],
             "unique": False,
@@ -440,7 +472,7 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
     active = registered_business_catalog(system)
     table = next(
         item for item in active["tables"]
-        if item["table_id"] == "SYS.schema_test_item"
+        if item["table_id"] == "tbl_0123456789abcdef0123456789abcdef"
     )
     field = next(
         item for item in table["fields"]
@@ -449,18 +481,18 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
     rename_operations = [
         {
             "kind": "rename_table",
-            "table_id": "SYS.schema_test_item",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "physical_table": "SCHEMA_MAINTENANCE_ITEMS",
         },
         {
             "kind": "rename_column",
-            "table_id": "SYS.schema_test_item",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "field_id": field["field_id"],
             "column": "display_name",
         },
         {
             "kind": "drop_index",
-            "table_id": "SYS.schema_test_item",
+            "table_id": "tbl_0123456789abcdef0123456789abcdef",
             "index": "IX_SCHEMA_TEST_ITEMS_NAME",
         },
     ]
@@ -512,7 +544,7 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
     final_catalog = registered_business_catalog(system)
     final_table = next(
         item for item in final_catalog["tables"]
-        if item["table_id"] == "SYS.schema_test_item"
+        if item["table_id"] == "tbl_0123456789abcdef0123456789abcdef"
     )
     final_field = next(
         item for item in final_table["fields"]
@@ -522,7 +554,7 @@ def test_alembic_schema_draft_adds_and_renames_table_and_field_without_data_loss
     assert final_field["field_id"] == field["field_id"]
 
 
-def test_schema_draft_rejects_resource_id_in_new_physical_table_name(
+def test_schema_draft_rejects_manually_assigned_table_identity(
     tmp_path: Path,
 ) -> None:
     system = tmp_path / "system.db"
@@ -531,14 +563,13 @@ def test_schema_draft_rejects_resource_id_in_new_physical_table_name(
     register_business_schema(system, business)
     active = registered_business_catalog(system)
 
-    with pytest.raises(ValueError, match="must not embed"):
+    with pytest.raises(ValueError, match="application-generated"):
         apply_schema_draft(
             active["tables"],
             [{
                 "kind": "add_table",
                 "table_id": "RPT7K2M9.forbidden_item",
-                "resource_id": "RPT7K2M9",
-                "physical_table": "RPT7K2M9_FORBIDDEN_ITEMS",
+                "physical_table": "SCHEMA_FORBIDDEN_ITEMS",
                 "dependency_order": 901,
             }],
         )

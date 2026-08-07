@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
@@ -88,6 +89,7 @@ def main() -> int:
     manager_system_database = config_directory / "system.db"
     if not manager_system_database.is_file():
         copy_required(portal_system_database_source, manager_system_database)
+    manager_system_database.chmod(manager_system_database.stat().st_mode | stat.S_IWRITE)
 
     coordinator_directory = output_directory / "coordinator"
     copy_required(PROJECT_ROOT / "coordinator" / "repository_runner.py", coordinator_directory / "repository_runner.py")
@@ -154,7 +156,7 @@ def main() -> int:
         (sync_directory / obsolete_name).unlink(missing_ok=True)
 
     (output_directory / "README.txt").write_text(
-        "Portal Workstation Manager\n"
+        "Portal Manager\n"
         "==========================\n\n"
         "Start the application by double-clicking:\n\n"
         "  PortalManager.exe\n\n"

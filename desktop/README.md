@@ -18,6 +18,9 @@ The build workstation needs Node.js, pnpm, the Rust MSVC toolchain, Visual C++ B
 .\desktop\scripts\build-portable.ps1 -PythonExecutable C:\path\to\python.exe
 ```
 
+The packaging script always uses the standard output directory below; staging
+folders are not supported for Desktop builds.
+
 Output:
 
 ```text
@@ -81,6 +84,11 @@ bundled updater, applies the selected payload, and restarts. The updater records
 the applied release in `config\update-state.json`, so an already applied
 database-only release is not offered again.
 
+Portal is unavailable during the daily maintenance window from 8:00 PM through
+5:00 AM local time. A launch during that window shows the maintenance splash for
+15 seconds and then exits. A Portal session that is already open closes when the
+maintenance window begins, including after the workstation resumes or regains focus.
+
 The portable folder intentionally excludes DuckDB, PMTiles, map styles, sprites, and
 map configuration. Those immutable inputs are read from the `shared.dataRoot` path in
 `config\portal.settings.json`. The default shared layout is:
@@ -107,6 +115,8 @@ one-file extraction delay during startup, while keeping the worker warm avoids
 repeating Python import cost for every table or dashboard request.
 
 The read-only system publication is opened directly from portable `config\system.db`.
+Portal Manager refreshes this file from its authoritative writable `system.db`,
+verifies the copy, and marks the Desktop file read-only before every release.
 No business database is packaged. On first use, Portal verifies the active shared
 protocol snapshot and copies it to `%LOCALAPPDATA%\StormWaterPortal\data\stormwater.db`.
 If the shared snapshot is unavailable or invalid, Portal stops rather than creating a

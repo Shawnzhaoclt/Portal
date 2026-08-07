@@ -18,6 +18,7 @@ import {
 import { toast } from 'sonner'
 
 import { portalRequestJson } from '../../../desktop/request'
+import { formatDateOnly, formatDateTime } from '../../../lib/dateTime'
 import './WeeklyTimeReporting.css'
 
 type EntryType = string
@@ -245,24 +246,15 @@ function shiftWeek(value: string, amount: number) {
 }
 
 function shortDate(value: string) {
-  const date = new Date(`${value}T12:00:00`)
-  return new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric' }).format(date)
+  return formatDateOnly(value, value)
 }
 
 function fullDate(value: string) {
-  const date = new Date(`${value}T12:00:00`)
-  return new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' }).format(date)
+  return formatDateOnly(value, value)
 }
 
 function formatTime(value: string | null | undefined) {
-  if (!value) return '-'
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(parsed)
+  return formatDateTime(value)
 }
 
 function statusLabel(value: string) {

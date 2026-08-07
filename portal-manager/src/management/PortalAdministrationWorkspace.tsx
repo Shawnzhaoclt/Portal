@@ -20,6 +20,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { formatDateTime } from "../../../ui/src/lib/dateTime";
 
 export type Role = "user" | "admin" | "system_admin" | "manager";
 
@@ -194,9 +195,7 @@ function truthy(value: unknown): boolean {
 }
 
 function displayDate(value: unknown): string {
-  if (!value) return "-";
-  const parsed = new Date(String(value));
-  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+  return formatDateTime(value === null || value === undefined ? null : String(value));
 }
 
 function textValue(value: unknown, fallback = "-"): string {

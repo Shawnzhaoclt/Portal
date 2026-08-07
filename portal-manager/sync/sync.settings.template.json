@@ -10,6 +10,13 @@
   "schedulerStateFile": "G:/Strategic Planning/Planning/stm_risk_data/databases_local/portal/logs/portal-sync-scheduler.json",
   "logRetentionDays": 14,
   "chunkSize": 50000,
+  "publicationProfile": "portal_serving_v2",
+  "conditionRisk": {
+    "database": "G:/Strategic Planning/Planning/stm_risk_data/intermediate/amteam/amteam.duckdb",
+    "table": "critical_facility_highest_risk_assets_by_facility",
+    "facilityIdColumn": "FacilityID",
+    "riskColumn": "COND_RISK"
+  },
   "schedule": {
     "allowedStartTime": "07:00",
     "firstRunTime": "07:30",
@@ -24,71 +31,7 @@
       "database": "swpt_cityworks_db",
       "trustedConnection": true,
       "schema": "azteca",
-      "tables": [
-        {
-          "source": "WORKORDER",
-          "target": "azteca_WORKORDER",
-          "indexes": [["WORKORDERID"], ["DESCRIPTION"]]
-        },
-        {
-          "source": "WOCUSTFIELD",
-          "target": "azteca_WOCUSTFIELD",
-          "indexes": [["WORKORDERID"], ["WORKORDERID", "CUSTFIELDID"]]
-        },
-        {
-          "source": "WORKORDERENTITY",
-          "target": "azteca_WORKORDERENTITY",
-          "indexes": [["WORKORDERID"], ["ENTITYUID"]]
-        },
-        {
-          "source": "INSPECTION",
-          "target": "azteca_INSPECTION",
-          "indexes": [["INSPECTIONID"], ["ENTITYUID"], ["STATUS"]]
-        },
-        {
-          "source": "ACTIVITYLINK",
-          "target": "azteca_ACTIVITYLINK",
-          "indexes": [["SOURCEACTIVITYID"], ["DESTACTIVITYID"]]
-        }
-      ]
-    },
-    {
-      "key": "itpipes",
-      "server": "",
-      "database": "CLTStormWater",
-      "trustedConnection": false,
-      "username": "",
-      "password": "",
-      "usernameEnvironmentVariable": "PORTAL_SYNC_ITPIPES_USER",
-      "passwordEnvironmentVariable": "PORTAL_SYNC_ITPIPES_PASSWORD",
-      "schema": "dbo",
-      "tables": [
-        {
-          "source": "ML",
-          "target": "ML",
-          "indexes": [["ML_ID"], ["ML_Name"]]
-        },
-        {
-          "source": "MLI",
-          "target": "MLI",
-          "indexes": [["MLI_ID"], ["ML_ID"], ["Inspection_Date"]]
-        },
-        {
-          "source": "MLO",
-          "target": "MLO",
-          "indexes": [["MLO_ID"], ["MLI_ID"]]
-        },
-        {
-          "source": "Media",
-          "target": "Media",
-          "indexes": [["Media_ID"]]
-        },
-        {
-          "source": "MLO_Media",
-          "target": "MLO_Media",
-          "indexes": [["MLO_ID"], ["Media_ID"]]
-        }
-      ]
+      "criticalWorkOrderDescription": "Critical Asset Inspection"
     }
   ]
 }

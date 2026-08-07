@@ -9,6 +9,11 @@
       "workorder_entity": "azteca_WORKORDERENTITY",
       "activity_link": "azteca_ACTIVITYLINK"
     },
+    "serving_tables": {
+      "critical_workorders": "critical_asset_work_orders",
+      "inspection_workflows": "asset_inspection_workflows",
+      "inspection_events": "asset_inspection_events"
+    },
     "description_filter": "Critical Asset Inspection",
     "read_only": true
   },

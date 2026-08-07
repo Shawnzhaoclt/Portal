@@ -2246,12 +2246,100 @@ td {
   grid-column: 1;
 }
 
+.critical-team-view-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 52px;
+  margin-bottom: 10px;
+  border: 1px solid var(--panel-border);
+  padding: 7px 10px 7px 12px;
+  color: var(--panel-text);
+  background: var(--panel-bg);
+  box-shadow: var(--app-shadow);
+}
+
+.critical-team-view-context,
+.critical-team-view-picker {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.critical-team-view-context > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.critical-team-view-context div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.critical-team-view-context span,
+.critical-team-view-picker > span {
+  color: var(--panel-muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.critical-team-view-context strong {
+  overflow: hidden;
+  color: var(--panel-text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.critical-team-view-trigger {
+  width: min(340px, 42vw);
+  min-width: 240px;
+  border-radius: 0;
+  border-color: var(--control-border);
+  color: var(--control-text);
+  background: var(--control-bg);
+}
+
+.sheet-canvas > .overview-layout {
+  flex: 1 1 auto;
+  height: auto;
+}
+
 @media (max-width: 920px) {
   .workbook-shell.portal-view-mode,
   .workbook-shell.portal-view-mode.overview-mode,
   .workbook-shell.portal-view-mode.detail-mode {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(0, 1fr);
+  }
+
+  .critical-team-view-toolbar {
+    align-items: stretch;
+  }
+
+  .critical-team-view-trigger {
+    width: min(320px, 52vw);
+    min-width: 210px;
+  }
+}
+
+@media (max-width: 640px) {
+  .critical-team-view-toolbar {
+    flex-direction: column;
+  }
+
+  .critical-team-view-picker {
+    justify-content: space-between;
+  }
+
+  .critical-team-view-trigger {
+    width: calc(100vw - 100px);
+    min-width: 0;
   }
 }
 

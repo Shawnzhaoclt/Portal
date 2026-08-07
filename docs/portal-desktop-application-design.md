@@ -869,7 +869,7 @@ Client logs should be written under `%LOCALAPPDATA%\Portal\logs` using structure
 
 Each entry should include:
 
-- UTC timestamp and local Eastern Time display value;
+- UTC timestamp and workstation-OS-local display value;
 - application version;
 - device ID;
 - user ID and selected role when available;

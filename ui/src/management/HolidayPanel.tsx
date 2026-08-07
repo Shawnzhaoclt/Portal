@@ -9,6 +9,7 @@ import {
   X,
 } from 'lucide-react'
 import { toast } from 'sonner'
+import { formatDateOnly, formatDateTime } from '../lib/dateTime'
 import {
   createHoliday,
   createHolidayCalendar,
@@ -46,24 +47,11 @@ const EMPTY_CALENDAR_FORM = {
 
 function formatTimestamp(value: string | null | undefined) {
   if (!value) return '-'
-  const parsed = new Date(value)
-  if (Number.isNaN(parsed.getTime())) return value
-  return new Intl.DateTimeFormat('en-US', {
-    timeZone: 'America/New_York',
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  }).format(parsed)
+  return formatDateTime(value, value)
 }
 
 function dateLabel(value: string) {
-  if (!value) return '-'
-  const [year, month, day] = value.split('-').map(Number)
-  if (!year || !month || !day) return value
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: '2-digit',
-    year: 'numeric',
-  }).format(new Date(year, month - 1, day))
+  return formatDateOnly(value, value)
 }
 
 export default function HolidayPanel() {

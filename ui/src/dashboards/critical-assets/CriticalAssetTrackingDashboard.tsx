@@ -21,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { formatDateOnly } from '../../lib/dateTime'
 import {
   Select,
   SelectContent,
@@ -412,7 +413,7 @@ function formatCellValue(value: CellValue) {
     return Number.isInteger(value) ? formatNumber(value) : formatNumber(value, 2)
   }
   if (/^\d{4}-\d{2}-\d{2}/.test(value)) {
-    return value.slice(0, 10)
+    return formatDateOnly(value, value)
   }
   return value
 }
