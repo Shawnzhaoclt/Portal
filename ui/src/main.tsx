@@ -4,6 +4,10 @@ import { Toaster } from 'sonner'
 import './index.css'
 import DesktopStartupSplash from './desktop/DesktopStartupSplash'
 import {
+  isScheduledMaintenance,
+  MAINTENANCE_SPLASH_DURATION_MS,
+} from './desktop/maintenance'
+import {
   checkPortalUpdate,
   exitDesktopApplication,
   installPortalUpdate,
@@ -23,7 +27,6 @@ import {
 import { applyAppTheme, getInitialTheme } from './theme'
 
 const root = createRoot(document.getElementById('root')!)
-const MAINTENANCE_SPLASH_DURATION_MS = 15_000
 const MAINTENANCE_MONITOR_INTERVAL_MS = 5_000
 
 function errorMessage(error: unknown) {
@@ -41,11 +44,6 @@ function renderStartupError(error: unknown) {
       />
     </StrictMode>,
   )
-}
-
-function isScheduledMaintenance(now = new Date()) {
-  const hour = now.getHours()
-  return hour >= 20 || hour < 5
 }
 
 async function showMaintenanceSplashThenExit() {
@@ -66,7 +64,7 @@ function monitorScheduledMaintenance() {
   const exitIfMaintenanceStarted = () => {
     if (exitRequested || !isScheduledMaintenance()) return
     exitRequested = true
-    void exitDesktopApplication().catch((error) => {
+    void showMaintenanceSplashThenExit().catch((error) => {
       exitRequested = false
       renderStartupError(error)
     })

@@ -142,6 +142,22 @@ type SchemaPlan = SchemaStatus & {
   }>;
 };
 
+const SQLITE_TYPE_GROUPS = [
+  { label: "Text", types: ["TEXT", "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "CLOB"] },
+  { label: "Integer", types: ["INTEGER", "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT"] },
+  { label: "Boolean", types: ["BOOLEAN"] },
+  { label: "Numeric", types: ["REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "NUMERIC", "DECIMAL"] },
+  { label: "Date and time", types: ["DATE", "TIME", "DATETIME", "TIMESTAMP"] },
+  { label: "Binary", types: ["BLOB"] },
+] as const;
+
+type SQLiteDeclaredType = (typeof SQLITE_TYPE_GROUPS)[number]["types"][number];
+
+const SQLITE_NUMERIC_TYPES = new Set<SQLiteDeclaredType>([
+  "INTEGER", "INT", "TINYINT", "SMALLINT", "MEDIUMINT", "BIGINT",
+  "REAL", "FLOAT", "DOUBLE", "DOUBLE PRECISION", "NUMERIC", "DECIMAL",
+]);
+
 type SchemaDraftOperation =
   | {
       kind: "add_table";
@@ -158,7 +174,7 @@ type SchemaDraftOperation =
       kind: "add_column";
       table_id: string;
       column: string;
-      sqlite_type: "TEXT" | "INTEGER" | "REAL" | "BLOB" | "NUMERIC";
+      sqlite_type: SQLiteDeclaredType;
       nullable: boolean;
       default: string | number | boolean | null;
     }
@@ -539,7 +555,7 @@ function SchemaWorkspace({
   const [tableDependencyOrder, setTableDependencyOrder] = useState("");
   const [fieldName, setFieldName] = useState("");
   const [renamingFieldId, setRenamingFieldId] = useState("");
-  const [fieldType, setFieldType] = useState<"TEXT" | "INTEGER" | "REAL" | "BLOB" | "NUMERIC">("TEXT");
+  const [fieldType, setFieldType] = useState<SQLiteDeclaredType>("TEXT");
   const [fieldNullable, setFieldNullable] = useState(true);
   const [fieldDefault, setFieldDefault] = useState("");
   const [indexName, setIndexName] = useState("");
@@ -630,7 +646,7 @@ function SchemaWorkspace({
       return;
     }
     let defaultValue: string | number | boolean | null = fieldDefault.trim() || null;
-    if (defaultValue !== null && (fieldType === "INTEGER" || fieldType === "REAL" || fieldType === "NUMERIC")) {
+    if (defaultValue !== null && SQLITE_NUMERIC_TYPES.has(fieldType)) {
       const numericValue = Number(defaultValue);
       if (!Number.isFinite(numericValue)) return;
       defaultValue = numericValue;
@@ -874,7 +890,7 @@ function SchemaWorkspace({
           {(editor === "field" || editor === "rename-field") && selectedTable ? (
             <div className="schema-inline-editor">
               <label>Field name<input value={fieldName} onChange={(event) => setFieldName(event.target.value)} placeholder="new_field_name" /></label>
-              {editor === "field" ? <><label>SQLite type<select value={fieldType} onChange={(event) => setFieldType(event.target.value as typeof fieldType)}><option>TEXT</option><option>INTEGER</option><option>REAL</option><option>NUMERIC</option><option>BLOB</option></select></label><label>Default value<input value={fieldDefault} onChange={(event) => setFieldDefault(event.target.value)} placeholder="Optional" /></label><label className="schema-check"><input type="checkbox" checked={fieldNullable} onChange={(event) => setFieldNullable(event.target.checked)} /> Allow null</label></> : <p className="schema-editor-explanation">Stable field ID <strong>{renamingFieldId}</strong> will be preserved.</p>}
+              {editor === "field" ? <><label>SQLite declared type<select value={fieldType} onChange={(event) => setFieldType(event.target.value as SQLiteDeclaredType)}>{SQLITE_TYPE_GROUPS.map((group) => <optgroup key={group.label} label={group.label}>{group.types.map((sqliteType) => <option key={sqliteType} value={sqliteType}>{sqliteType}</option>)}</optgroup>)}</select></label><label>Default value<input value={fieldDefault} onChange={(event) => setFieldDefault(event.target.value)} placeholder="Optional" /></label><label className="schema-check"><input type="checkbox" checked={fieldNullable} onChange={(event) => setFieldNullable(event.target.checked)} /> Allow null</label></> : <p className="schema-editor-explanation">Stable field ID <strong>{renamingFieldId}</strong> will be preserved.</p>}
               <div className="actions"><button className="quiet-button" onClick={resetEditor}>Cancel</button><button className="primary-button" disabled={!fieldName.trim() || (editor === "field" && !fieldNullable && !fieldDefault.trim())} onClick={() => void saveField()}>{editor === "rename-field" ? "Add rename to draft" : editingOperation === null ? "Add to draft" : "Save draft field"}</button></div>
             </div>
           ) : null}
@@ -942,9 +958,18 @@ function SchemaWorkspace({
       <section className="schema-actions">
         <div>
           <p className="eyebrow">PUBLISH STORMWATER.DB SCHEMA</p>
-          <p>Type the active snapshot ID. The Manager creates and validates a replacement shared snapshot before switching clients to it.</p>
+          <p>Confirm the current snapshot. The Manager creates and validates a replacement shared snapshot before switching clients to it.</p>
         </div>
-        <input aria-label="Active snapshot ID confirmation" value={confirmation} placeholder={status?.active_snapshot_id || "Active snapshot ID"} onChange={(event) => setConfirmation(event.target.value)} />
+        <div className={`schema-snapshot-confirmation${confirmationMatches ? " confirmed" : ""}`}>
+          <button
+            className="quiet-button"
+            disabled={!status?.active_snapshot_id || confirmationMatches || busy !== null}
+            onClick={() => setConfirmation(status?.active_snapshot_id ?? "")}
+          >
+            <CheckCircle2 size={17} /> {confirmationMatches ? "Current snapshot confirmed" : "Confirm current snapshot"}
+          </button>
+          <span>{confirmationMatches ? "Ready to publish." : "Required before publishing."}</span>
+        </div>
         <div className="actions">
           <button className="primary-button" disabled={!requiresInitialization || !confirmationMatches || busy !== null} onClick={() => execute("initialize")}>
             <Wrench size={17} /> {busy === "initialize" ? "Publishing" : "Publish baseline"}

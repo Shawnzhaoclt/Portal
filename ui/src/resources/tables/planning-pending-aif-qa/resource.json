@@ -6,6 +6,10 @@
   "url": "/tab_planning_pending_aif_qa",
   "category": "Planning",
   "description": "Pending Asset Inspection Form records for planning team QA/QC review.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/planning-pending-aif-qa.png",
+    "thumbnail_dark": "assets/portal-thumbnails/planning-pending-aif-qa-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

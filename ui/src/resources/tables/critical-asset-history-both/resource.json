@@ -6,6 +6,10 @@
   "url": "/tab_critical_asset_history_both",
   "category": "Risk",
   "description": "Paged, sortable inspection history across pipes and structures.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/critical-asset-history-both.png",
+    "thumbnail_dark": "assets/portal-thumbnails/critical-asset-history-both-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

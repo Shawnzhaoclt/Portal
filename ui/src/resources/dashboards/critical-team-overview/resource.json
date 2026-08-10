@@ -6,6 +6,10 @@
   "url": "/dashboard_critical_team",
   "category": "Operations",
   "description": "Critical Asset Inspection overview, milestone charts, reviews, and operational details.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/critical-team-dashboard.png",
+    "thumbnail_dark": "assets/portal-thumbnails/critical-team-dashboard-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

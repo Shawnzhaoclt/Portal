@@ -3,6 +3,7 @@ import DashboardLinksPage from './DashboardLinksPage'
 import HomePage from './HomePage'
 import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
 import ProactiveCCTVReviewHelp from './resources/reports/proactive-team-cctv-review/ProactiveCCTVReviewHelp'
+import CreateAifFromItpipes from './resources/forms/create-aif-from-itpipes/CreateAifFromItpipes'
 import WeeklyTimeReporting from './resources/reports/weekly-time-reporting/WeeklyTimeReporting'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
@@ -18,6 +19,7 @@ import {
   ACCOUNT_ROUTE,
   AIF_OVERVIEW_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
+  CREATE_AIF_FROM_ITPIPES_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
   GIS_HISTORY_ROUTE,
@@ -33,11 +35,11 @@ import {
 import { applyAppTheme, getInitialTheme, type AppTheme } from './theme'
 import { isDesktopRuntime } from './desktop/runtime'
 
-function setPageMeta(title: string, faviconHref = '/favicon.svg') {
+function setPageMeta(title: string) {
   document.title = title
   const iconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
-  if (iconLink && iconLink.href !== faviconHref) {
-    iconLink.href = faviconHref
+  if (iconLink && !iconLink.href.endsWith('/portal-desktop-icon.png')) {
+    iconLink.href = '/portal-desktop-icon.png'
   }
 }
 
@@ -139,6 +141,11 @@ export default function AppRoutes() {
     return <ProactiveCCTVReviewHelp />
   }
 
+  if (path === CREATE_AIF_FROM_ITPIPES_ROUTE) {
+    setPageMeta('Create AIF from ITPipes')
+    return <CreateAifFromItpipes />
+  }
+
   if (path === WEEKLY_TIME_REPORTING_ROUTE) {
     setPageMeta('Weekly Time Reporting')
     return <WeeklyTimeReporting />
@@ -155,17 +162,17 @@ export default function AppRoutes() {
   }
 
   if (path === GIS_FACILITY_ROUTE) {
-    setPageMeta('Critical Asset Facility', '/map-favicon.svg')
+    setPageMeta('Critical Asset Facility')
     return <GISDashboard />
   }
 
   if (path === GIS_HISTORY_ROUTE) {
-    setPageMeta('Critical Asset History', '/map-favicon.svg')
+    setPageMeta('Critical Asset History')
     return <GISCriticalAssetHistoryDashboard />
   }
 
   if (path === STM_RISK_MAP_ROUTE) {
-    setPageMeta('STM Risk Map', '/map-favicon.svg')
+    setPageMeta('STM Risk Map')
     return <MapTilesDashboard />
   }
 

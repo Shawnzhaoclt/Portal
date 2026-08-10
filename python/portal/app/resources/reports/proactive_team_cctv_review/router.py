@@ -3,19 +3,24 @@ from __future__ import annotations
 import copy
 import hashlib
 import re
+from datetime import datetime
 from typing import Any, Literal
 from uuid import uuid4
 
 from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from portal.app.management.database import get_db
-from portal.app.management.models import User
+from portal.app.management.models import Resource, User
 from portal.app.management.router import get_current_user
 from portal.app.management.security import utc_now_text
-from portal.app.management.services import ADMIN_ROLES, selected_user_role
+from portal.app.management.services import (
+    ADMIN_ROLES,
+    effective_resource_permission,
+    selected_user_role,
+)
 from portal.app.sync.errors import LockTimeout, RevisionChanged, SharedRootUnavailable, SnapshotRequired, SyncError
 from portal.app.sync.models import Identity, Mutation
 from portal.app.sync.physical_entities import (
@@ -37,6 +42,7 @@ router = APIRouter(tags=["cctv-review-report"])
 
 class ReportStatusActionRequest(BaseModel):
     action: Literal["submit_to_review", "return_to_edit", "complete"]
+    record_revision: str = Field(min_length=1)
     memo: str | None = None
 
 
@@ -51,7 +57,7 @@ class ReportObservationSaveRequest(BaseModel):
 class ReportDistanceGroupSaveRequest(BaseModel):
     distance_key: str
     distance_feet: float | None = None
-    am_score: int | None = None
+    am_score: int | None = Field(default=None, ge=3, le=5)
     defect_comment: str | None = None
     no_am_score_ge_3_confirmed: bool = False
     observations: list[ReportObservationSaveRequest] = Field(default_factory=list)
@@ -60,9 +66,9 @@ class ReportDistanceGroupSaveRequest(BaseModel):
 class ReportPipeSaveRequest(BaseModel):
     ml_id: str
     mli_id: str
-    clogging_percent: int = 0
+    clogging_percent: int = Field(default=0, ge=0, le=100, multiple_of=5)
     clogging_comment: str | None = None
-    clogging_frame_seconds: float | None = None
+    clogging_frame_seconds: float | None = Field(default=None, ge=0)
     distance_groups: list[ReportDistanceGroupSaveRequest] = Field(default_factory=list)
 
 
@@ -72,6 +78,7 @@ class ReportSaveRequest(BaseModel):
     binding_type: Literal["address", "project_title"]
     binding_text: str
     inspection_date_text: str
+    record_revision: str | None = None
     memo: str | None = None
     pipes: list[ReportPipeSaveRequest]
 
@@ -80,6 +87,112 @@ def _normalize_report_key(value: str) -> str:
     compact = re.sub(r"\s*@\s*", "@", value.strip())
     compact = re.sub(r"\s*-\s*", "-", compact)
     return re.sub(r"\s+", "", compact)
+
+
+def _normalize_binding_text(value: str) -> str:
+    return re.sub(r"^_+|_+$", "", re.sub(r"[^A-Za-z0-9]+", "_", value.strip()))
+
+
+def _report_identity(binding_text: str, inspection_date_text: str) -> tuple[str, str, str]:
+    normalized_binding = _normalize_binding_text(binding_text)
+    tokens = re.findall(r"\d{8}", inspection_date_text)
+    if not normalized_binding or len(tokens) not in {1, 2}:
+        raise HTTPException(
+            status_code=400,
+            detail="A report requires a binding value and an inspection date in MMDDYYYY format.",
+        )
+    compact_input = re.sub(r"\s+", " ", inspection_date_text.strip())
+    expected_input = tokens[0] if len(tokens) == 1 else f"{tokens[0]} - {tokens[1]}"
+    if compact_input != expected_input:
+        raise HTTPException(
+            status_code=400,
+            detail="Inspection date must use MMDDYYYY or MMDDYYYY - MMDDYYYY format.",
+        )
+    try:
+        dates = [datetime.strptime(token, "%m%d%Y").date() for token in tokens]
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Inspection date contains an invalid calendar date.") from error
+    if len(dates) == 2 and dates[1] < dates[0]:
+        raise HTTPException(status_code=400, detail="Inspection date range must be in chronological order.")
+    display_date = tokens[0] if len(tokens) == 1 else f"{tokens[0]} - {tokens[1]}"
+    machine_date = tokens[0] if len(tokens) == 1 else f"{tokens[0]}-{tokens[1]}"
+    return (
+        f"{normalized_binding}@{machine_date}",
+        f"{normalized_binding} @{display_date}",
+        display_date,
+    )
+
+
+def _resource(db: Session) -> Resource:
+    resource = db.scalar(select(Resource).where(Resource.resource_id == RESOURCE_ID))
+    if resource is None or resource.is_active != 1:
+        raise HTTPException(status_code=503, detail="Proactive Team CCTV Review is not registered in the Portal catalog.")
+    return resource
+
+
+def _require_resource_access(db: Session, user: User) -> None:
+    if selected_user_role(user) in ADMIN_ROLES:
+        return
+    if effective_resource_permission(db, user, _resource(db)) is None:
+        raise HTTPException(status_code=403, detail="You do not have permission to use Proactive Team CCTV Review.")
+
+
+def _pipe_value(value: ReportPipeSaveRequest | dict[str, Any], field: str) -> Any:
+    return value.get(field) if isinstance(value, dict) else getattr(value, field)
+
+
+def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, Any]]) -> None:
+    if not pipes:
+        raise HTTPException(status_code=422, detail="At least one reviewed pipe is required.")
+    failures: list[str] = []
+    for pipe_number, pipe in enumerate(pipes, start=1):
+        ml_id = str(_pipe_value(pipe, "ml_id") or "").strip()
+        mli_id = str(_pipe_value(pipe, "mli_id") or "").strip()
+        pipe_label = ml_id or f"pipe {pipe_number}"
+        if not ml_id or not mli_id:
+            failures.append(f"{pipe_label}: pipe ID and inspection ID are required")
+        clogging_percent = _pipe_value(pipe, "clogging_percent")
+        if not isinstance(clogging_percent, int) or clogging_percent < 0 or clogging_percent > 100 or clogging_percent % 5:
+            failures.append(f"{pipe_label}: clogging must be 0 through 100 in increments of 5")
+        if clogging_percent and _pipe_value(pipe, "clogging_frame_seconds") is None:
+            failures.append(f"{pipe_label}: capture a clogging video frame when clogging is greater than 0")
+
+        groups = _pipe_value(pipe, "distance_groups") or []
+        for group_number, group in enumerate(groups, start=1):
+            group_value = group if isinstance(group, dict) else group.model_dump()
+            group_label = str(group_value.get("distance_key") or f"group {group_number}")
+            observations = group_value.get("observations") or []
+            observation_values = [
+                observation if isinstance(observation, dict) else observation.model_dump()
+                for observation in observations
+            ]
+            source_keys = [str(observation.get("source_observation_key") or "").strip() for observation in observation_values]
+            if any(not source_key for source_key in source_keys) or len(source_keys) != len(set(source_keys)):
+                failures.append(f"{pipe_label}, {group_label}: observation keys must be present and unique")
+            major_count = sum(observation.get("defect_role") == "major" for observation in observation_values)
+            other_count = sum(observation.get("defect_role") == "other" for observation in observation_values)
+            score = group_value.get("am_score")
+            confirmed_no_high_score = bool(group_value.get("no_am_score_ge_3_confirmed"))
+            if score is not None:
+                if not isinstance(score, int) or score < 3 or score > 5:
+                    failures.append(f"{pipe_label}, {group_label}: AM score must be 3 through 5")
+                if major_count != 1:
+                    failures.append(f"{pipe_label}, {group_label}: select exactly one major defect for an AM score of 3 or higher")
+                if confirmed_no_high_score:
+                    failures.append(f"{pipe_label}, {group_label}: a scored defect cannot also be confirmed as having no score of 3 or higher")
+            else:
+                if major_count or other_count:
+                    failures.append(f"{pipe_label}, {group_label}: defect roles require a major defect and AM score")
+                if not confirmed_no_high_score:
+                    failures.append(f"{pipe_label}, {group_label}: confirm that no defect has an AM score of 3 or higher")
+    if failures:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Complete all required pipe review checks before saving or submitting the report.",
+                "failures": failures[:25],
+            },
+        )
 
 
 def _report_id(report_key: str) -> int:
@@ -122,13 +235,29 @@ def _entity_values(entity: dict[str, object] | None) -> dict[str, Any] | None:
     return dict(values) if isinstance(values, dict) else None
 
 
+def _validated_record_revision(
+    entity: dict[str, object],
+    requested_revision: str | None,
+    *,
+    action: str,
+) -> str:
+    requested = str(requested_revision or "")
+    current = str(entity.get("record_revision") or "")
+    if not requested or requested != current:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This report changed after it was opened. Reload it before {action}.",
+        )
+    return requested
+
+
 def _review_event_response(
     entity: dict[str, object],
     values: dict[str, Any],
 ) -> dict[str, Any]:
     """Keep the existing CCTV event response shape over universal event storage."""
     event_global_id = str(entity["entity_id"])
-    report_key = str(values.get("resource_key") or values.get("subject_display_key") or "")
+    report_key = str(values.get("subject_display_key") or "")
     event_id = int.from_bytes(
         hashlib.sha256(event_global_id.encode("utf-8")).digest()[:6],
         "big",
@@ -164,6 +293,10 @@ def _report_values(coordinator: Any, report_entity: dict[str, object]) -> dict[s
     report = _entity_values(report_entity)
     if report is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
+    report = {
+        **report,
+        "record_revision": str(report_entity.get("record_revision") or ""),
+    }
     report_global_id = str(report_entity["entity_id"])
     pipe_entities = coordinator.query_entities(
         CCTV_PIPE_ENTITY_TYPE,
@@ -180,14 +313,43 @@ def _report_values(coordinator: Any, report_entity: dict[str, object]) -> dict[s
         filters={"report_global_id": report_global_id},
         order_by=(("pipe_review_id", False), ("distance_group_id", False), ("id", False)),
     )
-    event_entities = coordinator.query_entities(
+    canonical_event_entities = coordinator.query_entities(
         REVIEW_EVENT_ENTITY_TYPE,
         filters={
-            "resource_key": str(report.get("report_key") or report_global_id),
+            "resource_key": RESOURCE_ID,
             "subject_type": "report",
             "subject_global_id": report_global_id,
         },
         order_by=(("event_at", False), ("global_id", False)),
+    )
+    # Releases before the universal review-event contract used the report key as
+    # resource_key. Keep those immutable audit rows visible while all new events
+    # use the stable resource ID required by the schema and its indexes.
+    legacy_resource_key = str(report.get("report_key") or report_global_id)
+    legacy_event_entities = (
+        coordinator.query_entities(
+            REVIEW_EVENT_ENTITY_TYPE,
+            filters={
+                "resource_key": legacy_resource_key,
+                "subject_type": "report",
+                "subject_global_id": report_global_id,
+            },
+            order_by=(("event_at", False), ("global_id", False)),
+        )
+        if legacy_resource_key != RESOURCE_ID
+        else []
+    )
+    event_entities = list(
+        {
+            str(entity["entity_id"]): entity
+            for entity in [*canonical_event_entities, *legacy_event_entities]
+        }.values()
+    )
+    event_entities.sort(
+        key=lambda entity: (
+            str((_entity_values(entity) or {}).get("event_at") or ""),
+            str(entity["entity_id"]),
+        )
     )
 
     observations_by_group: dict[str, list[dict[str, Any]]] = {}
@@ -401,7 +563,7 @@ def _entities_for_report(
 ) -> list[dict[str, object]]:
     filters = (
         {
-            "resource_key": report_key or report_global_id,
+            "resource_key": RESOURCE_ID,
             "subject_type": "report",
             "subject_global_id": report_global_id,
         }
@@ -426,7 +588,7 @@ def _event_mutation(
     correlation_id = str(event.get("correlation_id") or uuid4().hex)
     values = {
         "resource_id": None,
-        "resource_key": report_key,
+        "resource_key": RESOURCE_ID,
         "resource_type": "report",
         "subject_type": "report",
         "subject_global_id": report_global_id,
@@ -563,6 +725,7 @@ def list_reports(
     limit: int = Query(default=500, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
+    _require_resource_access(db, current_user)
     coordinator = _coordinator(current_user)
     page = coordinator.query_entities(
         ENTITY_TYPE,
@@ -570,14 +733,24 @@ def list_reports(
         limit=limit,
         offset=offset,
     )
-    reports = [values for entity in page if (values := _entity_values(entity)) is not None]
+    reports = [
+        (
+            entity,
+            {
+                **values,
+                "record_revision": str(entity.get("record_revision") or ""),
+            },
+        )
+        for entity in page
+        if (values := _entity_values(entity)) is not None
+    ]
     return {
         "reports": [
             _report_row(
                 {"report": report},
                 _can_delete_report(db, current_user, report),
             )
-            for report in reports
+            for _entity, report in reports
         ],
         "total": coordinator.count_entities(ENTITY_TYPE),
     }
@@ -589,6 +762,7 @@ def get_report_detail(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_resource_access(db, current_user)
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
@@ -605,14 +779,19 @@ def save_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    report_key = _normalize_report_key(payload.report_key)
-    report_name = _normalize_report_key(payload.report_name) or report_key
+    _require_resource_access(db, current_user)
     binding_text = payload.binding_text.strip()
-    inspection_date_text = payload.inspection_date_text.strip()
-    if not report_key or not report_name or not binding_text or not inspection_date_text:
-        raise HTTPException(status_code=400, detail="Report key, name, binding text, and inspection date are required.")
-    if not payload.pipes:
-        raise HTTPException(status_code=400, detail="At least one reviewed pipe is required.")
+    report_key, report_name, inspection_date_text = _report_identity(
+        binding_text,
+        payload.inspection_date_text,
+    )
+    requested_report_key = _normalize_report_key(payload.report_key)
+    if requested_report_key and requested_report_key != report_key:
+        raise HTTPException(
+            status_code=400,
+            detail="Report key does not match the selected binding and inspection date.",
+        )
+    _validate_pipe_reviews(payload.pipes)
 
     coordinator = _coordinator(current_user)
     existing = coordinator.get_entity(ENTITY_TYPE, report_key)
@@ -646,6 +825,7 @@ def save_report(
     else:
         report = copy.deepcopy(existing_report)
         from_status = str(report.get("status") or "pending")
+        _validated_record_revision(existing, payload.record_revision, action="saving")
         if from_status == "ready_to_review":
             raise HTTPException(status_code=400, detail="Return the report to edit before saving changes.")
         if from_status == "completed":
@@ -672,24 +852,42 @@ def save_report(
         payload.memo,
     )
     pipes = _saved_pipes(payload.pipes, report_id)
-    mutations = [
+    report_mutation = (
         _upsert_mutation(
             coordinator,
             ENTITY_TYPE,
             report_key,
             report,
             unique_lock_keys=(f"cctv-report:{report_key}",),
-        ),
+        )
+        if created
+        else Mutation(
+            entity_type=ENTITY_TYPE,
+            entity_id=report_key,
+            operation_type="update_entity",
+            base_record_revision=str(payload.record_revision),
+            values=report,
+            unique_lock_keys=(f"cctv-report:{report_key}",),
+        )
+    )
+    mutations = [
+        report_mutation,
         *_review_mutations(coordinator, report_key, report_id, pipes),
         _event_mutation(coordinator, report_key, report_key, event),
     ]
     _commit(current_user, mutations)
+    saved_entity = coordinator.get_entity(ENTITY_TYPE, report_key)
+    saved_report = _entity_values(saved_entity) or report
+    saved_report = {
+        **saved_report,
+        "record_revision": str((saved_entity or {}).get("record_revision") or ""),
+    }
     return {
         "ok": True,
         "created": created,
         "report": _report_row(
-            {"report": report},
-            _can_delete_report(db, current_user, report),
+            {"report": saved_report},
+            _can_delete_report(db, current_user, saved_report),
         ),
     }
 
@@ -700,6 +898,7 @@ def delete_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_resource_access(db, current_user)
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
@@ -720,7 +919,6 @@ def delete_report(
             CCTV_OBSERVATION_ENTITY_TYPE,
             CCTV_DISTANCE_GROUP_ENTITY_TYPE,
             CCTV_PIPE_ENTITY_TYPE,
-            REVIEW_EVENT_ENTITY_TYPE,
         )
     }
     mutations = [
@@ -728,6 +926,22 @@ def delete_report(
         for entity_type, entities in child_entities.items()
         for mutation in _delete_mutations(coordinator, entity_type, entities)
     ]
+    mutations.append(
+        _event_mutation(
+            coordinator,
+            report_global_id,
+            str(report.get("report_key") or report_global_id),
+            _event(
+                list(values.get("events") or []),
+                report_id,
+                current_user,
+                "deleted",
+                str(report.get("status") or "pending"),
+                None,
+                None,
+            ),
+        )
+    )
     mutations.append(
         Mutation(
             entity_type=ENTITY_TYPE,
@@ -751,7 +965,7 @@ def delete_report(
                 for group in pipe.get("distance_groups") or []
                 if isinstance(group, dict)
             ),
-            "events": len(values.get("events") or []),
+            "events_retained": len(values.get("events") or []) + 1,
         },
     }
 
@@ -760,7 +974,9 @@ def delete_report(
 def list_report_events(
     report_id: int,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_resource_access(db, current_user)
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
@@ -779,17 +995,21 @@ def update_report_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_resource_access(db, current_user)
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
     entity, current = found
     values = copy.deepcopy(current)
     report = dict(values["report"])
+    _validated_record_revision(entity, payload.record_revision, action="changing status")
+    report.pop("record_revision", None)
     from_status = str(report.get("status") or "pending")
     now = utc_now_text()
     if payload.action == "submit_to_review":
         if from_status != "pending":
             raise HTTPException(status_code=400, detail="Only pending reports can be submitted to review.")
+        _validate_pipe_reviews(list(values.get("pipes") or []))
         to_status, event_type = "ready_to_review", "submitted_to_review"
         report.update({"submitted_by_user_id": current_user.id, "submitted_by_name": _display_name(current_user), "submitted_at": now})
     elif payload.action == "return_to_edit":
@@ -824,7 +1044,7 @@ def update_report_status(
                 entity_type=ENTITY_TYPE,
                 entity_id=report_global_id,
                 operation_type="update_entity",
-                base_record_revision=str(entity["record_revision"]),
+                base_record_revision=payload.record_revision,
                 values=report,
             ),
             _event_mutation(

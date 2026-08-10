@@ -179,7 +179,7 @@ function permissionMaskLabel(mask: number | null | undefined, fallback = '-') {
   return labels.length ? labels.join(', ') : fallback
 }
 
-const RESOURCE_TYPE_OPTIONS: Array<PortalResource['resource_type']> = ['dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api']
+const RESOURCE_TYPE_OPTIONS: Array<PortalResource['resource_type']> = ['dashboard', 'map', 'tab', 'doc', 'report', 'form', 'dataset', 'service', 'admin', 'api']
 const FEATURED_LIMIT_PER_CATEGORY = 4
 const FEATURED_CATEGORY_OPTIONS: Array<{ key: PortalFeaturedCategory; label: string }> = [
   { key: 'all', label: 'All resources' },
@@ -314,6 +314,7 @@ function featuredIdsFromResources(featured: Record<PortalFeaturedCategory, Porta
 
 function portalFeaturedCategoryForResource(resource: PortalResource): Exclude<PortalFeaturedCategory, 'all'> {
   if (resource.resource_type === 'admin' || resource.resource_type === 'api' || resource.resource_type === 'service') return 'dashboard'
+  if (resource.resource_type === 'form') return 'report'
   return resource.resource_type
 }
 

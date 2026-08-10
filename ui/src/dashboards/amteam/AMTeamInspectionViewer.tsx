@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react'
+import { createPortal } from 'react-dom'
 import {
   AlertCircle,
   Camera,
@@ -23,6 +24,7 @@ import {
   fetchAmTeamObservationsBatch,
   fetchAmTeamPipeGroups,
   fetchAmTeamPipes,
+  fetchPortalDictionaryItems,
 } from './api'
 import {
   fetchCctvReviewReportDetail,
@@ -40,6 +42,12 @@ import type {
   AmTeamPipe,
   AmTeamPipeInspectionGroup,
 } from './types'
+import {
+  inspectionDateKey,
+  inspectionDateKeysFromOption,
+  inspectionDateOptions,
+  type InspectionDateOption,
+} from './inspectionDates'
 import './AMTeamInspectionViewer.css'
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
@@ -63,11 +71,6 @@ type ElectronAwareWindow = Window & {
       electron?: string
     }
   }
-}
-type InspectionDateOption = {
-  key: string
-  label: string
-  dateKeys: string[]
 }
 type ObservationDistanceGroup = {
   key: string
@@ -186,10 +189,9 @@ type SaveFilePickerWindow = Window & {
   }) => Promise<SaveFileHandle>
 }
 
-const INSPECTION_GROUP_DAY_WINDOW = 7
-const DAY_IN_MS = 24 * 60 * 60 * 1000
-const PIPE_REVIEW_COMMENT_OPTIONS = ['Deposit', 'Rocks']
-const PIPE_REVIEW_PANEL_COMMENT_OPTIONS = ['Rocks', 'Deposit']
+const PIPE_DEFECT_CALLOUT_DICTIONARY_KEY = 'pipe_defect_callout'
+const CLOGGING_DEFECT_CALLOUT_DICTIONARY_KEY = 'clogging_defect_callout'
+const CLOGGING_PERCENT_STEP = 5
 const DEFAULT_MAJOR_DEFECT_AM_SCORE = '3'
 const VIDEO_DEFECT_MIN_WIDTH = 320
 const VIDEO_DEFECT_TABLE_DEFAULT_WIDTH = 650
@@ -211,6 +213,217 @@ const MIN_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
   snapshot: 100,
 }
 const CCTV_REVIEW_LAYOUT_STORAGE_KEY = 'portal.cctv-review.workspace-layout.v1'
+
+function fuzzyCalloutScore(option: string, query: string) {
+  const candidate = option.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  const search = query.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
+  if (!search) return 0
+  if (candidate === search) return -100
+  if (candidate.startsWith(search)) return -75
+  const containedAt = candidate.indexOf(search)
+  if (containedAt >= 0) return -50 + containedAt
+
+  let candidateIndex = -1
+  let gaps = 0
+  for (const character of search.replaceAll(' ', '')) {
+    const nextIndex = candidate.indexOf(character, candidateIndex + 1)
+    if (nextIndex < 0) return null
+    gaps += nextIndex - candidateIndex - 1
+    candidateIndex = nextIndex
+  }
+  return gaps + candidateIndex / 100
+}
+
+function FuzzyCalloutInput({
+  value,
+  options,
+  disabled = false,
+  ariaLabel,
+  placeholder = 'Select or enter',
+  className = '',
+  onChange,
+}: {
+  value: string
+  options: string[]
+  disabled?: boolean
+  ariaLabel: string
+  placeholder?: string
+  className?: string
+  onChange: (value: string) => void
+}) {
+  const listboxId = useId()
+  const [isOpen, setOpen] = useState(false)
+  const [activeIndex, setActiveIndex] = useState(-1)
+  const [filterQuery, setFilterQuery] = useState('')
+  const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null)
+  const inputRef = useRef<HTMLInputElement | null>(null)
+  const filteredOptions = useMemo(() => (
+    options
+      .map((option, index) => ({ option, index, score: fuzzyCalloutScore(option, filterQuery) }))
+      .filter((entry): entry is { option: string; index: number; score: number } => entry.score !== null)
+      .sort((left, right) => left.score - right.score || left.index - right.index)
+      .slice(0, 12)
+      .map((entry) => entry.option)
+  ), [filterQuery, options])
+  const hasExactMatch = options.some((option) => option.localeCompare(value, undefined, { sensitivity: 'accent' }) === 0)
+
+  useEffect(() => {
+    setActiveIndex(-1)
+  }, [value])
+
+  useEffect(() => {
+    if (!isOpen || disabled) {
+      setMenuStyle(null)
+      return undefined
+    }
+
+    function positionMenu() {
+      const input = inputRef.current
+      if (!input) return
+      const rect = input.getBoundingClientRect()
+      const viewportPadding = 8
+      const menuWidth = Math.min(Math.max(rect.width, 260), window.innerWidth - viewportPadding * 2)
+      const left = Math.min(
+        Math.max(viewportPadding, rect.right - menuWidth),
+        window.innerWidth - menuWidth - viewportPadding,
+      )
+      const spaceBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding)
+      const spaceAbove = Math.max(0, rect.top - viewportPadding)
+      const placeAbove = spaceBelow < 180 && spaceAbove > spaceBelow
+      const availableHeight = Math.max(96, placeAbove ? spaceAbove : spaceBelow)
+
+      setMenuStyle({
+        left,
+        width: menuWidth,
+        maxHeight: Math.min(260, availableHeight),
+        top: placeAbove ? undefined : rect.bottom + 3,
+        bottom: placeAbove ? window.innerHeight - rect.top + 3 : undefined,
+      })
+    }
+
+    positionMenu()
+    window.addEventListener('resize', positionMenu)
+    window.addEventListener('scroll', positionMenu, true)
+    return () => {
+      window.removeEventListener('resize', positionMenu)
+      window.removeEventListener('scroll', positionMenu, true)
+    }
+  }, [disabled, isOpen])
+
+  function selectValue(nextValue: string) {
+    onChange(nextValue)
+    setOpen(false)
+    setActiveIndex(-1)
+    setFilterQuery('')
+    window.requestAnimationFrame(() => inputRef.current?.focus())
+  }
+
+  return (
+    <div
+      className={`amteam-callout-combobox ${isOpen ? 'open' : ''} ${className}`.trim()}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false)
+      }}
+    >
+      <input
+        ref={inputRef}
+        role="combobox"
+        aria-label={ariaLabel}
+        aria-autocomplete="list"
+        aria-controls={listboxId}
+        aria-expanded={isOpen}
+        aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
+        autoComplete="off"
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        onFocus={(event) => {
+          setFilterQuery('')
+          setOpen(true)
+          event.currentTarget.select()
+        }}
+        onChange={(event) => {
+          onChange(event.currentTarget.value)
+          setFilterQuery(event.currentTarget.value)
+          setOpen(true)
+        }}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault()
+            setOpen(true)
+            setActiveIndex((current) => Math.min(current + 1, filteredOptions.length - 1))
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault()
+            setOpen(true)
+            setActiveIndex((current) => Math.max(current - 1, 0))
+          } else if (event.key === 'Enter' && isOpen && activeIndex >= 0) {
+            event.preventDefault()
+            selectValue(filteredOptions[activeIndex])
+          } else if (event.key === 'Escape') {
+            event.preventDefault()
+            setOpen(false)
+            setActiveIndex(-1)
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="amteam-callout-toggle"
+        aria-label={`Show ${ariaLabel} options`}
+        aria-expanded={isOpen}
+        disabled={disabled}
+        tabIndex={-1}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => {
+          setOpen((current) => {
+            if (!current) setFilterQuery('')
+            return !current
+          })
+          inputRef.current?.focus()
+        }}
+      >
+        <ChevronDown size={14} aria-hidden="true" />
+      </button>
+      {isOpen && !disabled && menuStyle && typeof document !== 'undefined' ? createPortal(
+        <div className="amteam-callout-menu" id={listboxId} role="listbox" style={menuStyle}>
+          <button
+            type="button"
+            className={`amteam-callout-option clear-option ${value ? '' : 'selected'}`.trim()}
+            role="option"
+            aria-selected={!value}
+            tabIndex={-1}
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={() => selectValue('')}
+          >
+            No value
+          </button>
+          {filteredOptions.map((option, index) => (
+            <button
+              type="button"
+              className={`amteam-callout-option ${index === activeIndex ? 'active' : ''}`.trim()}
+              id={`${listboxId}-${index}`}
+              key={option}
+              role="option"
+              aria-selected={option === value}
+              tabIndex={-1}
+              onMouseEnter={() => setActiveIndex(index)}
+              onMouseDown={(event) => event.preventDefault()}
+              onClick={() => selectValue(option)}
+            >
+              {option}
+            </button>
+          ))}
+          {filteredOptions.length === 0 ? (
+            <div className="amteam-callout-custom-note">No dictionary match. Custom text will be saved.</div>
+          ) : filterQuery.trim() && !hasExactMatch ? (
+            <div className="amteam-callout-custom-note">Keep typing to use a custom value.</div>
+          ) : null}
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  )
+}
 
 function readCctvReviewWorkspaceLayout() {
   const fallback = {
@@ -275,6 +488,20 @@ function emptyPipeReviewInput(): PipeReviewInput {
 function cloggingPercentNumber(input: PipeReviewInput) {
   const percent = Number(input.cloggingPercent)
   return Number.isFinite(percent) ? percent : 0
+}
+
+function normalizedCloggingPercent(value: string | number | null | undefined) {
+  const percent = Number(value)
+  if (!Number.isFinite(percent)) return 0
+  return Math.min(100, Math.max(0, Math.round(percent / CLOGGING_PERCENT_STEP) * CLOGGING_PERCENT_STEP))
+}
+
+function isValidCloggingPercent(value: string | number | null | undefined) {
+  const percent = Number(value)
+  return Number.isInteger(percent)
+    && percent >= 0
+    && percent <= 100
+    && percent % CLOGGING_PERCENT_STEP === 0
 }
 
 function pipeReviewHasClogging(input: PipeReviewInput) {
@@ -557,45 +784,6 @@ function observationsByRenderedCardKey(observations: AmTeamObservation[]) {
   return keyedObservations
 }
 
-function inspectionDateKey(value: AmTeamCellValue | undefined) {
-  const text = displayValue(value)
-  if (text === '-') return ''
-  const isoDate = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
-  if (isoDate) {
-    const [, year, month, day] = isoDate
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
-  }
-  const date = new Date(text)
-  if (Number.isNaN(date.getTime())) return text
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function inspectionDateLabelFromKey(key: string) {
-  if (!key) return '-'
-  return formatDateOnly(key, key)
-}
-
-function inspectionDateTimeFromKey(key: string) {
-  const date = new Date(`${key}T00:00:00`)
-  return Number.isNaN(date.getTime()) ? Number.NaN : date.getTime()
-}
-
-function inspectionPeriodLabel(dateKeys: string[]) {
-  if (dateKeys.length === 0) return '-'
-  const ascendingKeys = [...dateKeys].sort((left, right) => left.localeCompare(right))
-  const firstKey = ascendingKeys[0]
-  const lastKey = ascendingKeys[ascendingKeys.length - 1]
-  if (firstKey === lastKey) return inspectionDateLabelFromKey(firstKey)
-  return `${inspectionDateLabelFromKey(firstKey)} - ${inspectionDateLabelFromKey(lastKey)}`
-}
-
-function inspectionDateKeysFromOption(optionKey: string) {
-  return optionKey.split('|').filter(Boolean)
-}
-
 function assetIdInfo(pipe: AmTeamPipe) {
   const upstream = displayValue(pipe.us_mh)
   const downstream = displayValue(pipe.ds_mh)
@@ -864,6 +1052,10 @@ async function fetchVideoFrameReportImage(videoUrl: string, timeSeconds: number)
     }
 
     timeoutId = window.setTimeout(() => finish(null), 16000)
+    // The desktop media endpoint uses a separate local origin. Request CORS
+    // access before loading it so the decoded frame can be copied to a canvas
+    // for the generated report instead of producing a tainted canvas.
+    video.crossOrigin = 'anonymous'
     video.muted = true
     video.playsInline = true
     video.preload = 'auto'
@@ -1442,7 +1634,7 @@ function selectedSnapshotUrlFromFileName(
 
 function savedPipeReviewInput(savedPipe: CctvReviewSavedPipe, media: AmTeamInspectionMedia): PipeReviewInput {
   return {
-    cloggingPercent: String(savedPipe.clogging_percent ?? 0),
+    cloggingPercent: String(normalizedCloggingPercent(savedPipe.clogging_percent)),
     comments: savedPipe.clogging_comment ?? '',
     cloggingSnapshotTimeSeconds: savedPipe.clogging_frame_seconds,
     cloggingSnapshotVideoPath: savedPipe.clogging_frame_seconds === null ? '' : media.videos[0]?.relative_path ?? '',
@@ -1565,52 +1757,7 @@ export async function downloadSavedCctvReviewReport(report: CctvReviewReport) {
 }
 
 function inspectionDateOptionsFromGroups(groups: AmTeamPipeInspectionGroup[]) {
-  const uniqueDateKeys = new Set<string>()
-  for (const group of groups) {
-    for (const inspection of group.inspections) {
-      const key = inspectionDateKey(inspection.inspection_date)
-      if (key) uniqueDateKeys.add(key)
-    }
-  }
-
-  const descendingKeys = [...uniqueDateKeys].sort((left, right) => right.localeCompare(left))
-  const options: InspectionDateOption[] = []
-  let groupKeys: string[] = []
-  let newestKey = ''
-
-  for (const dateKey of descendingKeys) {
-    if (groupKeys.length === 0) {
-      groupKeys = [dateKey]
-      newestKey = dateKey
-      continue
-    }
-
-    const newestTime = inspectionDateTimeFromKey(newestKey)
-    const nextTime = inspectionDateTimeFromKey(dateKey)
-    const dayDifference = Math.abs(newestTime - nextTime) / DAY_IN_MS
-    if (Number.isFinite(dayDifference) && dayDifference <= INSPECTION_GROUP_DAY_WINDOW) {
-      groupKeys.push(dateKey)
-      continue
-    }
-
-    options.push({
-      key: groupKeys.join('|'),
-      label: inspectionPeriodLabel(groupKeys),
-      dateKeys: groupKeys,
-    })
-    groupKeys = [dateKey]
-    newestKey = dateKey
-  }
-
-  if (groupKeys.length > 0) {
-    options.push({
-      key: groupKeys.join('|'),
-      label: inspectionPeriodLabel(groupKeys),
-      dateKeys: groupKeys,
-    })
-  }
-
-  return options
+  return inspectionDateOptions(groups.flatMap((group) => group.inspections.map((inspection) => inspection.inspection_date)))
 }
 
 function fieldList(fields: Array<[string, AmTeamCellValue | undefined]>) {
@@ -2284,6 +2431,7 @@ function PipeDefectReviewPanel({
   distanceDecisionProgress,
   reviewInput,
   currentVideoFrame,
+  cloggingCalloutOptions,
   pipePositionLabel,
   hasPreviousPipe,
   hasNextPipe,
@@ -2306,6 +2454,7 @@ function PipeDefectReviewPanel({
   distanceDecisionProgress: { complete: number; total: number }
   reviewInput: PipeReviewInput
   currentVideoFrame: ActiveVideoFrame | null
+  cloggingCalloutOptions: string[]
   pipePositionLabel: string
   hasPreviousPipe: boolean
   hasNextPipe: boolean
@@ -2328,6 +2477,9 @@ function PipeDefectReviewPanel({
         ? { cloggingPercent: nextValue }
         : { cloggingPercent: nextValue, comments: '', cloggingSnapshotTimeSeconds: null, cloggingSnapshotVideoPath: '' })
     }
+  }
+  const normalizeCloggingPercent = () => {
+    updateCloggingPercent(String(normalizedCloggingPercent(reviewInput.cloggingPercent)))
   }
   const hasClogging = pipeReviewHasClogging(reviewInput)
   const hasCloggingSnapshot = pipeReviewHasCloggingSnapshot(reviewInput)
@@ -2382,27 +2534,24 @@ function PipeDefectReviewPanel({
               type="number"
               min="0"
               max="100"
-              step="1"
+              step={CLOGGING_PERCENT_STEP}
               inputMode="numeric"
               disabled={readOnly}
               value={reviewInput.cloggingPercent}
+              aria-invalid={!isValidCloggingPercent(reviewInput.cloggingPercent)}
               onChange={(event) => updateCloggingPercent(event.currentTarget.value)}
+              onBlur={normalizeCloggingPercent}
             />
             <em>%</em>
-            <input
-              aria-label="Clogging comment"
+            <FuzzyCalloutInput
+              ariaLabel="Clogging defect callout"
               className="amteam-clogging-comment-input"
-              list="amteam-clogging-comment-options"
+              options={cloggingCalloutOptions}
               value={reviewInput.comments}
               disabled={readOnly || !hasClogging}
               placeholder="Select or enter"
-              onChange={(event) => onReviewInputChange({ comments: event.currentTarget.value })}
+              onChange={(value) => onReviewInputChange({ comments: value })}
             />
-            <datalist id="amteam-clogging-comment-options">
-              {PIPE_REVIEW_PANEL_COMMENT_OPTIONS.map((option) => (
-                <option value={option} key={option} />
-              ))}
-            </datalist>
           </div>
         </label>
 
@@ -2580,6 +2729,8 @@ export default function AMTeamInspectionViewer({
   const [errorMessage, setErrorMessage] = useState('')
   const [observationDefectSelections, setObservationDefectSelections] = useState<Record<string, ObservationDefectSelection>>({})
   const [pipeReviewInputs, setPipeReviewInputs] = useState<Record<string, PipeReviewInput>>({})
+  const [pipeDefectCalloutOptions, setPipeDefectCalloutOptions] = useState<string[]>([])
+  const [cloggingDefectCalloutOptions, setCloggingDefectCalloutOptions] = useState<string[]>([])
   const [pipeObservationCache, setPipeObservationCache] = useState<Record<string, PipeObservationCacheEntry>>({})
   const [reviewedPipeIds, setReviewedPipeIds] = useState<Record<string, boolean>>({})
   const [distanceGroupValidationFailures, setDistanceGroupValidationFailures] = useState<Record<string, boolean>>({})
@@ -2657,6 +2808,36 @@ export default function AMTeamInspectionViewer({
   }, [reviewNotice])
 
   useEffect(() => {
+    let cancelled = false
+    fetchPortalDictionaryItems(PIPE_DEFECT_CALLOUT_DICTIONARY_KEY)
+      .then((response) => {
+        if (cancelled) return
+        setPipeDefectCalloutOptions(response.items.map((item) => item.label))
+      })
+      .catch(() => {
+        if (!cancelled) setPipeDefectCalloutOptions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchPortalDictionaryItems(CLOGGING_DEFECT_CALLOUT_DICTIONARY_KEY)
+      .then((response) => {
+        if (cancelled) return
+        setCloggingDefectCalloutOptions(response.items.map((item) => item.label))
+      })
+      .catch(() => {
+        if (!cancelled) setCloggingDefectCalloutOptions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       try {
         window.localStorage.setItem(CCTV_REVIEW_LAYOUT_STORAGE_KEY, JSON.stringify({
@@ -2715,7 +2896,7 @@ export default function AMTeamInspectionViewer({
             majorKey: cardKey,
             otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
             amScore: currentGroupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE,
-            defectComment: currentGroupSelection.defectComment || PIPE_REVIEW_COMMENT_OPTIONS[0],
+            defectComment: currentGroupSelection.defectComment || pipeDefectCalloutOptions[0] || '',
             noHighScoreConfirmed: false,
           },
         }
@@ -2954,6 +3135,10 @@ export default function AMTeamInspectionViewer({
     const currentIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
     if (currentIndex < 0) return null
     const currentPipeReviewInput = pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()
+    if (!isValidCloggingPercent(currentPipeReviewInput.cloggingPercent)) {
+      showReviewNotice('Clogging percent must be 0 through 100 in increments of 5.')
+      return null
+    }
     if (pipeReviewHasClogging(currentPipeReviewInput) && !pipeReviewHasCloggingSnapshot(currentPipeReviewInput)) {
       showReviewNotice(
         inspectionMedia.videos.length
@@ -3011,6 +3196,7 @@ export default function AMTeamInspectionViewer({
       binding_type: reportSaveContext.bindingType,
       binding_text: reportSaveContext.bindingText,
       inspection_date_text: reportSaveContext.inspectionDateText,
+      record_revision: savedReport?.record_revision ?? null,
       memo,
       pipes: visiblePipeGroups.map((group) => {
         const pipeId = recordId(group.ml_id)
@@ -3023,7 +3209,7 @@ export default function AMTeamInspectionViewer({
         return {
           ml_id: pipeId,
           mli_id: recordId(inspection?.mli_id),
-          clogging_percent: Math.max(0, Math.round(cloggingPercentNumber(pipeReviewInput))),
+          clogging_percent: normalizedCloggingPercent(pipeReviewInput.cloggingPercent),
           clogging_comment: pipeReviewInput.comments.trim() || null,
           clogging_frame_seconds: pipeReviewInput.cloggingSnapshotTimeSeconds,
           distance_groups: observationDistanceGroups(pipeObservations).map((distanceGroup) => {
@@ -3635,6 +3821,7 @@ export default function AMTeamInspectionViewer({
                     distanceDecisionProgress={distanceDecisionProgress}
                     reviewInput={pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()}
                     currentVideoFrame={activeVideoFrame}
+                    cloggingCalloutOptions={cloggingDefectCalloutOptions}
                     pipePositionLabel={pipePositionLabel}
                     hasPreviousPipe={hasPreviousPipe}
                     hasNextPipe={hasNextPipe}
@@ -3805,16 +3992,16 @@ export default function AMTeamInspectionViewer({
                                 onChange={(event) => updateDistanceGroupAmScore(scopedGroupKey, event.currentTarget.value)}
                               />
                             </label>
-                            <label className="amteam-tree-review-control">
-                              <input
-                                aria-label="Defect comment"
-                                list="amteam-defect-comment-options"
+                            <div className="amteam-tree-review-control">
+                              <FuzzyCalloutInput
+                                ariaLabel="Pipe defect callout"
+                                options={pipeDefectCalloutOptions}
                                 disabled={readOnly || !majorObservationEntry}
                                 placeholder="Select or enter"
                                 value={majorObservationEntry ? groupSelection.defectComment : ''}
-                                onChange={(event) => updateDistanceGroupDefectComment(scopedGroupKey, event.currentTarget.value)}
+                                onChange={(value) => updateDistanceGroupDefectComment(scopedGroupKey, value)}
                               />
-                            </label>
+                            </div>
                           </div>
                         </div>
 
@@ -3997,11 +4184,6 @@ export default function AMTeamInspectionViewer({
         reports={inspectionMedia.reports}
         onClose={() => setInspectionDetailsOpen(false)}
       />
-      <datalist id="amteam-defect-comment-options">
-        {PIPE_REVIEW_COMMENT_OPTIONS.map((option) => (
-          <option key={option} value={option} />
-        ))}
-      </datalist>
     </main>
   )
 }

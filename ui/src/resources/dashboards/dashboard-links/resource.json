@@ -7,6 +7,10 @@
   "category": "Portal",
   "description": "Browse dashboard and map links available in the Portal.",
   "icon": "layout-dashboard",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/dashboard-links.png",
+    "thumbnail_dark": "assets/portal-thumbnails/dashboard-links-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": false

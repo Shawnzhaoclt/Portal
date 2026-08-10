@@ -22,6 +22,11 @@ from portal.app.schema.catalog import (
     schema_draft_catalog_for_registration,
 )
 from portal.app.schema.manager import SchemaManager, SchemaManagerError
+from portal.app.schema.migrations import alembic_structural
+from portal.app.schema.sqlite_types import (
+    SQLITE_DECLARED_TYPES,
+    sqlite_logical_type,
+)
 from portal.app.sync.local_store import LocalStore
 from portal.app.sync.physical_entities import (
     HOLIDAY_ENTITY_TYPE,
@@ -401,6 +406,84 @@ def test_additive_schema_draft_rejects_required_field_without_default(tmp_path: 
                 "column": "required_note",
                 "sqlite_type": "TEXT",
                 "nullable": False,
+                "default": None,
+            }],
+        )
+
+
+def test_schema_draft_and_alembic_support_every_manager_declared_type(
+    tmp_path: Path,
+) -> None:
+    system = tmp_path / "system.db"
+    business = tmp_path / "stormwater.db"
+    _create_business_database(business)
+    register_business_schema(system, business)
+    active = registered_business_catalog(system)
+    table_id = "SYS.user_favorite"
+    operations = [
+        {
+            "kind": "add_column",
+            "table_id": table_id,
+            "column": f"type_{position}",
+            "sqlite_type": declared_type,
+            "nullable": True,
+            "default": None,
+        }
+        for position, declared_type in enumerate(SQLITE_DECLARED_TYPES, start=1)
+    ]
+
+    draft = apply_schema_draft(active["tables"], operations)
+    table = next(item for item in draft if item["table_id"] == table_id)
+    added_fields = {
+        field["physical_column"]: (field["sqlite_type"], field["logical_type"])
+        for field in table["fields"]
+        if field["physical_column"].startswith("type_")
+    }
+    assert added_fields == {
+        f"type_{position}": (declared_type, sqlite_logical_type(declared_type))
+        for position, declared_type in enumerate(SQLITE_DECLARED_TYPES, start=1)
+    }
+
+    with closing(sqlite3.connect(business)) as connection:
+        alembic_structural(
+            connection,
+            {
+                "operations": [
+                    {**operation, "table": "PORTAL_USER_FAVORITES"}
+                    for operation in operations
+                ]
+            },
+        )
+        actual_types = {
+            row[1]: row[2]
+            for row in connection.execute(
+                'PRAGMA table_info("PORTAL_USER_FAVORITES")'
+            )
+            if str(row[1]).startswith("type_")
+        }
+
+    assert actual_types == {
+        f"type_{position}": declared_type
+        for position, declared_type in enumerate(SQLITE_DECLARED_TYPES, start=1)
+    }
+
+
+def test_schema_draft_rejects_unallowlisted_sql_type(tmp_path: Path) -> None:
+    system = tmp_path / "system.db"
+    business = tmp_path / "stormwater.db"
+    _create_business_database(business)
+    register_business_schema(system, business)
+    active = registered_business_catalog(system)
+
+    with pytest.raises(ValueError, match="Unsupported SQLite field type"):
+        apply_schema_draft(
+            active["tables"],
+            [{
+                "kind": "add_column",
+                "table_id": "SYS.user_favorite",
+                "column": "unsafe_type",
+                "sqlite_type": "TEXT); DROP TABLE PORTAL_USER_FAVORITES; --",
+                "nullable": True,
                 "default": None,
             }],
         )

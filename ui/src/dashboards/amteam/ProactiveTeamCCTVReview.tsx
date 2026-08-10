@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import type { ButtonHTMLAttributes, CSSProperties, PointerEvent as ReactPointerEvent } from 'react'
 import { Tooltip } from 'radix-ui'
 import { toast } from 'sonner'
-import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
+import { formatDateTime } from '../../lib/dateTime'
 import {
   AlertCircle,
   ArrowLeft,
@@ -50,6 +50,7 @@ import type {
   AmTeamPipe,
   AmTeamPipeInspectionGroup,
 } from './types'
+import { inspectionDateOptions, type InspectionDateOption } from './inspectionDates'
 import './ProactiveTeamCCTVReview.css'
 
 type ReportField =
@@ -105,12 +106,6 @@ type SearchCandidate = {
   kind: 'ProjectTitle' | 'Address'
   value: string
   detail: string
-}
-
-type InspectionDateOption = {
-  key: string
-  label: string
-  dateKeys: string[]
 }
 
 type NewReportDraft = {
@@ -222,95 +217,13 @@ function compareText(a: string, b: string) {
   return a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
 }
 
-const DAY_IN_MS = 24 * 60 * 60 * 1000
-const INSPECTION_GROUP_DAY_WINDOW = 1
-
 function recordText(value: AmTeamCellValue | undefined) {
   if (value == null) return ''
   return String(value).trim()
 }
 
-function inspectionDateKey(value: AmTeamCellValue | undefined) {
-  const text = recordText(value)
-  if (!text) return ''
-  const isoDate = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/)
-  if (isoDate) {
-    const [, year, month, day] = isoDate
-    return `${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`
-  }
-  const date = new Date(text)
-  if (Number.isNaN(date.getTime())) return text
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
-function inspectionDateTimeFromKey(key: string) {
-  const date = new Date(`${key}T00:00:00`)
-  return Number.isNaN(date.getTime()) ? Number.NaN : date.getTime()
-}
-
-function inspectionDateLabelFromKey(key: string) {
-  return formatDateOnly(key, key)
-}
-
-function inspectionPeriodLabel(dateKeys: string[]) {
-  if (dateKeys.length === 0) return '-'
-  const ascendingKeys = [...dateKeys].sort((left, right) => left.localeCompare(right))
-  const firstKey = ascendingKeys[0]
-  const lastKey = ascendingKeys[ascendingKeys.length - 1]
-  if (firstKey === lastKey) return inspectionDateLabelFromKey(firstKey)
-  return `${inspectionDateLabelFromKey(firstKey)} - ${inspectionDateLabelFromKey(lastKey)}`
-}
-
 function inspectionDateOptionsFromGroups(groups: AmTeamPipeInspectionGroup[]) {
-  const uniqueDateKeys = new Set<string>()
-  for (const group of groups) {
-    for (const inspection of group.inspections) {
-      const key = inspectionDateKey(inspection.inspection_date)
-      if (key) uniqueDateKeys.add(key)
-    }
-  }
-
-  const descendingKeys = [...uniqueDateKeys].sort((left, right) => right.localeCompare(left))
-  const options: InspectionDateOption[] = []
-  let groupKeys: string[] = []
-  let newestKey = ''
-
-  for (const dateKey of descendingKeys) {
-    if (groupKeys.length === 0) {
-      groupKeys = [dateKey]
-      newestKey = dateKey
-      continue
-    }
-
-    const newestTime = inspectionDateTimeFromKey(newestKey)
-    const nextTime = inspectionDateTimeFromKey(dateKey)
-    const dayDifference = Math.abs(newestTime - nextTime) / DAY_IN_MS
-    if (Number.isFinite(dayDifference) && dayDifference <= INSPECTION_GROUP_DAY_WINDOW) {
-      groupKeys.push(dateKey)
-      continue
-    }
-
-    options.push({
-      key: groupKeys.join('|'),
-      label: inspectionPeriodLabel(groupKeys),
-      dateKeys: groupKeys,
-    })
-    groupKeys = [dateKey]
-    newestKey = dateKey
-  }
-
-  if (groupKeys.length > 0) {
-    options.push({
-      key: groupKeys.join('|'),
-      label: inspectionPeriodLabel(groupKeys),
-      dateKeys: groupKeys,
-    })
-  }
-
-  return options
+  return inspectionDateOptions(groups.flatMap((group) => group.inspections.map((inspection) => inspection.inspection_date)))
 }
 
 function pipeSearchCandidates(pipes: AmTeamPipe[]) {
@@ -383,7 +296,7 @@ function buildReportDraft(candidate: SearchCandidate, dateOption: InspectionDate
   const reportKey = normalizeReportKey(`${normalizedBinding}@${reportInspectionDateKeyText(dateOption)}`)
   return {
     reportKey,
-    reportName: reportKey,
+    reportName: `${normalizedBinding} @${inspectionDateText}`,
     bindingType: candidate.kind === 'ProjectTitle' ? 'project_title' : 'address',
     bindingText: candidate.value,
     searchKind: candidate.kind,
@@ -707,7 +620,7 @@ export default function ProactiveTeamCCTVReview() {
   function reportSaveContextFromReport(report: CctvReviewReport) {
     return {
       reportKey: report.report_key,
-      reportName: reportDisplayKey(report),
+      reportName: report.report_name || reportDisplayKey(report),
       bindingType: report.binding_type,
       bindingText: report.binding_text,
       inspectionDateText: report.inspection_date_text,
@@ -804,7 +717,7 @@ export default function ProactiveTeamCCTVReview() {
 
   async function runStatusAction(report: CctvReviewReport, action: 'submit_to_review' | 'return_to_edit' | 'complete') {
     try {
-      await updateCctvReviewReportStatus(report.id, { action })
+      await updateCctvReviewReportStatus(report.id, { action, record_revision: report.record_revision })
       toast.success('Report status updated.')
       await loadReports()
     } catch (err) {

@@ -1,0 +1,16 @@
+{
+  "resource_id": "FRMAIF01",
+  "resource_slug": "create_aif_from_itpipes",
+  "type": "form",
+  "name": "Create AIF from ITPipes",
+  "url": "/form_create_aif_from_itpipes",
+  "category": "Operations",
+  "description": "Search ITPipes inspections and observations, create Asset Inspection Forms, and manage their review workflow.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/create-aif-from-itpipes.png",
+    "thumbnail_dark": "assets/portal-thumbnails/create-aif-from-itpipes-dark.png"
+  },
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

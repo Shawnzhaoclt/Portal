@@ -6,6 +6,10 @@
   "url": "/dashboard_aif_overview",
   "category": "Planning",
   "description": "Asset Inspection Form completed, inspection, and project-start activity by month.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/aif-overview.png",
+    "thumbnail_dark": "assets/portal-thumbnails/aif-overview-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

@@ -183,6 +183,18 @@ AIF_PROACTIVE_INSPECTION_COLUMNS = (
     "clogging_related_flooding_impact",
     "habitual_clogging",
     "engineering_design_project",
+    "source_system",
+    "source_mli_id",
+    "source_mlo_id",
+    "source_inspection_date",
+    "initiated_by_user_id",
+    "inspected_by_user_id",
+    "submitted_to_user_id",
+    "closed_by_user_id",
+    "updated_at",
+    "updated_by",
+    "updated_by_user_id",
+    "active_source_mlo_id",
 )
 USER_FAVORITE_COLUMNS = (
     "owner_user_id",
@@ -282,7 +294,7 @@ PHYSICAL_ENTITY_SPECS = {
         "SYS_RESOURCE_REVIEW_EVENTS",
         REVIEW_EVENT_COLUMNS,
         140,
-        integer_columns=frozenset({"resource_id", "actor_user_id"}),
+        integer_columns=frozenset({"resource_id"}),
         indexes=(
             (
                 "subject_time",
@@ -328,11 +340,22 @@ PHYSICAL_ENTITY_SPECS = {
             "date_closed",
             "date_initiated",
             "date_submitted",
+            "source_inspection_date",
+            "updated_at",
         }),
         indexes=(
             ("inspection_id", ("inspection_id",), True),
+            ("active_source_mlo_id", ("active_source_mlo_id",), True),
             ("entity_uid", ("entity_uid",), False),
             ("status", ("status",), False),
+            ("updated", ("updated_at", "global_id"), False),
+            ("entity_updated", ("entity_uid", "updated_at", "global_id"), False),
+            ("status_updated", ("status", "updated_at", "global_id"), False),
+            ("source_inspection", ("source_mli_id", "source_mlo_id"), False),
+            ("source_mlo", ("source_mlo_id",), False),
+            ("initiator_status", ("initiated_by_user_id", "status", "updated_at"), False),
+            ("reviewer_status", ("submitted_to_user_id", "status", "updated_at"), False),
+            ("updated_by", ("updated_by_user_id", "updated_at"), False),
         ),
     ),
     USER_FAVORITE_ENTITY_TYPE: PhysicalEntitySpec(
@@ -620,7 +643,7 @@ CREATE TABLE IF NOT EXISTS SYS_RESOURCE_REVIEW_EVENTS (
     subject_global_id TEXT NOT NULL,
     subject_display_key TEXT,
     event_type TEXT NOT NULL,
-    actor_user_id INTEGER,
+    actor_user_id TEXT,
     actor_name TEXT,
     event_at TEXT NOT NULL,
     from_status TEXT,
@@ -1009,7 +1032,10 @@ def query_physical_entities(
     entity_type: str,
     *,
     filters: Mapping[str, object] | None = None,
+    predicates: Sequence[tuple[str, str, object]] | None = None,
+    search: tuple[Sequence[str], str] | None = None,
     order_by: Sequence[tuple[str, bool]] | None = None,
+    keyset_after: Sequence[tuple[str, object, bool]] | None = None,
     limit: int | None = None,
     offset: int = 0,
     include_deleted: bool = False,
@@ -1025,6 +1051,50 @@ def query_physical_entities(
             raise ValueError(f"Unsupported {entity_type} filter: {column}")
         clauses.append(f'"{column}"=?')
         params.append(value)
+    supported_operators = {
+        "eq": "=",
+        "ne": "<>",
+        "lt": "<",
+        "lte": "<=",
+        "gt": ">",
+        "gte": ">=",
+    }
+    for column, operator, value in predicates or ():
+        if column not in allowed:
+            raise ValueError(f"Unsupported {entity_type} predicate: {column}")
+        sql_operator = supported_operators.get(operator)
+        if sql_operator is None:
+            raise ValueError(f"Unsupported {entity_type} predicate operator: {operator}")
+        clauses.append(f'"{column}" {sql_operator} ?')
+        params.append(value)
+    if search is not None:
+        search_columns, search_text = search
+        if not search_columns:
+            raise ValueError(f"At least one {entity_type} search column is required.")
+        unsupported = [column for column in search_columns if column not in allowed]
+        if unsupported:
+            raise ValueError(f"Unsupported {entity_type} search columns: {', '.join(unsupported)}")
+        escaped = str(search_text).casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses.append(
+            "(" + " OR ".join(
+                f'LOWER(COALESCE(CAST("{column}" AS TEXT), \'\')) LIKE ? ESCAPE \'\\\''
+                for column in search_columns
+            ) + ")"
+        )
+        params.extend(f"%{escaped}%" for _ in search_columns)
+    if keyset_after:
+        cursor_terms: list[str] = []
+        cursor_params: list[object] = []
+        for index, (column, value, descending) in enumerate(keyset_after):
+            if column not in allowed:
+                raise ValueError(f"Unsupported {entity_type} keyset column: {column}")
+            equal_terms = [f'"{previous_column}"=?' for previous_column, _, _ in keyset_after[:index]]
+            comparison = f'"{column}" {"<" if descending else ">"} ?'
+            cursor_terms.append("(" + " AND ".join([*equal_terms, comparison]) + ")")
+            cursor_params.extend(previous_value for _, previous_value, _ in keyset_after[:index])
+            cursor_params.append(value)
+        clauses.append("(" + " OR ".join(cursor_terms) + ")")
+        params.extend(cursor_params)
     sql = f'SELECT * FROM "{spec.table}"'
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
@@ -1049,6 +1119,8 @@ def count_physical_entities(
     entity_type: str,
     *,
     filters: Mapping[str, object] | None = None,
+    predicates: Sequence[tuple[str, str, object]] | None = None,
+    search: tuple[Sequence[str], str] | None = None,
     include_deleted: bool = False,
 ) -> int:
     spec = physical_spec(entity_type)
@@ -1062,6 +1134,37 @@ def count_physical_entities(
             raise ValueError(f"Unsupported {entity_type} filter: {column}")
         clauses.append(f'"{column}"=?')
         params.append(value)
+    supported_operators = {
+        "eq": "=",
+        "ne": "<>",
+        "lt": "<",
+        "lte": "<=",
+        "gt": ">",
+        "gte": ">=",
+    }
+    for column, operator, value in predicates or ():
+        if column not in allowed:
+            raise ValueError(f"Unsupported {entity_type} predicate: {column}")
+        sql_operator = supported_operators.get(operator)
+        if sql_operator is None:
+            raise ValueError(f"Unsupported {entity_type} predicate operator: {operator}")
+        clauses.append(f'"{column}" {sql_operator} ?')
+        params.append(value)
+    if search is not None:
+        search_columns, search_text = search
+        if not search_columns:
+            raise ValueError(f"At least one {entity_type} search column is required.")
+        unsupported = [column for column in search_columns if column not in allowed]
+        if unsupported:
+            raise ValueError(f"Unsupported {entity_type} search columns: {', '.join(unsupported)}")
+        escaped = str(search_text).casefold().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        clauses.append(
+            "(" + " OR ".join(
+                f'LOWER(COALESCE(CAST("{column}" AS TEXT), \'\')) LIKE ? ESCAPE \'\\\''
+                for column in search_columns
+            ) + ")"
+        )
+        params.extend(f"%{escaped}%" for _ in search_columns)
     sql = f'SELECT COUNT(*) FROM "{spec.table}"'
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)

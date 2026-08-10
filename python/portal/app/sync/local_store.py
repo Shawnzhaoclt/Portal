@@ -12,6 +12,7 @@ from .errors import ProtocolViolation, RevisionChanged
 from .models import ActorHead, Identity, Mutation, Operation, canonical_json, utc_now
 from .physical_entities import (
     count_all_physical_entities,
+    count_physical_entities,
     delete_physical_entity,
     dependency_order,
     get_physical_entity,
@@ -444,7 +445,10 @@ class LocalStore:
         entity_type: str,
         *,
         filters: Mapping[str, object] | None = None,
+        predicates: Sequence[tuple[str, str, object]] | None = None,
+        search: tuple[Sequence[str], str] | None = None,
         order_by: Sequence[tuple[str, bool]] | None = None,
+        keyset_after: Sequence[tuple[str, object, bool]] | None = None,
         limit: int | None = None,
         offset: int = 0,
         include_deleted: bool = False,
@@ -460,7 +464,10 @@ class LocalStore:
                 connection,
                 entity_type,
                 filters=filters,
+                predicates=predicates,
+                search=search,
                 order_by=order_by,
+                keyset_after=keyset_after,
                 limit=limit,
                 offset=offset,
                 include_deleted=include_deleted,
@@ -471,6 +478,8 @@ class LocalStore:
         entity_type: str,
         *,
         filters: Mapping[str, object] | None = None,
+        predicates: Sequence[tuple[str, str, object]] | None = None,
+        search: tuple[Sequence[str], str] | None = None,
         include_deleted: bool = False,
     ) -> int:
         """Count registered physical rows using SQL-side filtering."""
@@ -484,6 +493,8 @@ class LocalStore:
                 connection,
                 entity_type,
                 filters=filters,
+                predicates=predicates,
+                search=search,
                 include_deleted=include_deleted,
             )
 

@@ -15,6 +15,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
+from portal.app.schema.sqlite_types import normalize_sqlite_declared_type
+
 
 class MigrationError(RuntimeError):
     """Raised when a registered schema migration cannot safely be applied."""
@@ -22,7 +24,6 @@ class MigrationError(RuntimeError):
 
 MigrationHandler = Callable[[sqlite3.Connection, dict[str, Any]], None]
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-_SQLITE_TYPES = {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}
 
 
 def _quoted_identifier(name: str) -> str:
@@ -75,9 +76,12 @@ def compatible_sqlite(connection: sqlite3.Connection, specification: dict[str, A
         table = _quoted_identifier(str(operation.get("table", "")))
         if kind == "add_column":
             column = _quoted_identifier(str(operation.get("column", "")))
-            sqlite_type = str(operation.get("sqlite_type", "TEXT")).upper()
-            if sqlite_type not in _SQLITE_TYPES:
-                raise MigrationError(f"Unsupported SQLite column type: {sqlite_type!r}")
+            try:
+                sqlite_type = normalize_sqlite_declared_type(
+                    operation.get("sqlite_type", "TEXT")
+                )
+            except ValueError as error:
+                raise MigrationError(str(error)) from error
             nullable = bool(operation.get("nullable", True))
             default = operation.get("default")
             clause = f"ALTER TABLE {table} ADD COLUMN {column} {sqlite_type}"
@@ -147,15 +151,18 @@ def alembic_structural(
     from alembic.operations import Operations
     from sqlalchemy import Column, create_engine, text as sql_text
     from sqlalchemy.pool import NullPool
-    from sqlalchemy.types import BLOB, INTEGER, NUMERIC, REAL, TEXT
+    from sqlalchemy.types import INTEGER, TEXT, UserDefinedType
 
-    type_by_name = {
-        "TEXT": TEXT,
-        "INTEGER": INTEGER,
-        "REAL": REAL,
-        "BLOB": BLOB,
-        "NUMERIC": NUMERIC,
-    }
+    class _SQLiteDeclaredType(UserDefinedType):
+        """Compile an allowlisted type name exactly as selected in Manager."""
+
+        cache_ok = True
+
+        def __init__(self, declared_type: str) -> None:
+            self.declared_type = declared_type
+
+        def get_col_spec(self, **_kwargs: Any) -> str:
+            return self.declared_type
 
     class _PortalSQLiteConnection:
         """Let SQLAlchemy issue DDL without owning Portal's sqlite3 transaction."""
@@ -223,10 +230,12 @@ def alembic_structural(
                     raise MigrationError(f"Table was not found: {table}.")
                 if column.lower() in _column_names(connection, table):
                     continue
-                sqlite_type = str(operation.get("sqlite_type") or "TEXT").upper()
-                type_factory = type_by_name.get(sqlite_type)
-                if type_factory is None:
-                    raise MigrationError(f"Unsupported SQLite column type: {sqlite_type!r}")
+                try:
+                    sqlite_type = normalize_sqlite_declared_type(
+                        operation.get("sqlite_type")
+                    )
+                except ValueError as error:
+                    raise MigrationError(str(error)) from error
                 nullable = bool(operation.get("nullable", True))
                 default = operation.get("default")
                 if not nullable and default is None:
@@ -235,7 +244,7 @@ def alembic_structural(
                     table,
                     Column(
                         column,
-                        type_factory(),
+                        _SQLiteDeclaredType(sqlite_type),
                         nullable=nullable,
                         server_default=(
                             sql_text(_literal(default)) if default is not None else None

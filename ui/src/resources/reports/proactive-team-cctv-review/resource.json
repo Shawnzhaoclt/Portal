@@ -7,6 +7,10 @@
   "help_url": "/help_proactive_team_cctv_review",
   "category": "Operations",
   "description": "Search CCTV pipe records, choose inspections, and compile proactive team review reports with defects and media.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/proactive-team-cctv-review.png",
+    "thumbnail_dark": "assets/portal-thumbnails/proactive-team-cctv-review-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

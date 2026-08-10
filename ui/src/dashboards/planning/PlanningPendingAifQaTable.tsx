@@ -21,6 +21,7 @@ import './PlanningPendingAifQaTable.css'
 import { portalRequestJson } from '../../desktop/request'
 import { openExternalUrl } from '../../desktop/runtime'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
+import { createPortalExcelWorkbook, downloadExcelWorkbook } from '../../lib/excelExport'
 
 type CellValue = string | number | boolean | null
 type PendingAifRow = Record<string, CellValue> & {
@@ -204,328 +205,31 @@ function visibleCellHref(row: PendingAifRow, column: PendingAifColumn) {
   return row._links?.[column.key] ?? ''
 }
 
-function escapeXml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
-}
-
-function columnLetter(index: number) {
-  let column = ''
-  let value = index + 1
-  while (value > 0) {
-    const remainder = (value - 1) % 26
-    column = String.fromCharCode(65 + remainder) + column
-    value = Math.floor((value - 1) / 26)
-  }
-  return column
-}
-
-function encodeText(value: string) {
-  return new TextEncoder().encode(value)
-}
-
-const CRC32_TABLE = (() => {
-  const table: number[] = []
-  for (let index = 0; index < 256; index += 1) {
-    let current = index
-    for (let bit = 0; bit < 8; bit += 1) {
-      current = current & 1 ? 0xedb88320 ^ (current >>> 1) : current >>> 1
-    }
-    table[index] = current >>> 0
-  }
-  return table
-})()
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function concatBytes(chunks: Uint8Array[]) {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const output = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.length
-  }
-  return output
-}
-
-function zipDateTime(date: Date) {
-  return {
-    date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
-    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-  }
-}
-
-function formatGeneratedAt(date: Date) {
-  return formatDateTime(date)
-}
-
-function createZip(files: Array<{ name: string; content: string }>) {
-  const now = zipDateTime(new Date())
-  const localChunks: Uint8Array[] = []
-  const centralChunks: Uint8Array[] = []
-  const entries: Array<{ nameBytes: Uint8Array; bytes: Uint8Array; crc: number; offset: number }> = []
-  let offset = 0
-
-  for (const file of files) {
-    const nameBytes = encodeText(file.name)
-    const bytes = encodeText(file.content)
-    const fileCrc = crc32(bytes)
-    const header = new Uint8Array(30 + nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x04034b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 0x0800, true)
-    view.setUint16(8, 0, true)
-    view.setUint16(10, now.time, true)
-    view.setUint16(12, now.date, true)
-    view.setUint32(14, fileCrc, true)
-    view.setUint32(18, bytes.length, true)
-    view.setUint32(22, bytes.length, true)
-    view.setUint16(26, nameBytes.length, true)
-    view.setUint16(28, 0, true)
-    header.set(nameBytes, 30)
-    entries.push({ nameBytes, bytes, crc: fileCrc, offset })
-    localChunks.push(header, bytes)
-    offset += header.length + bytes.length
-  }
-
-  const centralOffset = offset
-  for (const entry of entries) {
-    const header = new Uint8Array(46 + entry.nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x02014b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 20, true)
-    view.setUint16(8, 0x0800, true)
-    view.setUint16(10, 0, true)
-    view.setUint16(12, now.time, true)
-    view.setUint16(14, now.date, true)
-    view.setUint32(16, entry.crc, true)
-    view.setUint32(20, entry.bytes.length, true)
-    view.setUint32(24, entry.bytes.length, true)
-    view.setUint16(28, entry.nameBytes.length, true)
-    view.setUint16(30, 0, true)
-    view.setUint16(32, 0, true)
-    view.setUint16(34, 0, true)
-    view.setUint16(36, 0, true)
-    view.setUint32(38, 0, true)
-    view.setUint32(42, entry.offset, true)
-    header.set(entry.nameBytes, 46)
-    centralChunks.push(header)
-    offset += header.length
-  }
-
-  const end = new Uint8Array(22)
-  const view = new DataView(end.buffer)
-  view.setUint32(0, 0x06054b50, true)
-  view.setUint16(8, entries.length, true)
-  view.setUint16(10, entries.length, true)
-  view.setUint32(12, offset - centralOffset, true)
-  view.setUint32(16, centralOffset, true)
-  return concatBytes([...localChunks, ...centralChunks, end])
-}
-
 function createXlsx(rows: PendingAifRow[]) {
-  const hyperlinkRelationships: Array<{ id: string; target: string }> = []
-  const hyperlinkRefs: Array<{ ref: string; relationshipId: string }> = []
-  const titleRowIndex = 1
-  const generatedAtRowIndex = 2
-  const headerRowIndex = 3
-  const firstDataRowIndex = 4
-  const lastColumnLetter = columnLetter(PENDING_AIF_COLUMNS.length - 1)
-  const lastRowIndex = Math.max(headerRowIndex, rows.length + firstDataRowIndex - 1)
-  const titleText = `Planning Pending AIF QA/QC - ${formatNumber(rows.length)} Pending AIF`
-  const generatedAtText = `Generated at ${formatGeneratedAt(new Date())}`
-  const columnWidths = PENDING_AIF_COLUMNS.map((column) => {
-    const maxContentLength = rows.reduce((maxLength, row) => {
-      const text = visibleCellText(row, column)
-      return Math.max(maxLength, text.length)
-    }, column.label.length)
-    return Math.min(Math.max(maxContentLength + 2, column.link ? 12 : 10), 38)
-  })
-  const columnXml = `<cols>${columnWidths
-    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width.toFixed(1)}" customWidth="1"/>`)
-    .join('')}</cols>`
-  const titleCells = PENDING_AIF_COLUMNS.map((_, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${titleRowIndex}`
-    return columnIndex === 0
-      ? `<c r="${ref}" s="2" t="inlineStr"><is><t>${escapeXml(titleText)}</t></is></c>`
-      : `<c r="${ref}" s="2"/>`
-  }).join('')
-  const generatedAtCells = PENDING_AIF_COLUMNS.map((_, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${generatedAtRowIndex}`
-    return columnIndex === 0
-      ? `<c r="${ref}" s="6" t="inlineStr"><is><t>${escapeXml(generatedAtText)}</t></is></c>`
-      : `<c r="${ref}" s="6"/>`
-  }).join('')
-  const headerCells = PENDING_AIF_COLUMNS.map((column, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${headerRowIndex}`
-    return `<c r="${ref}" s="3" t="inlineStr"><is><t>${escapeXml(column.label)}</t></is></c>`
-  }).join('')
-  const bodyRows = rows
-    .map((row, rowIndex) => {
-      const sheetRowIndex = rowIndex + firstDataRowIndex
-      const isBanded = rowIndex % 2 === 1
-      const cells = PENDING_AIF_COLUMNS.map((column, columnIndex) => {
-        const ref = `${columnLetter(columnIndex)}${sheetRowIndex}`
+  return createPortalExcelWorkbook({
+    title: `Planning Pending AIF QA/QC - ${formatNumber(rows.length)} Pending ${rows.length === 1 ? 'AIF' : 'AIFs'}`,
+    sheetName: 'Pending AIF QA QC',
+    columns: PENDING_AIF_COLUMNS.map((column) => ({
+      heading: column.label,
+      minWidth: column.link ? 12 : 10,
+      maxWidth: 38,
+    })),
+    rows: rows.map((row) => ({
+      cells: PENDING_AIF_COLUMNS.map((column) => {
         const text = visibleCellText(row, column)
-        const href = visibleCellHref(row, column)
-        const defaultStyle = isBanded ? 4 : 0
-        const hyperlinkStyle = isBanded ? 5 : 1
-        if (!text || text === '-') return `<c r="${ref}" s="${defaultStyle}"/>`
-        if (href) {
-          const relationshipId = `rId${hyperlinkRelationships.length + 1}`
-          hyperlinkRelationships.push({ id: relationshipId, target: href })
-          hyperlinkRefs.push({ ref, relationshipId })
-          return `<c r="${ref}" s="${hyperlinkStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
+        return {
+          value: !text || text === '-' ? null : text,
+          hyperlink: visibleCellHref(row, column) || null,
         }
-        return `<c r="${ref}" s="${defaultStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
-      }).join('')
-      return `<row r="${sheetRowIndex}">${cells}</row>`
-    })
-    .join('')
-  const lastCell = `${lastColumnLetter}${lastRowIndex}`
-  const hyperlinkXml = hyperlinkRefs.length
-    ? `<hyperlinks>${hyperlinkRefs.map((link) => `<hyperlink ref="${link.ref}" r:id="${link.relationshipId}"/>`).join('')}</hyperlinks>`
-    : ''
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:${lastCell}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
-  <sheetFormatPr defaultRowHeight="18"/>
-  ${columnXml}
-  <sheetData>
-    <row r="${titleRowIndex}" ht="28" customHeight="1">${titleCells}</row>
-    <row r="${generatedAtRowIndex}" ht="20" customHeight="1">${generatedAtCells}</row>
-    <row r="${headerRowIndex}" ht="22" customHeight="1">${headerCells}</row>
-    ${bodyRows}
-  </sheetData>
-  <autoFilter ref="A${headerRowIndex}:${lastColumnLetter}${lastRowIndex}"/>
-  <mergeCells count="2"><mergeCell ref="A1:${lastColumnLetter}1"/><mergeCell ref="A2:${lastColumnLetter}2"/></mergeCells>
-  ${hyperlinkXml}
-</worksheet>`
-  const workbookFiles = [
-    {
-      name: '[Content_Types].xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>`,
-    },
-    {
-      name: '_rels/.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/workbook.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Pending AIF QA QC" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`,
-    },
-    {
-      name: 'xl/_rels/workbook.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/styles.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="5">
-    <font><sz val="11"/><name val="Calibri"/></font>
-    <font><u/><color rgb="FF0563C1"/><sz val="11"/><name val="Calibri"/></font>
-    <font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
-    <font><b/><sz val="11"/><color rgb="FF0B3558"/><name val="Calibri"/></font>
-    <font><i/><sz val="10"/><color rgb="FF5B6B80"/><name val="Calibri"/></font>
-  </fonts>
-  <fills count="5">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF1F5D8F"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFD6E7F2"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFEAF3FA"/><bgColor indexed="64"/></patternFill></fill>
-  </fills>
-  <borders count="2">
-    <border><left/><right/><top/><bottom/><diagonal/></border>
-    <border>
-      <left style="thin"><color rgb="FFB7C7D8"/></left>
-      <right style="thin"><color rgb="FFB7C7D8"/></right>
-      <top style="thin"><color rgb="FFB7C7D8"/></top>
-      <bottom style="thin"><color rgb="FFB7C7D8"/></bottom>
-      <diagonal/>
-    </border>
-  </borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="7">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="4" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-  </cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>`,
-    },
-    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
-  ]
-
-  if (hyperlinkRelationships.length > 0) {
-    workbookFiles.push({
-      name: 'xl/worksheets/_rels/sheet1.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${hyperlinkRelationships
-    .map(
-      (link) =>
-        `<Relationship Id="${link.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXml(link.target)}" TargetMode="External"/>`,
-    )
-    .join('\n  ')}
-</Relationships>`,
-    })
-  }
-
-  return createZip(workbookFiles)
+      }),
+    })),
+  })
 }
 
 function downloadRows(rows: PendingAifRow[]) {
   const workbook = createXlsx(rows)
-  const blob = new Blob([workbook], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `planning-pending-aif-qa-${new Date().toISOString().slice(0, 10)}.xlsx`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
+  return downloadExcelWorkbook(workbook, `planning-pending-aif-qa-${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
-
 function hasActiveFilters(
   search: string,
   numberFilters: ReturnType<typeof createEmptyNumberFilters>,
@@ -736,7 +440,7 @@ function PlanningPendingAifQaTable() {
         if (response.rows.length === 0) break
         offset += response.rows.length
       }
-      downloadRows(allRows)
+      await downloadRows(allRows)
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : String(requestError))
     } finally {

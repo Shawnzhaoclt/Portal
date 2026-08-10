@@ -212,7 +212,11 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .schema-plan .compact-empty { height: 90px; }
 .schema-actions { display: grid; grid-template-columns: minmax(250px, 1fr) minmax(320px, 1.2fr) auto; align-items: center; gap: 14px; margin-top: 16px; padding: 14px; border: 1px solid #d8b1ad; background: #fff8f7; }
 .schema-actions p:last-child { margin-top: 5px; color: #6a5d61; font-size: 12px; }
-.schema-actions input { min-width: 0; height: 38px; border: 1px solid #b9cddd; padding: 0 10px; background: #fff; }
+.schema-snapshot-confirmation { display: flex; min-width: 0; align-items: center; gap: 10px; }
+.schema-snapshot-confirmation button { min-height: 38px; white-space: nowrap; }
+.schema-snapshot-confirmation span { color: #6a5d61; font-size: 12px; font-weight: 600; }
+.schema-snapshot-confirmation.confirmed button { border-color: #77a98b; background: #edf8f1; color: #17633a; }
+.schema-snapshot-confirmation.confirmed span { color: #17633a; }
 
 .maintenance-workspace { min-height: 0; flex: 1; display: flex; flex-direction: column; }
 .maintenance-metrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }

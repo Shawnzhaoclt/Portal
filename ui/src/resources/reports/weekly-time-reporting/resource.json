@@ -6,6 +6,10 @@
   "url": "/report_weekly_time_reporting",
   "category": "Operations",
   "description": "Record weekly work, request schedule changes, submit time reports, and complete manager review.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/weekly-time-reporting.png",
+    "thumbnail_dark": "assets/portal-thumbnails/weekly-time-reporting-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

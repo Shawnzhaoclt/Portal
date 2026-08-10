@@ -43,17 +43,94 @@ http://10.40.68.23:8000/api/dashboards
 
 The response includes each dashboard title, path, direct URL, embed URL, and iframe snippet.
 
-## Thumbnail Capture Rules
+## Resource Thumbnail Design
 
-Portal resource thumbnails are generated from the live resource page, not from cropped portal cards or edited mockups.
+Portal resource thumbnails are stable, branded cover illustrations that communicate
+the resource's purpose at card size. They are not required to reproduce the live
+resource page. AI-assisted image generation may be used during design, but every
+image must be reviewed, approved, stored with the application, and published as a
+normal static asset. Portal must never generate thumbnail images at runtime.
 
-- Capture at the same aspect ratio used by the portal preview frame. The current standard is a `2048x806` browser viewport scaled to a `1600x630` PNG.
-- Scale the full screenshot into the thumbnail size. Do not crop or clip the right side. The portal card image uses `object-fit: contain` so the full thumbnail remains visible.
-- Use each resource's standalone URL. For dashboard, table, and report resources, append `?embed=1`; append `&theme=dark` or `?theme=dark` for dark thumbnails.
-- Dark thumbnails must be captured while the page is actually running in dark mode. Do not recolor a light screenshot.
-- Map thumbnails must show the real rendered map and key map controls. Center the relevant geography in the capture; for citywide storm water maps, keep the City of Charlotte centered and confirm upper-right controls and right-side panels are visible.
-- Validate each thumbnail before committing: no browser chrome, no loading screen, no error banner, no blank map canvas, no clipped right edge, and no important UI hidden under the portal popup close-button area.
-- Remove temporary raw screenshots after the scaled thumbnail is written.
+This approach replaces full-page screenshots because interface text and controls
+are generally unreadable at thumbnail size, screenshots become stale when layouts
+change, and visually similar resources are difficult to distinguish from one
+another.
+
+### Visual Standard
+
+- Use a `1600x630` PNG canvas, matching the current Portal card preview ratio.
+- Use a clean technical or restrained isometric illustration style rather than a
+  photorealistic or decorative stock-image style.
+- Use the Portal visual language: navy, storm-water blue, teal, off-white, and
+  restrained orange accents.
+- Give each image one clear focal subject and enough negative space to remain
+  recognizable when scaled down.
+- Keep important content inside a minimum 48-pixel safe area on every edge.
+- Do not include generated words, labels, numbers, application controls, City or
+  department logos, watermarks, or a duplicate resource title inside the image.
+  The resource card supplies the title, type, accessible name, and actions.
+- Do not include personal information, operationally sensitive information, or
+  imagery that could be mistaken for an authoritative inspection result, risk
+  boundary, engineering plan, or geographic record.
+- Provide coordinated light and dark versions. Both versions must retain the same
+  subject, composition, and identity; only palette, lighting, and contrast should
+  change.
+- Add resource-type badges and icons through the Portal interface rather than
+  baking them into the generated bitmap so that they remain sharp and accessible.
+
+### Resource Visual Vocabulary
+
+| Resource purpose | Recommended visual subject |
+| --- | --- |
+| Asset Inspection Forms | Storm-water pipe, inspection clipboard or form, and a shield/check element |
+| CCTV Review | Pipe interior, inspection camera, and a reviewed defect marker |
+| Dashboards | Storm-water infrastructure combined with a simplified analytical chart motif |
+| Data tables | Organized inspection records or grid structure with a clear data-flow motif |
+| Work orders | Pipe asset, maintenance activity, and a work-order document |
+| Risk maps | Abstract storm-water network, map geometry, and non-authoritative risk zones |
+| Reports | Inspection or analytical document with a restrained chart or review motif |
+
+Illustrations must express the business function without depicting fictional UI
+screens, unreadable charts, or fake geographic detail. Two resources may share the
+same visual family, but each resource must have a distinct composition or focal
+subject.
+
+### Resource Ownership and Metadata
+
+- Every active card resource owns an explicit light thumbnail and dark thumbnail.
+- Thumbnail selection must be declared by resource metadata. Portal must not infer
+  a thumbnail from words in the resource key and must not use another resource's
+  image as a fallback.
+- Use predictable repository names:
+  `ui/src/assets/portal-thumbnails/<resource-key-kebab-case>.png` and
+  `ui/src/assets/portal-thumbnails/<resource-key-kebab-case>-dark.png`.
+- A missing resource thumbnail may temporarily use a neutral illustration for its
+  resource type, clearly distinct from every real resource cover. It must not use
+  an unrelated resource screenshot.
+- Resource publication should validate both files, exact dimensions, supported
+  format, and successful loading before the resource is released.
+- A future Portal Manager thumbnail editor should allow an administrator to upload,
+  preview, replace, and validate the two assets without editing frontend source.
+  The published files remain static release assets rather than database BLOBs or
+  dynamically generated images.
+
+### Review and Migration
+
+The initial style approval set consists of:
+
+1. Asset Inspection Forms;
+2. Proactive Team CCTV Review; and
+3. Critical Team Dashboards.
+
+Review these three at their actual Portal card size in both themes before applying
+the style to the remaining catalog. Approval must check recognizability, contrast,
+consistent composition, absence of generated text or artifacts, and clear
+distinction between resources.
+
+Existing screenshot thumbnails remain in place until the corresponding replacement
+has been approved. Replace them resource by resource; do not remove the complete
+legacy set in one operation. Raw AI generations, rejected variants, and temporary
+working files must not be included in the production UI bundle.
 
 ## Configuration
 

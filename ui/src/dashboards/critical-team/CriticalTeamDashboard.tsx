@@ -41,6 +41,11 @@ import './CriticalTeamDashboard.css'
 import { EChart, type EChartHandle } from '../../EChart'
 import { openExternalUrl } from '../../desktop/runtime'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
+import {
+  createPortalExcelWorkbook,
+  downloadExcelWorkbook,
+  escapeExcelXml as escapeXml,
+} from '../../lib/excelExport'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Calendar } from '@/components/ui/calendar'
@@ -558,398 +563,35 @@ function overviewDateRangeLabel(filters: CriticalTeamOverviewFilters, data: Crit
   return `Through ${formatOverviewMonth(dateTo)}`
 }
 
-function escapeXml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
-}
-
-function columnLetter(index: number) {
-  let column = ''
-  let value = index + 1
-  while (value > 0) {
-    const remainder = (value - 1) % 26
-    column = String.fromCharCode(65 + remainder) + column
-    value = Math.floor((value - 1) / 26)
-  }
-  return column
-}
-
 function workOrderHref(row: AssetRow) {
   const href = String(row.workorder_url ?? '').trim()
   return /^https?:\/\//i.test(href) ? href : null
 }
 
-function formatExcelGeneratedAt(date: Date) {
-  return formatDateTime(date)
-}
-
-function xlsxTextCell(columnIndex: number, rowIndex: number, value: string) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  return `<c r="${cellRef}" t="inlineStr"><is><t>${escapeXml(value)}</t></is></c>`
-}
-
-function xlsxNumberCell(columnIndex: number, rowIndex: number, value: number | null | undefined) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  if (value === null || value === undefined || Number.isNaN(value)) {
-    return `<c r="${cellRef}"/>`
-  }
-  return `<c r="${cellRef}"><v>${value}</v></c>`
-}
-
-function encodeText(value: string) {
-  return new TextEncoder().encode(value)
-}
-
-const CRC32_TABLE = (() => {
-  const table: number[] = []
-  for (let index = 0; index < 256; index += 1) {
-    let current = index
-    for (let bit = 0; bit < 8; bit += 1) {
-      current = current & 1 ? 0xedb88320 ^ (current >>> 1) : current >>> 1
-    }
-    table[index] = current >>> 0
-  }
-  return table
-})()
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function concatBytes(chunks: Uint8Array[]) {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const output = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.length
-  }
-  return output
-}
-
-function zipDateTime(date: Date) {
-  return {
-    date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
-    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-  }
-}
-
-function createZip(files: Array<{ name: string; content: string }>) {
-  const now = zipDateTime(new Date())
-  const localChunks: Uint8Array[] = []
-  const centralChunks: Uint8Array[] = []
-  const entries: Array<{ nameBytes: Uint8Array; bytes: Uint8Array; crc: number; offset: number }> = []
-  let offset = 0
-
-  for (const file of files) {
-    const nameBytes = encodeText(file.name)
-    const bytes = encodeText(file.content)
-    const fileCrc = crc32(bytes)
-    const header = new Uint8Array(30 + nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x04034b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 0x0800, true)
-    view.setUint16(8, 0, true)
-    view.setUint16(10, now.time, true)
-    view.setUint16(12, now.date, true)
-    view.setUint32(14, fileCrc, true)
-    view.setUint32(18, bytes.length, true)
-    view.setUint32(22, bytes.length, true)
-    view.setUint16(26, nameBytes.length, true)
-    header.set(nameBytes, 30)
-
-    entries.push({ nameBytes, bytes, crc: fileCrc, offset })
-    localChunks.push(header, bytes)
-    offset += header.length + bytes.length
-  }
-
-  const centralOffset = offset
-  for (const entry of entries) {
-    const header = new Uint8Array(46 + entry.nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x02014b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 20, true)
-    view.setUint16(8, 0x0800, true)
-    view.setUint16(10, 0, true)
-    view.setUint16(12, now.time, true)
-    view.setUint16(14, now.date, true)
-    view.setUint32(16, entry.crc, true)
-    view.setUint32(20, entry.bytes.length, true)
-    view.setUint32(24, entry.bytes.length, true)
-    view.setUint16(28, entry.nameBytes.length, true)
-    view.setUint32(42, entry.offset, true)
-    header.set(entry.nameBytes, 46)
-    centralChunks.push(header)
-    offset += header.length
-  }
-
-  const centralSize = offset - centralOffset
-  const end = new Uint8Array(22)
-  const endView = new DataView(end.buffer)
-  endView.setUint32(0, 0x06054b50, true)
-  endView.setUint16(8, entries.length, true)
-  endView.setUint16(10, entries.length, true)
-  endView.setUint32(12, centralSize, true)
-  endView.setUint32(16, centralOffset, true)
-
-  return concatBytes([...localChunks, ...centralChunks, end])
-}
-
-function worksheetPackage(sheetName: string, worksheet: string) {
-  const safeSheetName = sheetName.replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 31) || 'Sheet1'
-
-  return createZip([
-    {
-      name: '[Content_Types].xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>`,
-    },
-    {
-      name: '_rels/.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/workbook.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets>
-    <sheet name="${escapeXml(safeSheetName)}" sheetId="1" r:id="rId1"/>
-  </sheets>
-</workbook>`,
-    },
-    {
-      name: 'xl/_rels/workbook.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/styles.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>`,
-    },
-    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
-  ])
-}
-
 function createWorkOrderXlsx(rows: AssetRow[]) {
-  const hyperlinkRelationships: Array<{ id: string; target: string }> = []
-  const hyperlinkRefs: Array<{ ref: string; relationshipId: string }> = []
-  const titleRowIndex = 1
-  const generatedAtRowIndex = 2
-  const headerRowIndex = 3
-  const firstDataRowIndex = 4
-  const lastColumnLetter = columnLetter(DETAIL_COLUMNS.length - 1)
-  const lastRowIndex = Math.max(headerRowIndex, rows.length + firstDataRowIndex - 1)
-  const titleText = `Work Order Detail - ${formatNumber(rows.length)} Work Orders`
-  const generatedAtText = `Generated at ${formatExcelGeneratedAt(new Date())}`
-  const columnWidths = DETAIL_COLUMNS.map((column) => {
-    const maxContentLength = rows.reduce((maxLength, row) => {
-      const text = valueText(row[column.key], column.key)
-      return Math.max(maxLength, text === '-' ? 0 : text.length)
-    }, column.label.length)
-    const minimumWidth = column.key === 'workorder_id' ? 15 : 10
-    return Math.min(Math.max(maxContentLength + 2, minimumWidth), 38)
-  })
-  const columnXml = `<cols>${columnWidths
-    .map((width, index) => `<col min="${index + 1}" max="${index + 1}" width="${width.toFixed(1)}" customWidth="1"/>`)
-    .join('')}</cols>`
-  const titleCells = DETAIL_COLUMNS.map((_, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${titleRowIndex}`
-    return columnIndex === 0
-      ? `<c r="${ref}" s="2" t="inlineStr"><is><t>${escapeXml(titleText)}</t></is></c>`
-      : `<c r="${ref}" s="2"/>`
-  }).join('')
-  const generatedAtCells = DETAIL_COLUMNS.map((_, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${generatedAtRowIndex}`
-    return columnIndex === 0
-      ? `<c r="${ref}" s="6" t="inlineStr"><is><t>${escapeXml(generatedAtText)}</t></is></c>`
-      : `<c r="${ref}" s="6"/>`
-  }).join('')
-  const headerCells = DETAIL_COLUMNS.map((column, columnIndex) => {
-    const ref = `${columnLetter(columnIndex)}${headerRowIndex}`
-    return `<c r="${ref}" s="3" t="inlineStr"><is><t>${escapeXml(column.label)}</t></is></c>`
-  }).join('')
-  const bodyRows = rows
-    .map((row, rowIndex) => {
-      const sheetRowIndex = rowIndex + firstDataRowIndex
-      const isBanded = rowIndex % 2 === 1
-      const cells = DETAIL_COLUMNS.map((column, columnIndex) => {
-        const ref = `${columnLetter(columnIndex)}${sheetRowIndex}`
+  return createPortalExcelWorkbook({
+    title: `Work Order Detail - ${formatNumber(rows.length)} ${rows.length === 1 ? 'Work Order' : 'Work Orders'}`,
+    sheetName: 'Work Order Detail',
+    columns: DETAIL_COLUMNS.map((column) => ({
+      heading: column.label,
+      minWidth: column.key === 'workorder_id' ? 15 : 10,
+      maxWidth: 38,
+    })),
+    rows: rows.map((row) => ({
+      cells: DETAIL_COLUMNS.map((column) => {
         const text = valueText(row[column.key], column.key)
-        const href = column.key === 'workorder_id' ? workOrderHref(row) : null
-        const defaultStyle = isBanded ? 4 : 0
-        const hyperlinkStyle = isBanded ? 5 : 1
-        if (!text || text === '-') return `<c r="${ref}" s="${defaultStyle}"/>`
-        if (href) {
-          const relationshipId = `rId${hyperlinkRelationships.length + 1}`
-          hyperlinkRelationships.push({ id: relationshipId, target: href })
-          hyperlinkRefs.push({ ref, relationshipId })
-          return `<c r="${ref}" s="${hyperlinkStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
+        return {
+          value: !text || text === '-' ? null : text,
+          hyperlink: column.key === 'workorder_id' ? workOrderHref(row) : null,
         }
-        return `<c r="${ref}" s="${defaultStyle}" t="inlineStr"><is><t>${escapeXml(text)}</t></is></c>`
-      }).join('')
-      return `<row r="${sheetRowIndex}">${cells}</row>`
-    })
-    .join('')
-  const lastCell = `${lastColumnLetter}${lastRowIndex}`
-  const hyperlinkXml = hyperlinkRefs.length
-    ? `<hyperlinks>${hyperlinkRefs.map((link) => `<hyperlink ref="${link.ref}" r:id="${link.relationshipId}"/>`).join('')}</hyperlinks>`
-    : ''
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <dimension ref="A1:${lastCell}"/>
-  <sheetViews><sheetView workbookViewId="0"><pane ySplit="3" topLeftCell="A4" activePane="bottomLeft" state="frozen"/></sheetView></sheetViews>
-  <sheetFormatPr defaultRowHeight="18"/>
-  ${columnXml}
-  <sheetData>
-    <row r="${titleRowIndex}" ht="28" customHeight="1">${titleCells}</row>
-    <row r="${generatedAtRowIndex}" ht="20" customHeight="1">${generatedAtCells}</row>
-    <row r="${headerRowIndex}" ht="22" customHeight="1">${headerCells}</row>
-    ${bodyRows}
-  </sheetData>
-  <autoFilter ref="A${headerRowIndex}:${lastColumnLetter}${lastRowIndex}"/>
-  <mergeCells count="2"><mergeCell ref="A1:${lastColumnLetter}1"/><mergeCell ref="A2:${lastColumnLetter}2"/></mergeCells>
-  ${hyperlinkXml}
-</worksheet>`
-
-  const workbookFiles = [
-    {
-      name: '[Content_Types].xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>`,
-    },
-    {
-      name: '_rels/.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/workbook.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="Work Order Detail" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`,
-    },
-    {
-      name: 'xl/_rels/workbook.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/styles.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="5">
-    <font><sz val="11"/><name val="Calibri"/></font>
-    <font><u/><color rgb="FF0563C1"/><sz val="11"/><name val="Calibri"/></font>
-    <font><b/><sz val="16"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
-    <font><b/><sz val="11"/><color rgb="FF0B3558"/><name val="Calibri"/></font>
-    <font><i/><sz val="10"/><color rgb="FF5B6B80"/><name val="Calibri"/></font>
-  </fonts>
-  <fills count="5">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF1F5D8F"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFD6E7F2"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFEAF3FA"/><bgColor indexed="64"/></patternFill></fill>
-  </fills>
-  <borders count="2">
-    <border><left/><right/><top/><bottom/><diagonal/></border>
-    <border>
-      <left style="thin"><color rgb="FFB7C7D8"/></left>
-      <right style="thin"><color rgb="FFB7C7D8"/></right>
-      <top style="thin"><color rgb="FFB7C7D8"/></top>
-      <bottom style="thin"><color rgb="FFB7C7D8"/></bottom>
-      <diagonal/>
-    </border>
-  </borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="7">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="2" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="4" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center" wrapText="1"/></xf>
-    <xf numFmtId="0" fontId="4" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-  </cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>`,
-    },
-    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
-  ]
-
-  if (hyperlinkRelationships.length > 0) {
-    workbookFiles.push({
-      name: 'xl/worksheets/_rels/sheet1.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  ${hyperlinkRelationships
-    .map(
-      (link) =>
-        `<Relationship Id="${link.id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="${escapeXml(link.target)}" TargetMode="External"/>`,
-    )
-    .join('\n  ')}
-</Relationships>`,
-    })
-  }
-
-  return createZip(workbookFiles)
+      }),
+    })),
+  })
 }
 
 function downloadWorkOrderGridRows(rows: AssetRow[]) {
   const workbook = createWorkOrderXlsx(rows)
-  const blob = new Blob([workbook], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `work-order-detail-${new Date().toISOString().slice(0, 10)}.xlsx`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
+  return downloadExcelWorkbook(workbook, `work-order-detail-${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
 
 function hasActiveDetailFilters(filters: DetailColumnFilters) {
@@ -1777,6 +1419,11 @@ function pivotMonthLabel(month: string) {
   return bucket ? MONTH_NAMES[bucket.month - 1] : labelForValue(month)
 }
 
+function pivotExcelMonthHeading(month: string) {
+  const bucket = parseMonthBucket(month)
+  return bucket ? `${MONTH_NAMES[bucket.month - 1]} ${bucket.year}` : labelForValue(month)
+}
+
 function pivotBoundaryClass(months: string[], index: number) {
   if (index <= 0) return undefined
 
@@ -1798,87 +1445,30 @@ function createPivotXlsx(title: string, data: CriticalTeamSheetResponse | null, 
   const pivot = pivotRows(data)
   const sortedGroups = sortPivotGroups(pivot.groups, pivot.months, sort)
   const groupColumnLabel = data?.sheet.group_column === 'wo_closed_by' ? 'Closed By' : 'Submit To'
-  const yearGroups = pivotHeaderGroups(pivot.months, 'year')
-  const quarterGroups = pivotHeaderGroups(pivot.months, 'quarter')
-  const totalColumnIndex = pivot.months.length + 1
-  const lastRowIndex = Math.max(3, pivot.groups.length + 4)
-  const lastCell = `${columnLetter(totalColumnIndex)}${lastRowIndex}`
-  const mergeRefs = [
-    'A1:A3',
-    `${columnLetter(totalColumnIndex)}1:${columnLetter(totalColumnIndex)}3`,
-    ...yearGroups
-      .filter((group) => group.endIndex > group.startIndex || !group.isDate)
-      .map((group) =>
-        group.isDate
-          ? `${columnLetter(group.startIndex + 1)}1:${columnLetter(group.endIndex + 1)}1`
-          : `${columnLetter(group.startIndex + 1)}1:${columnLetter(group.endIndex + 1)}3`,
-      ),
-    ...quarterGroups
-      .filter((group) => group.isDate && group.endIndex > group.startIndex)
-      .map((group) => `${columnLetter(group.startIndex + 1)}2:${columnLetter(group.endIndex + 1)}2`),
-  ]
-  const yearCells = [
-    xlsxTextCell(0, 1, groupColumnLabel),
-    ...yearGroups.map((group) => xlsxTextCell(group.startIndex + 1, 1, group.label)),
-    xlsxTextCell(totalColumnIndex, 1, 'Grand Total'),
-  ].join('')
-  const quarterCells = quarterGroups
-    .filter((group) => group.isDate)
-    .map((group) => xlsxTextCell(group.startIndex + 1, 2, group.label))
-    .join('')
-  const monthCells = pivot.months
-    .map((month, index) => parseMonthBucket(month) ? xlsxTextCell(index + 1, 3, pivotMonthLabel(month)) : '')
-    .join('')
-  const bodyRows = sortedGroups
-    .map((row, rowIndex) => {
-      const sheetRowIndex = rowIndex + 4
-      const cells = [
-        xlsxTextCell(0, sheetRowIndex, row.group),
-        ...row.values.map((value, index) => xlsxNumberCell(index + 1, sheetRowIndex, value)),
-        xlsxNumberCell(totalColumnIndex, sheetRowIndex, row.total),
-      ].join('')
-      return `<row r="${sheetRowIndex}">${cells}</row>`
-    })
-    .join('')
-  const totalRowIndex = pivot.groups.length + 4
-  const totalCells = [
-    xlsxTextCell(0, totalRowIndex, 'Grand Total'),
-    ...pivot.grandValues.map((value, index) => xlsxNumberCell(index + 1, totalRowIndex, value)),
-    xlsxNumberCell(totalColumnIndex, totalRowIndex, pivot.grandTotal),
-  ].join('')
-  const mergeCells = mergeRefs.length
-    ? `<mergeCells count="${mergeRefs.length}">${mergeRefs.map((ref) => `<mergeCell ref="${ref}"/>`).join('')}</mergeCells>`
-    : ''
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <dimension ref="A1:${lastCell}"/>
-  <sheetData>
-    <row r="1">${yearCells}</row>
-    <row r="2">${quarterCells}</row>
-    <row r="3">${monthCells}</row>
-    ${bodyRows}
-    <row r="${totalRowIndex}">${totalCells}</row>
-  </sheetData>
-  ${mergeCells}
-</worksheet>`
-
-  return worksheetPackage(title, worksheet)
+  return createPortalExcelWorkbook({
+    title,
+    sheetName: title,
+    columns: [
+      { heading: groupColumnLabel, width: 24 },
+      ...pivot.months.map((month) => ({ heading: pivotExcelMonthHeading(month), width: 13 })),
+      { heading: 'Grand Total', width: 15 },
+    ],
+    rows: [
+      ...sortedGroups.map((row) => ({
+        cells: [row.group, ...row.values, row.total],
+      })),
+      {
+        kind: 'total' as const,
+        cells: ['Grand Total', ...pivot.grandValues, pivot.grandTotal],
+      },
+    ],
+  })
 }
 
 function downloadPivotTable(title: string, data: CriticalTeamSheetResponse | null, sort: PivotSortState | null = null) {
   const workbook = createPivotXlsx(title, data, sort)
-  const blob = new Blob([workbook], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'table'
-  link.href = url
-  link.download = `${slug}-${new Date().toISOString().slice(0, 10)}.xlsx`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
+  return downloadExcelWorkbook(workbook, `${slug}-${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
 
 type CriticalTeamDashboardProps = {
@@ -2170,7 +1760,7 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
         offset += response.rows.length
       }
 
-      downloadWorkOrderGridRows(allRows)
+      await downloadWorkOrderGridRows(allRows)
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : String(requestError))
     } finally {
@@ -2240,7 +1830,7 @@ function CriticalTeamDashboard({ initialSheetId }: CriticalTeamDashboardProps) {
               <SelectTrigger className="critical-team-view-trigger" aria-label="Select Critical Team view">
                 <SelectValue />
               </SelectTrigger>
-              <SelectContent align="end">
+              <SelectContent align="end" className="critical-team-view-content">
                 {Object.entries(sheetGroups).map(([group, sheets]) => (
                   <SelectGroup key={group}>
                     <SelectLabel>{group}</SelectLabel>
@@ -3124,12 +2714,28 @@ function PivotTable({
   const groupColumnLabel = data?.sheet.group_column === 'wo_closed_by' ? 'Closed By' : 'Submit To'
   const [pivotSort, setPivotSort] = useState<PivotSortState | null>(null)
   const [selectedPivotRow, setSelectedPivotRow] = useState<string | null>(null)
+  const [exportingPivot, setExportingPivot] = useState(false)
+  const [pivotExportError, setPivotExportError] = useState('')
   const sortedGroups = sortPivotGroups(pivot.groups, pivot.months, pivotSort)
 
   useEffect(() => {
     setPivotSort(null)
     setSelectedPivotRow(null)
+    setPivotExportError('')
   }, [title])
+
+  async function exportPivotTable() {
+    if (exportingPivot || pivot.groups.length === 0) return
+    setExportingPivot(true)
+    setPivotExportError('')
+    try {
+      await downloadPivotTable(title, data, pivotSort)
+    } catch (error) {
+      setPivotExportError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setExportingPivot(false)
+    }
+  }
 
   function handleSelectableRowKeyDown(event: KeyboardEvent<HTMLTableRowElement>, rowKey: string) {
     if (event.key === 'Enter' || event.key === ' ') {
@@ -3184,16 +2790,17 @@ function PivotTable({
               size="sm"
               className="table-download-button"
               type="button"
-              disabled={pivot.groups.length === 0}
-              onClick={() => downloadPivotTable(title, data, pivotSort)}
+              disabled={pivot.groups.length === 0 || exportingPivot}
+              onClick={exportPivotTable}
             >
               <Download size={14} />
-              Download Excel
+              {exportingPivot ? 'Opening Excel...' : 'Download Excel'}
             </Button>
             {filterAction}
           </>
         }
       />
+      {pivotExportError ? <div className="error-banner">{pivotExportError}</div> : null}
       <div className="table-wrap">
         <table className="matrix-table">
           <colgroup>

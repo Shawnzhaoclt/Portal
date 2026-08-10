@@ -2300,9 +2300,141 @@ td {
   width: min(340px, 42vw);
   min-width: 240px;
   border-radius: 0;
-  border-color: var(--control-border);
-  color: var(--control-text);
-  background: var(--control-bg);
+  border-color: #91acc7 !important;
+  color: #172b44 !important;
+  background-color: #ffffff !important;
+  box-shadow: inset 0 0 0 1px #d9e5f0;
+}
+
+.critical-team-view-trigger [data-slot='select-value'] {
+  color: #172b44 !important;
+}
+
+.critical-team-view-trigger svg {
+  color: #3f5c78 !important;
+  opacity: 1 !important;
+}
+
+html.theme-dark .critical-team-view-trigger {
+  border-color: #6b88a5 !important;
+  color: #f4f8fc !important;
+  background-color: #1a2a3a !important;
+  box-shadow: inset 0 0 0 1px #30465a;
+}
+
+html.theme-dark .critical-team-view-trigger [data-slot='select-value'],
+html.theme-dark .critical-team-view-trigger svg {
+  color: #f4f8fc !important;
+}
+
+/* The view menu is rendered in a Radix portal, outside the workbook shell.
+   Keep its surface and text colors explicit so both Critical Team resources
+   remain readable when the browser or utility classes supply a dark popup. */
+.critical-team-view-content {
+  border-color: #91acc7 !important;
+  background-color: #ffffff !important;
+  color: #172b44 !important;
+  box-shadow: 0 8px 18px rgb(23 43 68 / 18%) !important;
+}
+
+html.theme-light .critical-team-view-content {
+  color-scheme: light;
+}
+
+html.theme-dark .critical-team-view-content {
+  color-scheme: dark;
+  border-color: #6b88a5 !important;
+  background-color: #1a2a3a !important;
+  color: #f4f8fc !important;
+}
+
+.critical-team-view-content [data-slot='select-label'] {
+  color: #4e6d8d !important;
+}
+
+.critical-team-view-content [data-slot='select-item'] {
+  color: #172b44 !important;
+  background-color: #ffffff !important;
+}
+
+.critical-team-view-content [data-slot='select-item'][data-highlighted],
+.critical-team-view-content [data-slot='select-item']:focus {
+  color: #ffffff !important;
+  background-color: #1769aa !important;
+}
+
+.critical-team-view-content [data-slot='select-item'][data-disabled] {
+  color: #8493a3 !important;
+}
+
+.critical-team-view-content [data-slot='select-item'] svg,
+.critical-team-view-content [data-slot='select-scroll-up-button'],
+.critical-team-view-content [data-slot='select-scroll-down-button'] {
+  color: #172b44 !important;
+}
+
+.critical-team-view-content [data-slot='select-scroll-up-button'],
+.critical-team-view-content [data-slot='select-scroll-down-button'] {
+  background-color: #ffffff !important;
+}
+
+html.theme-dark .critical-team-view-content [data-slot='select-label'] {
+  color: #b9c9d8 !important;
+}
+
+html.theme-dark .critical-team-view-content [data-slot='select-item'] {
+  color: #f4f8fc !important;
+  background-color: #1a2a3a !important;
+}
+
+html.theme-dark .critical-team-view-content [data-slot='select-item'] svg,
+html.theme-dark .critical-team-view-content [data-slot='select-scroll-up-button'],
+html.theme-dark .critical-team-view-content [data-slot='select-scroll-down-button'] {
+  color: #f4f8fc !important;
+}
+
+html.theme-dark .critical-team-view-content [data-slot='select-scroll-up-button'],
+html.theme-dark .critical-team-view-content [data-slot='select-scroll-down-button'] {
+  background-color: #1a2a3a !important;
+}
+
+/* Radix creates a viewport and nested spans inside a portal.  Give that
+   complete subtree an explicit palette; otherwise an inherited popover token
+   can leave a dark list with dark text in the WebView. */
+[data-radix-popper-content-wrapper]:has(.critical-team-view-content),
+.critical-team-view-content,
+.critical-team-view-content [data-radix-select-viewport],
+.critical-team-view-content [data-radix-select-viewport] * {
+  --popover: #ffffff !important;
+  --popover-foreground: #172b44 !important;
+  color: #172b44 !important;
+  background-color: #ffffff !important;
+}
+
+.critical-team-view-content [data-slot='select-item'][data-highlighted],
+.critical-team-view-content [data-slot='select-item'][data-highlighted] *,
+.critical-team-view-content [data-slot='select-item']:focus,
+.critical-team-view-content [data-slot='select-item']:focus * {
+  color: #ffffff !important;
+  background-color: #1769aa !important;
+}
+
+html.theme-dark [data-radix-popper-content-wrapper]:has(.critical-team-view-content),
+html.theme-dark .critical-team-view-content,
+html.theme-dark .critical-team-view-content [data-radix-select-viewport],
+html.theme-dark .critical-team-view-content [data-radix-select-viewport] * {
+  --popover: #1a2a3a !important;
+  --popover-foreground: #f4f8fc !important;
+  color: #f4f8fc !important;
+  background-color: #1a2a3a !important;
+}
+
+html.theme-dark .critical-team-view-content [data-slot='select-item'][data-highlighted],
+html.theme-dark .critical-team-view-content [data-slot='select-item'][data-highlighted] *,
+html.theme-dark .critical-team-view-content [data-slot='select-item']:focus,
+html.theme-dark .critical-team-view-content [data-slot='select-item']:focus * {
+  color: #ffffff !important;
+  background-color: #1769aa !important;
 }
 
 .sheet-canvas > .overview-layout {

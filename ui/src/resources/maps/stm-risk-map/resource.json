@@ -6,6 +6,10 @@
   "url": "/map_stm_risk",
   "category": "Maps",
   "description": "MapLibre PMTiles viewer for planning-team risk layers, asset search, inventory metrics, and risk summaries.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/stm-risk-map.png",
+    "thumbnail_dark": "assets/portal-thumbnails/stm-risk-map-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

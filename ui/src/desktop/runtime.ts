@@ -105,3 +105,13 @@ export async function openExternalUrl(url: string) {
   if (!opened) throw new Error('The browser blocked the new window.')
   opened.opener = null
 }
+
+export async function saveAndOpenExcelExport(fileName: string, bytes: Uint8Array) {
+  if (!isDesktopRuntime()) throw new Error('Native Excel exports are available only inside Tauri.')
+  return invoke<string>('save_and_open_excel_export', {
+    request: {
+      fileName,
+      bytes: Array.from(bytes),
+    },
+  })
+}

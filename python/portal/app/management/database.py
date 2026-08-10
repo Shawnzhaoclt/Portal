@@ -258,7 +258,7 @@ def _resources_table_allows_current_types(connection, table_name: str = RESOURCE
         text("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = :table_name"),
         {"table_name": table_name},
     ).scalar()
-    return not sql or all(resource_type in sql for resource_type in ("'report'", "'dataset'", "'service'"))
+    return not sql or all(resource_type in sql for resource_type in ("'report'", "'form'", "'dataset'", "'service'"))
 
 
 def _migrate_resource_types() -> None:
@@ -299,7 +299,7 @@ def _migrate_resource_types() -> None:
                         is_active INTEGER NOT NULL,
                         created_at VARCHAR DEFAULT CURRENT_TIMESTAMP NOT NULL,
                         updated_at VARCHAR DEFAULT CURRENT_TIMESTAMP NOT NULL,
-                        CONSTRAINT ck_resources_type CHECK (resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api')),
+                        CONSTRAINT ck_resources_type CHECK (resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'form', 'dataset', 'service', 'admin', 'api')),
                         CONSTRAINT ck_resources_resource_id_format CHECK (resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'),
                         CONSTRAINT ck_resources_is_public CHECK (is_public IN (0, 1)),
                         CONSTRAINT ck_resources_is_active CHECK (is_active IN (0, 1)),

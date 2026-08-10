@@ -416,13 +416,23 @@ def _apply_test_access(
     enabled: str | None,
     user_id: int | None,
     role: str | None,
+    mode: str | None,
 ) -> User:
     if str(enabled or "").strip().lower() not in {"1", "true", "yes"}:
         return user
-    if not is_management_admin_session(user):
+    if not (bool(user.is_admin) or bool(user.is_system_admin) or is_management_admin_session(user)):
         raise HTTPException(status_code=403, detail="An Admin or System Admin role is required to view another user's access.")
     if user_id is None:
         raise HTTPException(status_code=400, detail="A user is required for access preview.")
+
+    normalized_mode = str(mode or "read_only").strip().lower()
+    if normalized_mode not in {"read_only", "read_write"}:
+        raise HTTPException(status_code=400, detail="Unsupported user simulation mode.")
+    if normalized_mode == "read_write":
+        if not _desktop_runtime():
+            raise HTTPException(status_code=403, detail="Read/write user simulation is available only in Portal Desktop.")
+        if not bool(user.is_system_admin):
+            raise HTTPException(status_code=403, detail="Only a System Admin can start read/write user simulation.")
 
     preview_user = db.get(User, user_id)
     if preview_user is None or preview_user.deleted_at is not None or preview_user.is_active != 1:
@@ -437,7 +447,8 @@ def _apply_test_access(
         {
             "actor_user_id": user.id,
             "actor_name": display_name(user),
-            "read_only": True,
+            "mode": normalized_mode,
+            "read_only": normalized_mode == "read_only",
         },
     )
     return preview_user
@@ -449,6 +460,7 @@ def get_current_user(
     test_access: str | None = Header(default=None, alias="X-Portal-Test-Access"),
     test_user_id: int | None = Header(default=None, alias="X-Portal-Test-User-Id"),
     test_role: str | None = Header(default=None, alias="X-Portal-Test-Role"),
+    test_mode: str | None = Header(default=None, alias="X-Portal-Test-Mode"),
     db: Session = Depends(get_db),
 ) -> User:
     if _desktop_runtime() and not _manager_runtime() and request.path.startswith("/api/admin"):
@@ -467,8 +479,9 @@ def get_current_user(
             # evaluating access-preview authorization. selected_user_role()
             # already resolves the user's highest available role when no role
             # has been explicitly selected for this request.
-            current_user = _apply_test_access(desktop_user, db, test_access, test_user_id, test_role)
-            if getattr(current_user, "_portal_test_access", None) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            current_user = _apply_test_access(desktop_user, db, test_access, test_user_id, test_role, test_mode)
+            test_context = getattr(current_user, "_portal_test_access", None)
+            if test_context and test_context.get("read_only", True) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
                 raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
             return current_user
         if authorization:
@@ -481,14 +494,21 @@ def get_current_user(
     selected_role = str(payload.get("role") or "")
     if selected_role:
         set_selected_user_role(user, selected_role)
-    current_user = _apply_test_access(user, db, test_access, test_user_id, test_role)
-    if getattr(current_user, "_portal_test_access", None) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+    current_user = _apply_test_access(user, db, test_access, test_user_id, test_role, test_mode)
+    test_context = getattr(current_user, "_portal_test_access", None)
+    if test_context and test_context.get("read_only", True) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
         raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
     return current_user
 
 
 def get_current_admin_user(current_user: User = Depends(get_current_user)) -> User:
     require_management_admin(current_user)
+    return current_user
+
+
+def get_current_test_access_admin(current_user: User = Depends(get_current_user)) -> User:
+    if not bool(current_user.is_system_admin):
+        raise HTTPException(status_code=403, detail="System Admin access is required to simulate another user.")
     return current_user
 
 
@@ -544,7 +564,7 @@ def desktop_login(db: Session = Depends(get_db)) -> dict:
             detail=f"The Windows account identity ({_desktop_identity_label()}) is not an active Portal user.",
         )
 
-    selected_role = "user"
+    selected_role = "system_admin" if bool(user.is_system_admin) else "user"
     set_selected_user_role(user, selected_role)
     # Portal Manager authenticates against the same Windows identity, but it
     # is an operator/administration host and must not block on the desktop
@@ -567,7 +587,7 @@ def switch_role(
     role = payload.role.strip()
     if not role:
         raise HTTPException(status_code=400, detail="Role is required.")
-    if _desktop_runtime() and not _manager_runtime() and role != "user":
+    if _desktop_runtime() and not _manager_runtime() and role != "user" and not bool(current_user.is_system_admin):
         raise HTTPException(status_code=403, detail="Elevated Portal roles are available only in Portal Manager.")
 
     user = db.merge(current_user)
@@ -639,6 +659,25 @@ def admin_summary(
         "resources": db.scalar(select(func.count()).select_from(Resource)) or 0,
         "permissions": db.scalar(select(func.count()).select_from(ResourcePermission)) or 0,
     }
+
+
+@router.get("/api/test-access/users")
+def list_test_access_users(
+    _current_user: User = Depends(get_current_test_access_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Return active identities available to the Desktop test harness.
+
+    This intentionally is not part of the Portal Administration API. Desktop
+    uses it only to populate the System Admin simulation picker, while all
+    simulated requests continue through the normal user/permission checks.
+    """
+    users = db.scalars(
+        select(User)
+        .where(User.deleted_at.is_(None), User.is_active == 1)
+        .order_by(User.last_name, User.first_name)
+    ).all()
+    return {"users": [serialize_user(db, user) for user in users]}
 
 
 @router.get("/api/admin/users")
@@ -1390,6 +1429,26 @@ def list_dictionaries(
     ).all()
     return {
         "dictionaries": [_serialize_dictionary(db, dictionary) for dictionary in dictionaries]
+    }
+
+
+@router.get("/api/dictionaries/{dictionary_key}/items")
+def list_active_dictionary_items(
+    dictionary_key: str,
+    _current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Expose active reference values to authenticated Portal resources."""
+    dictionary = _dictionary_or_404(db, dictionary_key)
+    if not bool(dictionary.is_active):
+        raise HTTPException(status_code=404, detail="Dictionary was not found.")
+    return {
+        "dictionary": _serialize_dictionary(db, dictionary),
+        "items": [
+            _serialize_dictionary_item(item)
+            for item in _dictionary_items(db, dictionary.id)
+            if bool(item.is_active)
+        ],
     }
 
 

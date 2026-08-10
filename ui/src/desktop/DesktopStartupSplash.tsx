@@ -2,6 +2,11 @@ import { useEffect, useState } from 'react'
 import { AlertTriangle, LoaderCircle, LogOut, RotateCw } from 'lucide-react'
 import stormwaterLogo from '../assets/stormwater-logo.png'
 import { formatLocalClock } from '../lib/dateTime'
+import {
+  MAINTENANCE_END_HOUR,
+  MAINTENANCE_SPLASH_DURATION_SECONDS,
+  MAINTENANCE_START_HOUR,
+} from './maintenance'
 import './DesktopStartupSplash.css'
 
 const STARTUP_MESSAGES = [
@@ -21,8 +26,9 @@ type DesktopStartupSplashProps = {
 
 export default function DesktopStartupSplash({ error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
-  const maintenanceStart = formatLocalClock(20 * 60)
-  const maintenanceEnd = formatLocalClock(5 * 60)
+  const [maintenanceSecondsRemaining, setMaintenanceSecondsRemaining] = useState(MAINTENANCE_SPLASH_DURATION_SECONDS)
+  const maintenanceStart = formatLocalClock(MAINTENANCE_START_HOUR * 60)
+  const maintenanceEnd = formatLocalClock(MAINTENANCE_END_HOUR * 60)
 
   useEffect(() => {
     if (error || maintenance) return
@@ -32,9 +38,17 @@ export default function DesktopStartupSplash({ error, message, maintenance = fal
     return () => window.clearInterval(timer)
   }, [error, maintenance])
 
+  useEffect(() => {
+    if (!maintenance) return
+    const timer = window.setInterval(() => {
+      setMaintenanceSecondsRemaining((current) => Math.max(0, current - 1))
+    }, 1_000)
+    return () => window.clearInterval(timer)
+  }, [maintenance])
+
   return (
     <main className="desktop-startup-screen">
-      <section className="desktop-startup-content" aria-live="polite">
+      <section className={`desktop-startup-content${maintenance ? ' maintenance' : ''}`} aria-live="polite">
         <img className="desktop-startup-logo" src={stormwaterLogo} alt="Charlotte-Mecklenburg Storm Water Services" />
         <div className="desktop-startup-rule" />
         <h1>Storm Water Asset Intelligence Portal</h1>
@@ -45,7 +59,10 @@ export default function DesktopStartupSplash({ error, message, maintenance = fal
             <p className="desktop-startup-maintenance-message">
               {message ?? `The Portal is under maintenance daily from ${maintenanceStart} through ${maintenanceEnd}. Please try again after ${maintenanceEnd}.`}
             </p>
-            <p className="desktop-startup-maintenance-message">Portal will close automatically in 15 seconds.</p>
+            <div className="desktop-startup-countdown" role="timer" aria-label={`Portal will close automatically in ${maintenanceSecondsRemaining} seconds`}>
+              <strong>{maintenanceSecondsRemaining}</strong>
+              <span>seconds until Portal closes</span>
+            </div>
             <div className="desktop-startup-actions">
               <button onClick={onExit} type="button">
                 <LogOut size={18} /> Exit

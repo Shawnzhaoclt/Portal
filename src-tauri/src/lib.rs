@@ -10,11 +10,12 @@ use std::{
     time::Duration,
 };
 use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, StatusCode};
+use tauri::Manager;
 
 mod business_sync;
 
 #[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+use std::os::windows::{ffi::OsStrExt, process::CommandExt};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 #[cfg(target_os = "windows")]
@@ -27,9 +28,10 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAINTENANCE_SPLASH_DURATION: Duration = Duration::from_secs(15);
 const MAINTENANCE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+const MAX_EXCEL_EXPORT_BYTES: usize = 100 * 1024 * 1024;
 
 fn is_scheduled_maintenance_hour(hour: u16) -> bool {
-    hour >= 20 || hour < 5
+    hour >= 22 || hour < 5
 }
 
 #[cfg(target_os = "windows")]
@@ -47,7 +49,10 @@ fn local_hour() -> Option<u16> {
 fn start_maintenance_exit_monitor(app: tauri::AppHandle) {
     thread::spawn(move || {
         if local_hour().is_some_and(is_scheduled_maintenance_hour) {
-            thread::sleep(MAINTENANCE_SPLASH_DURATION);
+            // The renderer displays the 15-second countdown. Keep the native
+            // fallback one monitor interval behind it so the host cannot exit
+            // before a runtime transition has shown the complete countdown.
+            thread::sleep(MAINTENANCE_SPLASH_DURATION + MAINTENANCE_MONITOR_INTERVAL);
             app.exit(0);
             return;
         }
@@ -55,6 +60,7 @@ fn start_maintenance_exit_monitor(app: tauri::AppHandle) {
         loop {
             thread::sleep(MAINTENANCE_MONITOR_INTERVAL);
             if local_hour().is_some_and(is_scheduled_maintenance_hour) {
+                thread::sleep(MAINTENANCE_SPLASH_DURATION + MAINTENANCE_MONITOR_INTERVAL);
                 app.exit(0);
                 return;
             }
@@ -192,7 +198,7 @@ fn windows_identity() -> Result<WindowsIdentity, String> {
 #[serde(rename_all = "camelCase")]
 struct DesktopContext {
     application_name: &'static str,
-    application_version: &'static str,
+    application_version: String,
     runtime: &'static str,
     user_name: String,
     user_domain: String,
@@ -461,6 +467,61 @@ fn response_builder(
     builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
 }
 
+const INITIAL_MEDIA_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+
+fn file_response_range(
+    range_header: Option<&str>,
+    file_size: u64,
+    is_media: bool,
+) -> (u64, u64, u16) {
+    let last_byte = file_size.saturating_sub(1);
+    if file_size == 0 {
+        return (0, 0, StatusCode::OK.as_u16());
+    }
+
+    let parsed_range = range_header
+        .and_then(|value| value.strip_prefix("bytes="))
+        .and_then(|value| value.split(',').next())
+        .and_then(|value| value.trim().split_once('-'));
+
+    if let Some((start_text, end_text)) = parsed_range {
+        let start_text = start_text.trim();
+        let end_text = end_text.trim();
+
+        if start_text.is_empty() {
+            // Suffix ranges such as bytes=-524288 are commonly used to read an
+            // MP4 moov box stored at the end of a large inspection video.
+            let suffix_length = end_text.parse::<u64>().unwrap_or(1).max(1);
+            let start = file_size.saturating_sub(suffix_length.min(file_size));
+            return (start, last_byte, StatusCode::PARTIAL_CONTENT.as_u16());
+        }
+
+        let start = start_text.parse::<u64>().unwrap_or(0).min(last_byte);
+        let end = if end_text.is_empty() {
+            if is_media {
+                start
+                    .saturating_add(INITIAL_MEDIA_CHUNK_BYTES - 1)
+                    .min(last_byte)
+            } else {
+                last_byte
+            }
+        } else {
+            end_text.parse::<u64>().unwrap_or(last_byte).min(last_byte)
+        };
+        return (start, end.max(start), StatusCode::PARTIAL_CONTENT.as_u16());
+    }
+
+    if is_media && file_size > INITIAL_MEDIA_CHUNK_BYTES {
+        return (
+            0,
+            INITIAL_MEDIA_CHUNK_BYTES - 1,
+            StatusCode::PARTIAL_CONTENT.as_u16(),
+        );
+    }
+
+    (0, last_byte, StatusCode::OK.as_u16())
+}
+
 fn file_protocol_response(
     request: &HttpRequest<Vec<u8>>,
     envelope: &serde_json::Value,
@@ -474,45 +535,21 @@ fn file_protocol_response(
         .metadata()
         .map_err(|error| format!("Could not inspect {path}: {error}"))?
         .len();
-    let range = request
+    let range_header = request
         .headers()
         .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("bytes="))
-        .and_then(|value| value.split_once('-'));
+        .and_then(|value| value.to_str().ok());
     // Media elements sometimes issue their initial metadata request without a
     // Range header. Returning the whole file in that case turns a small video
     // probe into a multi-hundred-megabyte SMB read. Supply a normal first range
     // instead; Chromium will request subsequent ranges while it plays or seeks.
-    const INITIAL_MEDIA_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
     let is_media = envelope
         .get("mediaType")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|media_type| {
             media_type.starts_with("video/") || media_type.starts_with("audio/")
         });
-    let (start, end, status) = if let Some((start, end)) = range {
-        let start = start
-            .parse::<u64>()
-            .unwrap_or(0)
-            .min(file_size.saturating_sub(1));
-        let end = if end.is_empty() {
-            file_size.saturating_sub(1)
-        } else {
-            end.parse::<u64>()
-                .unwrap_or(file_size.saturating_sub(1))
-                .min(file_size.saturating_sub(1))
-        };
-        (start, end.max(start), StatusCode::PARTIAL_CONTENT.as_u16())
-    } else if is_media && file_size > INITIAL_MEDIA_CHUNK_BYTES {
-        (
-            0,
-            INITIAL_MEDIA_CHUNK_BYTES - 1,
-            StatusCode::PARTIAL_CONTENT.as_u16(),
-        )
-    } else {
-        (0, file_size.saturating_sub(1), StatusCode::OK.as_u16())
-    };
+    let (start, end, status) = file_response_range(range_header, file_size, is_media);
     let length = if file_size == 0 { 0 } else { end - start + 1 };
     file.seek(SeekFrom::Start(start))
         .map_err(|error| format!("Could not seek {path}: {error}"))?;
@@ -740,6 +777,20 @@ fn installation_root() -> Result<PathBuf, String> {
         }
     }
     Ok(executable_directory)
+}
+
+fn packaged_application_version(root: &Path) -> Option<String> {
+    fs::read_to_string(root.join("VERSION"))
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn installed_application_version() -> String {
+    installation_root()
+        .ok()
+        .and_then(|root| packaged_application_version(&root))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 }
 
 fn portal_config_path() -> Result<PathBuf, String> {
@@ -1184,6 +1235,188 @@ fn open_external_url(url: String) -> Result<(), String> {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExcelExportRequest {
+    file_name: String,
+    bytes: Vec<u8>,
+}
+
+fn validated_excel_export_file_name(candidate: &str) -> Result<String, String> {
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return Err("The Excel export file name is empty.".to_string());
+    }
+
+    let path = Path::new(candidate);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The Excel export file name is invalid.".to_string())?;
+    if file_name != candidate || candidate.ends_with('.') || candidate.ends_with(' ') {
+        return Err("The Excel export file name must not contain a folder path.".to_string());
+    }
+    if candidate.chars().any(|value| {
+        value < ' ' || matches!(value, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
+        return Err("The Excel export file name contains an invalid character.".to_string());
+    }
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("xlsx"))
+    {
+        return Err("Portal can open only .xlsx exports in Excel.".to_string());
+    }
+
+    Ok(file_name.to_string())
+}
+
+fn save_excel_export(
+    download_directory: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    fs::create_dir_all(download_directory).map_err(|error| {
+        format!(
+            "Could not create the Windows Downloads folder at {}: {error}",
+            download_directory.display()
+        )
+    })?;
+
+    let path = Path::new(file_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Portal export");
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("xlsx");
+
+    for sequence in 0..10_000 {
+        let candidate_name = if sequence == 0 {
+            file_name.to_string()
+        } else {
+            format!("{stem} ({sequence}).{extension}")
+        };
+        let candidate = download_directory.join(candidate_name);
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(format!(
+                    "Could not create the Excel export at {}: {error}",
+                    candidate.display()
+                ))
+            }
+        };
+
+        if let Err(error) = file.write_all(bytes) {
+            drop(file);
+            let _ = fs::remove_file(&candidate);
+            return Err(format!(
+                "Could not write the Excel export at {}: {error}",
+                candidate.display()
+            ));
+        }
+        return Ok(candidate);
+    }
+
+    Err("Could not choose an available Excel export file name in Downloads.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn open_excel_export(path: &Path) -> Result<(), String> {
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!(
+            "Windows could not open the exported workbook in Excel (error {}).",
+            result as isize
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_excel_export(_path: &Path) -> Result<(), String> {
+    Err("Opening Excel exports is supported only by the Windows desktop build.".to_string())
+}
+
+fn excel_export_download_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Ok(path) = app.path().download_dir() {
+        return Ok(path);
+    }
+
+    if let Some(user_profile) = env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(user_profile).join("Downloads"));
+    }
+
+    match (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+        (Some(home_drive), Some(home_path)) if !home_drive.is_empty() && !home_path.is_empty() => {
+            let home = format!(
+                "{}{}",
+                home_drive.to_string_lossy(),
+                home_path.to_string_lossy()
+            );
+            Ok(PathBuf::from(home).join("Downloads"))
+        }
+        _ => Err(
+            "Windows could not locate a Downloads folder or determine the current user profile."
+                .to_string(),
+        ),
+    }
+}
+
+#[tauri::command]
+async fn save_and_open_excel_export(
+    app: tauri::AppHandle,
+    request: ExcelExportRequest,
+) -> Result<String, String> {
+    if request.bytes.is_empty() {
+        return Err("The generated Excel workbook is empty.".to_string());
+    }
+    if request.bytes.len() > MAX_EXCEL_EXPORT_BYTES {
+        return Err(format!(
+            "The generated Excel workbook exceeds the {} MB export limit.",
+            MAX_EXCEL_EXPORT_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let file_name = validated_excel_export_file_name(&request.file_name)?;
+    let download_directory = excel_export_download_directory(&app)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = save_excel_export(&download_directory, &file_name, &request.bytes)?;
+        open_excel_export(&path).map_err(|error| {
+            format!(
+                "The workbook was saved to {}, but it could not be opened. {error}",
+                path.display()
+            )
+        })?;
+        Ok(path.display().to_string())
+    })
+    .await
+    .map_err(|error| format!("The Excel export task failed: {error}"))?
+}
+
 fn system_database_path() -> Result<PathBuf, String> {
     if let Some(configured) = env::var_os("PORTAL_SYSTEM_DB") {
         let path = PathBuf::from(configured);
@@ -1278,7 +1511,7 @@ fn desktop_context() -> Result<DesktopContext, String> {
 
     Ok(DesktopContext {
         application_name: "Storm Water Asset Intelligence Portal",
-        application_version: env!("CARGO_PKG_VERSION"),
+        application_version: installed_application_version(),
         runtime: "tauri",
         user_name: env::var("USERNAME").unwrap_or_else(|_| "Windows user".to_string()),
         user_domain: env::var("USERDOMAIN").unwrap_or_default(),
@@ -1312,6 +1545,12 @@ async fn python_request(request: serde_json::Value) -> Result<serde_json::Value,
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            if let (Some(icon), Some(window)) = (
+                app.default_window_icon().cloned(),
+                app.get_webview_window("main"),
+            ) {
+                window.set_icon(icon)?;
+            }
             start_maintenance_exit_monitor(app.handle().clone());
             Ok(())
         })
@@ -1327,6 +1566,7 @@ pub fn run() {
             client_settings,
             business_sync_status,
             open_external_url,
+            save_and_open_excel_export,
             python_health_check,
             python_request
         ])
@@ -1336,17 +1576,21 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::{configure_system_database_access, is_scheduled_maintenance_hour};
+    use super::{
+        configure_system_database_access, file_response_range, is_scheduled_maintenance_hour,
+        packaged_application_version, save_excel_export, validated_excel_export_file_name,
+        INITIAL_MEDIA_CHUNK_BYTES,
+    };
     use std::{env, fs, process, time::SystemTime};
 
     #[test]
-    fn scheduled_maintenance_spans_eight_pm_through_five_am() {
-        assert!(is_scheduled_maintenance_hour(20));
+    fn scheduled_maintenance_spans_ten_pm_through_five_am() {
+        assert!(is_scheduled_maintenance_hour(22));
         assert!(is_scheduled_maintenance_hour(23));
         assert!(is_scheduled_maintenance_hour(0));
         assert!(is_scheduled_maintenance_hour(4));
         assert!(!is_scheduled_maintenance_hour(5));
-        assert!(!is_scheduled_maintenance_hour(19));
+        assert!(!is_scheduled_maintenance_hour(21));
     }
 
     #[test]
@@ -1373,5 +1617,100 @@ mod tests {
         permissions.set_readonly(false);
         fs::set_permissions(&database, permissions).expect("cleanup permissions");
         fs::remove_file(database).expect("test cleanup");
+    }
+
+    #[test]
+    fn packaged_version_comes_from_the_portable_version_file() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "portal-desktop-version-test-{}-{unique}",
+            process::id()
+        ));
+        fs::create_dir_all(&root).expect("test root");
+        fs::write(root.join("VERSION"), b"2.4.1\r\n").expect("test version");
+
+        assert_eq!(
+            packaged_application_version(&root).as_deref(),
+            Some("2.4.1")
+        );
+
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
+    fn excel_export_file_name_must_be_a_local_xlsx_name() {
+        assert_eq!(
+            validated_excel_export_file_name("Pending AIFs.xlsx").as_deref(),
+            Ok("Pending AIFs.xlsx")
+        );
+        assert!(validated_excel_export_file_name("folder/report.xlsx").is_err());
+        assert!(validated_excel_export_file_name("report.pdf").is_err());
+    }
+
+    #[test]
+    fn excel_export_uses_a_new_name_instead_of_overwriting() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "portal-desktop-export-test-{}-{unique}",
+            process::id()
+        ));
+
+        let first = save_excel_export(&root, "Portal Report.xlsx", b"first").expect("first export");
+        let second =
+            save_excel_export(&root, "Portal Report.xlsx", b"second").expect("second export");
+
+        assert_eq!(
+            first.file_name().and_then(|value| value.to_str()),
+            Some("Portal Report.xlsx")
+        );
+        assert_eq!(
+            second.file_name().and_then(|value| value.to_str()),
+            Some("Portal Report (1).xlsx")
+        );
+        assert_eq!(fs::read(first).expect("first bytes"), b"first");
+        assert_eq!(fs::read(second).expect("second bytes"), b"second");
+
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
+    fn media_open_ended_range_is_limited_to_one_chunk() {
+        let file_size = 656_352_868;
+        assert_eq!(
+            file_response_range(Some("bytes=0-"), file_size, true),
+            (0, INITIAL_MEDIA_CHUNK_BYTES - 1, 206)
+        );
+        assert_eq!(
+            file_response_range(Some("bytes=312000000-"), file_size, true,),
+            (
+                312_000_000,
+                312_000_000 + INITIAL_MEDIA_CHUNK_BYTES - 1,
+                206,
+            )
+        );
+    }
+
+    #[test]
+    fn media_suffix_range_reads_the_end_of_the_video() {
+        let file_size = 656_352_868;
+        assert_eq!(
+            file_response_range(Some("bytes=-524288"), file_size, true),
+            (file_size - 524_288, file_size - 1, 206)
+        );
+    }
+
+    #[test]
+    fn non_media_open_ended_range_keeps_download_semantics() {
+        let file_size = 10_000_000;
+        assert_eq!(
+            file_response_range(Some("bytes=200-"), file_size, false),
+            (200, file_size - 1, 206)
+        );
     }
 }

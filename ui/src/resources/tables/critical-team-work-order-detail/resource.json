@@ -6,6 +6,10 @@
   "url": "/tab_critical_team",
   "category": "Operations",
   "description": "Work-order details and inspection, report, and review completion cross-tabs.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/critical-team-tables.png",
+    "thumbnail_dark": "assets/portal-thumbnails/critical-team-tables-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

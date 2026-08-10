@@ -289,6 +289,87 @@ select {
   font: inherit;
 }
 
+/* Keep native option lists readable when the operating-system menu does not
+   inherit the application's theme colors. */
+html.theme-light select {
+  color: var(--control-text);
+  color-scheme: light;
+  background-color: var(--input-bg);
+}
+
+html.theme-light select option,
+html.theme-light select optgroup {
+  color: var(--control-text);
+  background-color: var(--input-bg);
+}
+
+html.theme-dark select {
+  color: var(--control-text);
+  color-scheme: dark;
+  background-color: var(--input-bg);
+}
+
+html.theme-dark select option,
+html.theme-dark select optgroup {
+  color: var(--control-text);
+  background-color: var(--input-bg);
+}
+
+html.theme-light select option:checked,
+html.theme-dark select option:checked {
+  color: var(--primary-foreground);
+  background-color: var(--accent);
+}
+
+/* Radix Select renders its menu in a portal, so give the menu and every
+   option an explicit surface/text pairing instead of relying on browser or
+   Tailwind color defaults. */
+html.theme-light [data-slot="select-content"],
+html.theme-dark [data-slot="select-content"] {
+  border: 1px solid var(--panel-border-strong);
+  background: var(--popup-bg);
+  color: var(--panel-text);
+  color-scheme: var(--color-scheme, light);
+}
+
+html.theme-light [data-slot="select-content"] {
+  color-scheme: light;
+}
+
+html.theme-dark [data-slot="select-content"] {
+  color-scheme: dark;
+}
+
+[data-slot="select-content"] [data-slot="select-label"] {
+  color: var(--panel-muted);
+}
+
+[data-slot="select-content"] [data-slot="select-item"] {
+  color: var(--panel-text);
+  background: transparent;
+}
+
+[data-slot="select-content"] [data-slot="select-item"][data-highlighted],
+[data-slot="select-content"] [data-slot="select-item"]:focus {
+  color: var(--primary-foreground);
+  background: var(--accent);
+}
+
+[data-slot="select-content"] [data-slot="select-item"][data-disabled] {
+  color: var(--panel-disabled);
+}
+
+[data-slot="select-content"] [data-slot="select-item"] svg,
+[data-slot="select-content"] [data-slot="select-scroll-up-button"],
+[data-slot="select-content"] [data-slot="select-scroll-down-button"] {
+  color: var(--panel-text);
+}
+
+[data-slot="select-content"] [data-slot="select-scroll-up-button"],
+[data-slot="select-content"] [data-slot="select-scroll-down-button"] {
+  background: var(--popup-bg);
+}
+
 button {
   cursor: pointer;
 }

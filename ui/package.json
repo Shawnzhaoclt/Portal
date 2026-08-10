@@ -10,7 +10,7 @@
     "desktop:portable": "powershell -NoProfile -ExecutionPolicy Bypass -File ../desktop/scripts/build-portable.ps1",
     "ingest:critical-assets": "python scripts/critical-assets/load-duckdb.py",
     "ingest:critical-team": "python scripts/critical-team/load-duckdb.py",
-    "build": "tsc -b && vite build",
+    "build": "node scripts/validate-resource-thumbnails.mjs && tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },

@@ -63,7 +63,7 @@ class User(Base):
 class Resource(Base):
     __tablename__ = "SYS_RESOURCES"
     __table_args__ = (
-        CheckConstraint("resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api')", name="ck_resources_type"),
+        CheckConstraint("resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'form', 'dataset', 'service', 'admin', 'api')", name="ck_resources_type"),
         CheckConstraint("resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'", name="ck_resources_resource_id_format"),
         CheckConstraint("is_public IN (0, 1)", name="ck_resources_is_public"),
         CheckConstraint("is_active IN (0, 1)", name="ck_resources_is_active"),

@@ -467,6 +467,10 @@ Recommended additions to each `resource.json`:
 ```json
 {
   "resource_id": "RPT5W1C0",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/proactive-team-cctv-review.png",
+    "thumbnail_dark": "assets/portal-thumbnails/proactive-team-cctv-review-dark.png"
+  },
   "runtime": {
     "desktop": true,
     "requires_network": true,
@@ -478,6 +482,11 @@ Recommended additions to each `resource.json`:
 ```
 
 Resource metadata remains discoverable at build time and readable by React, Rust, Python, and maintenance tools. Duplicate resource IDs must fail validation and block registration or packaging.
+
+Resource thumbnail presentation follows the branded illustration, metadata,
+validation, and migration requirements in `docs/dashboard-integration.md`. Each
+resource must declare its own light and dark assets; filename inference and reuse of
+another resource's thumbnail are not permitted.
 
 ## Desktop Command Contract
 

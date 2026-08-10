@@ -84,10 +84,12 @@ bundled updater, applies the selected payload, and restarts. The updater records
 the applied release in `config\update-state.json`, so an already applied
 database-only release is not offered again.
 
-Portal is unavailable during the daily maintenance window from 8:00 PM through
+Portal is temporarily unavailable during the daily maintenance window from 10:00 PM through
 5:00 AM local time. A launch during that window shows the maintenance splash for
-15 seconds and then exits. A Portal session that is already open closes when the
-maintenance window begins, including after the workstation resumes or regains focus.
+15 seconds and then exits. A Portal session that is already open replaces its current
+view with the same dynamic 15-second shutdown countdown when the maintenance window
+begins, including after the workstation resumes or regains focus, and exits only after
+the countdown completes.
 
 The portable folder intentionally excludes DuckDB, PMTiles, map styles, sprites, and
 map configuration. Those immutable inputs are read from the `shared.dataRoot` path in

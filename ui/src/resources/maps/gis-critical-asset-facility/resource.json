@@ -6,6 +6,10 @@
   "url": "/map_critical_asset_facility",
   "category": "Maps",
   "description": "Spatial view of culvert facilities, pipes, structures, and current risk values.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/gis-critical-asset-facility.png",
+    "thumbnail_dark": "assets/portal-thumbnails/gis-critical-asset-facility-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

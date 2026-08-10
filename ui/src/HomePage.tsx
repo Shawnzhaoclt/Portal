@@ -29,13 +29,14 @@ import {
   CRITICAL_TEAM_SHEET_ROUTES,
   DASHBOARD_CATALOG,
   PORTAL_LOGIN_ROUTE,
+  RESOURCE_PRESENTATION_BY_KEY,
   type DashboardCatalogItem,
 } from './dashboardCatalog'
 import {
   clearManagementToken,
   addMyFavorite,
   fetchMe,
-  fetchMyFeaturedResources,
+  fetchTestAccessUsers,
   fetchMyFavorites,
   fetchMyResources,
   fetchUsers,
@@ -48,53 +49,73 @@ import {
   storedManagementUser,
   switchRole,
   type PortalFeaturedCategory,
-  type PortalFeaturedResourcesByCategory,
   type PortalResource as ManagedPortalResource,
   type PortalRole,
   type PortalUser,
 } from './management/api'
 import ThemeToggle from './ThemeToggle'
 import type { AppTheme } from './theme'
-import criticalAssetClogAggregateDarkThumb from './assets/portal-thumbnails/critical-asset-clog-aggregate-dark.png'
-import criticalAssetClogAggregateThumb from './assets/portal-thumbnails/critical-asset-clog-aggregate.png'
-import criticalAssetConditionAggregateDarkThumb from './assets/portal-thumbnails/critical-asset-condition-aggregate-dark.png'
-import criticalAssetConditionAggregateThumb from './assets/portal-thumbnails/critical-asset-condition-aggregate.png'
-import criticalAssetHistoryTableDarkThumb from './assets/portal-thumbnails/critical-asset-history-table-dark.png'
-import criticalAssetHistoryTableThumb from './assets/portal-thumbnails/critical-asset-history-table.png'
-import criticalTeamOverviewDarkThumb from './assets/portal-thumbnails/critical-team-overview-dark.png'
-import criticalTeamOverviewThumb from './assets/portal-thumbnails/critical-team-overview.png'
-import criticalTeamInspectionCompletionChartDarkThumb from './assets/portal-thumbnails/critical-team-inspection-completion-chart-dark.png'
-import criticalTeamInspectionCompletionChartThumb from './assets/portal-thumbnails/critical-team-inspection-completion-chart.png'
-import criticalTeamInspectionCompletionTableDarkThumb from './assets/portal-thumbnails/critical-team-inspection-completion-table-dark.png'
-import criticalTeamInspectionCompletionTableThumb from './assets/portal-thumbnails/critical-team-inspection-completion-table.png'
-import criticalTeamProjectStartDarkThumb from './assets/portal-thumbnails/critical-team-project-start-dark.png'
-import criticalTeamProjectStartThumb from './assets/portal-thumbnails/critical-team-project-start.png'
-import criticalTeamReportCompletionChartDarkThumb from './assets/portal-thumbnails/critical-team-report-completion-chart-dark.png'
-import criticalTeamReportCompletionChartThumb from './assets/portal-thumbnails/critical-team-report-completion-chart.png'
-import criticalTeamReviewsChartDarkThumb from './assets/portal-thumbnails/critical-team-reviews-chart-dark.png'
-import criticalTeamReviewsChartThumb from './assets/portal-thumbnails/critical-team-reviews-chart.png'
-import criticalTeamWorkordersDarkThumb from './assets/portal-thumbnails/critical-team-workorders-dark.png'
-import criticalTeamWorkordersThumb from './assets/portal-thumbnails/critical-team-workorders.png'
-import gisCriticalAssetFacilityThumb from './assets/portal-thumbnails/gis-critical-asset-facility.png'
-import gisCriticalAssetFacilityDarkThumb from './assets/portal-thumbnails/gis-critical-asset-facility-dark.png'
-import gisCriticalAssetHistoryThumb from './assets/portal-thumbnails/gis-critical-asset-history.png'
-import gisCriticalAssetHistoryDarkThumb from './assets/portal-thumbnails/gis-critical-asset-history-dark.png'
-import proactiveTeamCctvReviewThumb from './assets/portal-thumbnails/proactive-team-cctv-review.png'
-import proactiveTeamCctvReviewDarkThumb from './assets/portal-thumbnails/proactive-team-cctv-review-dark.png'
-import stmRiskMapThumb from './assets/portal-thumbnails/stm-risk-map.png'
-import stmRiskMapDarkThumb from './assets/portal-thumbnails/stm-risk-map-dark.png'
 import './HomePage.css'
-import { isDesktopRuntime } from './desktop/runtime'
+import { getDesktopContext, isDesktopRuntime } from './desktop/runtime'
 import {
   clearPortalTestAccess,
   savePortalTestAccess,
   storedPortalTestAccess,
   type PortalTestAccess,
+  type PortalTestAccessMode,
 } from './desktop/request'
 
 type ResourceCategory = 'all' | 'dashboards' | 'maps' | 'tables' | 'datasets' | 'documents' | 'reports'
-type ResourceType = 'Dataset' | 'Document' | 'Map' | 'Dashboard' | 'Report' | 'Table'
+type ResourceType = 'Dataset' | 'Document' | 'Map' | 'Dashboard' | 'Report' | 'Form' | 'Table'
 type ResourcePreview = 'facility' | 'pipe' | 'structure' | 'map' | 'history' | 'dashboard' | 'table'
+
+const THUMBNAIL_ASSETS = import.meta.glob([
+  './assets/portal-thumbnails/aif-overview.png',
+  './assets/portal-thumbnails/aif-overview-dark.png',
+  './assets/portal-thumbnails/create-aif-from-itpipes.png',
+  './assets/portal-thumbnails/create-aif-from-itpipes-dark.png',
+  './assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes.png',
+  './assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes-dark.png',
+  './assets/portal-thumbnails/critical-asset-condition-facility-aggregate-both.png',
+  './assets/portal-thumbnails/critical-asset-condition-facility-aggregate-both-dark.png',
+  './assets/portal-thumbnails/critical-asset-history-both.png',
+  './assets/portal-thumbnails/critical-asset-history-both-dark.png',
+  './assets/portal-thumbnails/critical-asset-tracking.png',
+  './assets/portal-thumbnails/critical-asset-tracking-dark.png',
+  './assets/portal-thumbnails/critical-team-dashboard.png',
+  './assets/portal-thumbnails/critical-team-dashboard-dark.png',
+  './assets/portal-thumbnails/critical-team-tables.png',
+  './assets/portal-thumbnails/critical-team-tables-dark.png',
+  './assets/portal-thumbnails/dashboard-links.png',
+  './assets/portal-thumbnails/dashboard-links-dark.png',
+  './assets/portal-thumbnails/gis-critical-asset-facility.png',
+  './assets/portal-thumbnails/gis-critical-asset-facility-dark.png',
+  './assets/portal-thumbnails/gis-critical-asset-history.png',
+  './assets/portal-thumbnails/gis-critical-asset-history-dark.png',
+  './assets/portal-thumbnails/planning-pending-aif-qa.png',
+  './assets/portal-thumbnails/planning-pending-aif-qa-dark.png',
+  './assets/portal-thumbnails/proactive-team-cctv-review.png',
+  './assets/portal-thumbnails/proactive-team-cctv-review-dark.png',
+  './assets/portal-thumbnails/stm-risk-map.png',
+  './assets/portal-thumbnails/stm-risk-map-dark.png',
+  './assets/portal-thumbnails/weekly-time-reporting.png',
+  './assets/portal-thumbnails/weekly-time-reporting-dark.png',
+], {
+  eager: true,
+  query: '?url',
+  import: 'default',
+}) as Record<string, string>
+
+function resourceThumbnails(resourceKey: string) {
+  const presentation = RESOURCE_PRESENTATION_BY_KEY[resourceKey]
+  const light = presentation?.thumbnail_light
+    ? THUMBNAIL_ASSETS[`./${presentation.thumbnail_light}`]
+    : undefined
+  const dark = presentation?.thumbnail_dark
+    ? THUMBNAIL_ASSETS[`./${presentation.thumbnail_dark}`]
+    : undefined
+  return { light, dark }
+}
 
 type PortalResource = {
   id: string
@@ -107,7 +128,7 @@ type PortalResource = {
   category: Exclude<ResourceCategory, 'all'>
   type: ResourceType
   preview: ResourcePreview
-  thumbnail: string
+  thumbnail?: string
   darkThumbnail?: string
   meta?: string
   color?: string
@@ -147,15 +168,6 @@ const FEATURED_TABLE_RESOURCE_ORDER = [
   'critical_team_tables',
   'critical_asset_history_both',
 ]
-const FEATURED_DASHBOARD_RESOURCE_ORDER = [
-  'critical_team_dashboard',
-  'critical_asset_condition_facility_aggregate_both',
-]
-const FEATURED_ALL_RESOURCE_ORDER = [
-  'critical_team_dashboard',
-  'gis_critical_asset_facility',
-  'critical_team_tables',
-]
 const DASHBOARD_ALL_RESOURCE_ORDER = [
   'critical_team_dashboard',
   'critical_asset_condition_facility_aggregate_both',
@@ -169,15 +181,6 @@ const ALL_RESOURCE_CATEGORY_ORDER: Array<Exclude<ResourceCategory, 'all'>> = [
   'documents',
   'reports',
 ]
-const FEATURED_CATEGORY_COMPOSE_ORDER: Exclude<PortalFeaturedCategory, 'all'>[] = [
-  'dashboard',
-  'map',
-  'tab',
-  'dataset',
-  'doc',
-  'report',
-]
-
 const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
   {
     id: 'critical_team_dashboard',
@@ -187,8 +190,8 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
-    thumbnail: criticalTeamOverviewThumb,
-    darkThumbnail: criticalTeamOverviewDarkThumb,
+    thumbnail: resourceThumbnails('critical_team_dashboard').light,
+    darkThumbnail: resourceThumbnails('critical_team_dashboard').dark,
     meta: 'Critical Team',
   },
   {
@@ -199,8 +202,8 @@ const CRITICAL_TEAM_RESOURCES: PortalResource[] = [
     category: 'tables',
     type: 'Table',
     preview: 'table',
-    thumbnail: criticalTeamWorkordersThumb,
-    darkThumbnail: criticalTeamWorkordersDarkThumb,
+    thumbnail: resourceThumbnails('critical_team_tables').light,
+    darkThumbnail: resourceThumbnails('critical_team_tables').dark,
     meta: 'Critical Team',
   },
 ]
@@ -214,8 +217,8 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
-    thumbnail: criticalAssetConditionAggregateThumb,
-    darkThumbnail: criticalAssetConditionAggregateDarkThumb,
+    thumbnail: resourceThumbnails('critical_asset_condition_facility_aggregate_both').light,
+    darkThumbnail: resourceThumbnails('critical_asset_condition_facility_aggregate_both').dark,
     meta: 'Critical Asset Tracking',
   },
   {
@@ -226,8 +229,8 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
     category: 'dashboards',
     type: 'Dashboard',
     preview: 'dashboard',
-    thumbnail: criticalAssetClogAggregateThumb,
-    darkThumbnail: criticalAssetClogAggregateDarkThumb,
+    thumbnail: resourceThumbnails('critical_asset_clog_facility_aggregate_pipes').light,
+    darkThumbnail: resourceThumbnails('critical_asset_clog_facility_aggregate_pipes').dark,
     meta: 'Critical Asset Tracking',
   },
   {
@@ -238,27 +241,17 @@ const CRITICAL_ASSET_RESOURCES: PortalResource[] = [
     category: 'tables',
     type: 'Table',
     preview: 'table',
-    thumbnail: criticalAssetHistoryTableThumb,
-    darkThumbnail: criticalAssetHistoryTableDarkThumb,
+    thumbnail: resourceThumbnails('critical_asset_history_both').light,
+    darkThumbnail: resourceThumbnails('critical_asset_history_both').dark,
     meta: 'Critical Asset Tracking',
   },
 ]
-
-function thumbnailForMapResource(item: DashboardCatalogItem) {
-  if (item.id === 'stm_risk_map') return stmRiskMapThumb
-  return item.id.includes('history') ? gisCriticalAssetHistoryThumb : gisCriticalAssetFacilityThumb
-}
-
-function darkThumbnailForMapResource(item: DashboardCatalogItem) {
-  if (item.id === 'stm_risk_map') return stmRiskMapDarkThumb
-  return item.id.includes('history') ? gisCriticalAssetHistoryDarkThumb : gisCriticalAssetFacilityDarkThumb
-}
 
 function categoryForCatalogItem(item: DashboardCatalogItem): Exclude<ResourceCategory, 'all'> {
   if (item.kind === 'map') return 'maps'
   if (item.kind === 'tab') return 'tables'
   if (item.kind === 'doc') return 'documents'
-  if (item.kind === 'report') return 'reports'
+  if (item.kind === 'report' || item.kind === 'form') return 'reports'
   return 'dashboards'
 }
 
@@ -266,6 +259,7 @@ function typeForCatalogItem(item: DashboardCatalogItem): ResourceType {
   if (item.kind === 'map') return 'Map'
   if (item.kind === 'tab') return 'Table'
   if (item.kind === 'doc') return 'Document'
+  if (item.kind === 'form') return 'Form'
   if (item.kind === 'report') return 'Report'
   return 'Dashboard'
 }
@@ -277,35 +271,11 @@ function previewForCatalogItem(item: DashboardCatalogItem): ResourcePreview {
 }
 
 function thumbnailForCatalogItem(item: DashboardCatalogItem) {
-  if (item.kind === 'map') return thumbnailForMapResource(item)
-  if (item.id === 'proactive_team_cctv_review') return proactiveTeamCctvReviewThumb
-  if (item.id === 'planning_pending_aif_qa') return criticalTeamWorkordersThumb
-  if (item.id === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartThumb
-  if (item.id === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableThumb
-  if (item.id.includes('history')) return criticalAssetHistoryTableThumb
-  if (item.id.includes('clog')) return criticalAssetClogAggregateThumb
-  if (item.id.includes('critical_asset')) return criticalAssetConditionAggregateThumb
-  if (item.id.includes('work_order')) return criticalTeamWorkordersThumb
-  if (item.id.includes('report_completion')) return criticalTeamReportCompletionChartThumb
-  if (item.id.includes('review')) return criticalTeamReviewsChartThumb
-  if (item.id.includes('critical_team')) return criticalTeamOverviewThumb
-  return criticalTeamProjectStartThumb
+  return resourceThumbnails(item.id).light
 }
 
 function darkThumbnailForCatalogItem(item: DashboardCatalogItem) {
-  if (item.kind === 'map') return darkThumbnailForMapResource(item)
-  if (item.id === 'proactive_team_cctv_review') return proactiveTeamCctvReviewDarkThumb
-  if (item.id === 'planning_pending_aif_qa') return criticalTeamWorkordersDarkThumb
-  if (item.id === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartDarkThumb
-  if (item.id === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableDarkThumb
-  if (item.id.includes('history')) return criticalAssetHistoryTableDarkThumb
-  if (item.id.includes('clog')) return criticalAssetClogAggregateDarkThumb
-  if (item.id.includes('critical_asset')) return criticalAssetConditionAggregateDarkThumb
-  if (item.id.includes('work_order')) return criticalTeamWorkordersDarkThumb
-  if (item.id.includes('report_completion')) return criticalTeamReportCompletionChartDarkThumb
-  if (item.id.includes('review')) return criticalTeamReviewsChartDarkThumb
-  if (item.id.includes('critical_team')) return criticalTeamOverviewDarkThumb
-  return criticalTeamProjectStartDarkThumb
+  return resourceThumbnails(item.id).dark
 }
 
 function catalogResource(item: DashboardCatalogItem): PortalResource {
@@ -329,7 +299,7 @@ function categoryForManagedResource(resource: ManagedPortalResource): Exclude<Re
   if (resource.resource_type === 'map') return 'maps'
   if (resource.resource_type === 'tab') return 'tables'
   if (resource.resource_type === 'doc') return 'documents'
-  if (resource.resource_type === 'report') return 'reports'
+  if (resource.resource_type === 'report' || resource.resource_type === 'form') return 'reports'
   if (resource.resource_type === 'dataset') return 'datasets'
   return 'dashboards'
 }
@@ -344,38 +314,11 @@ function featuredCategoryForPortalCategory(category: ResourceCategory): PortalFe
   return 'all'
 }
 
-function composeAllFeaturedResources(featured: PortalFeaturedResourcesByCategory): ManagedPortalResource[] {
-  const orderedResources: ManagedPortalResource[] = []
-  const resourceKeys = new Set<string>()
-
-  for (const category of FEATURED_CATEGORY_COMPOSE_ORDER) {
-    for (const resource of featured[category] ?? []) {
-      if (resourceKeys.has(resource.resource_key)) continue
-      resourceKeys.add(resource.resource_key)
-      orderedResources.push(resource)
-    }
-  }
-
-  return orderedResources
-}
-
-function featuredResourcesForDisplay(
-  resources: ManagedPortalResource[] | undefined,
-  existingResources: PortalResource[],
-  availableResourceKeys: Set<string>,
-  activeCategory: ResourceCategory,
-  searchTerm: string,
-) {
-  return (resources ?? [])
-    .filter((resource) => isPortalCardResource(resource) && availableResourceKeys.has(resource.resource_key))
-    .map((resource) => managedResourceCard(resource, existingResources))
-    .filter((resource) => resourceMatches(resource, activeCategory, searchTerm))
-}
-
 function typeForManagedResource(resource: ManagedPortalResource): ResourceType {
   if (resource.resource_type === 'map') return 'Map'
   if (resource.resource_type === 'tab') return 'Table'
   if (resource.resource_type === 'doc') return 'Document'
+  if (resource.resource_type === 'form') return 'Form'
   if (resource.resource_type === 'report') return 'Report'
   if (resource.resource_type === 'dataset' || resource.resource_type === 'api' || resource.resource_type === 'service') return 'Dataset'
   return 'Dashboard'
@@ -387,34 +330,12 @@ function previewForManagedResource(resource: ManagedPortalResource): ResourcePre
   return 'dashboard'
 }
 
-function isStmRiskMapResource(resource: ManagedPortalResource) {
-  return resource.resource_key === 'stm_risk_map' || resource.url.includes('/map_stm_risk')
-}
-
 function thumbnailForManagedResource(resource: ManagedPortalResource) {
-  if (isStmRiskMapResource(resource)) return stmRiskMapThumb
-  if (resource.resource_key === 'proactive_team_cctv_review') return proactiveTeamCctvReviewThumb
-  if (resource.resource_key === 'planning_pending_aif_qa') return criticalTeamWorkordersThumb
-  if (resource.resource_key === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartThumb
-  if (resource.resource_key === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableThumb
-  if (resource.resource_key.includes('history')) return gisCriticalAssetHistoryThumb
-  if (resource.resource_key.includes('facility') || resource.resource_key.includes('map')) return gisCriticalAssetFacilityThumb
-  if (resource.resource_key.includes('critical_asset')) return criticalAssetConditionAggregateThumb
-  if (resource.resource_key.includes('critical_team')) return criticalTeamOverviewThumb
-  return criticalTeamProjectStartThumb
+  return resourceThumbnails(resource.resource_key).light
 }
 
 function darkThumbnailForManagedResource(resource: ManagedPortalResource) {
-  if (isStmRiskMapResource(resource)) return stmRiskMapDarkThumb
-  if (resource.resource_key === 'proactive_team_cctv_review') return proactiveTeamCctvReviewDarkThumb
-  if (resource.resource_key === 'planning_pending_aif_qa') return criticalTeamWorkordersDarkThumb
-  if (resource.resource_key === 'critical_team_inspection_completion_date_chart') return criticalTeamInspectionCompletionChartDarkThumb
-  if (resource.resource_key === 'critical_team_inspection_completion_date') return criticalTeamInspectionCompletionTableDarkThumb
-  if (resource.resource_key.includes('history')) return gisCriticalAssetHistoryDarkThumb
-  if (resource.resource_key.includes('facility') || resource.resource_key.includes('map')) return gisCriticalAssetFacilityDarkThumb
-  if (resource.resource_key.includes('critical_asset')) return criticalAssetConditionAggregateDarkThumb
-  if (resource.resource_key.includes('critical_team')) return criticalTeamOverviewDarkThumb
-  return criticalTeamProjectStartDarkThumb
+  return resourceThumbnails(resource.resource_key).dark
 }
 
 function managedResourceCard(resource: ManagedPortalResource, existingResources: PortalResource[]): PortalResource {
@@ -470,33 +391,6 @@ function resourceMatches(resource: PortalResource, category: ResourceCategory, q
       .toLowerCase()
       .includes(normalizedQuery)
   return categoryMatch && textMatch
-}
-
-function orderFeaturedResources(resources: PortalResource[], category: ResourceCategory) {
-  if (category === 'all') {
-    const orderedResources = FEATURED_ALL_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
-      (resource): resource is PortalResource => Boolean(resource),
-    )
-    const orderedIds = new Set(orderedResources.map((resource) => resource.id))
-    return [...orderedResources, ...resources.filter((resource) => !orderedIds.has(resource.id))]
-  }
-
-  if (category === 'dashboards') {
-    const orderedResources = FEATURED_DASHBOARD_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
-      (resource): resource is PortalResource => Boolean(resource),
-    )
-    const orderedIds = new Set(orderedResources.map((resource) => resource.id))
-    return [...orderedResources, ...resources.filter((resource) => !orderedIds.has(resource.id))]
-  }
-
-  if (category !== 'tables') return resources
-
-  const orderedResources = FEATURED_TABLE_RESOURCE_ORDER.map((id) => resources.find((resource) => resource.id === id)).filter(
-    (resource): resource is PortalResource => Boolean(resource),
-  )
-  const orderedIds = new Set(orderedResources.map((resource) => resource.id))
-
-  return [...orderedResources, ...resources.filter((resource) => !orderedIds.has(resource.id))]
 }
 
 function orderAllResources(resources: PortalResource[], category: ResourceCategory): PortalResource[] {
@@ -633,8 +527,8 @@ function ResourceCard({
 
   return (
     <article className="home-resource-card">
-      <button className={`home-resource-preview image-preview ${resource.preview}`} type="button" onClick={() => onOpen(resource)} aria-label={`Open ${resource.title}`}>
-        <img src={thumbnail} alt="" loading="lazy" />
+      <button className={`home-resource-preview ${thumbnail ? 'image-preview' : ''} ${resource.preview}`} type="button" onClick={() => onOpen(resource)} aria-label={`Open ${resource.title}`}>
+        {thumbnail ? <img src={thumbnail} alt="" loading="lazy" /> : <span aria-hidden="true" />}
       </button>
       <div className="home-resource-body">
         <button className="home-resource-title" type="button" onClick={() => onOpen(resource)}>
@@ -781,24 +675,34 @@ function isManagementRole(role: PortalRole) {
   return role === 'admin' || role === 'system_admin'
 }
 
+function canTestAccess(user: PortalUser) {
+  return user.is_system_admin || user.is_admin || isManagementRole(user.selected_role)
+}
+
 function AccountMenu({
   user,
+  applicationVersion,
   showAdmin,
   showSignOut,
   testAccess,
+  allowTestAccess,
   onSignOut,
   onSwitchRole,
   onStartTestAccess,
   onStopTestAccess,
+  onOpenAbout,
 }: {
   user: PortalUser
+  applicationVersion: string
   showAdmin: boolean
   showSignOut: boolean
   testAccess: PortalTestAccess | null
+  allowTestAccess: boolean
   onSignOut: () => void
   onSwitchRole: (role: PortalRole) => Promise<void>
   onStartTestAccess: () => void
   onStopTestAccess: () => void
+  onOpenAbout: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [switchingRole, setSwitchingRole] = useState<PortalRole | null>(null)
@@ -860,16 +764,16 @@ function AccountMenu({
               Portal Admin
             </a>
           ) : null}
-          {isManagementRole(user.selected_role) ? (
+          {allowTestAccess ? (
             testAccess ? (
               <button type="button" role="menuitem" onClick={() => { onStopTestAccess(); setOpen(false) }}>
                 <ShieldCheck size={16} />
-                Stop viewing as user
+                Stop user simulation
               </button>
             ) : (
               <button type="button" role="menuitem" onClick={() => { onStartTestAccess(); setOpen(false) }}>
                 <ShieldCheck size={16} />
-                View as user
+                Test as user
               </button>
             )
           ) : null}
@@ -877,6 +781,10 @@ function AccountMenu({
             <UserRound size={16} />
             Profile
           </a>
+          <button type="button" role="menuitem" onClick={() => { onOpenAbout(); setOpen(false) }}>
+            <Info size={16} />
+            About Portal{applicationVersion ? ` — v${applicationVersion}` : ''}
+          </button>
           {showSignOut ? (
             <button type="button" role="menuitem" onClick={onSignOut}>
               <LogOut size={16} />
@@ -889,11 +797,71 @@ function AccountMenu({
   )
 }
 
+function AboutPortalDialog({
+  version,
+  loading,
+  error,
+  desktopRuntime,
+  onClose,
+}: {
+  version: string
+  loading: boolean
+  error: string
+  desktopRuntime: boolean
+  onClose: () => void
+}) {
+  useEffect(() => {
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [onClose])
+
+  const versionText = version
+    ? `Version ${version}`
+    : loading
+      ? 'Loading version…'
+      : desktopRuntime
+        ? 'Version unavailable'
+        : 'Web deployment'
+
+  return (
+    <div
+      className="home-test-access-backdrop"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}
+    >
+      <section className="home-test-access-dialog home-about-dialog" role="dialog" aria-modal="true" aria-labelledby="portal-about-title">
+        <div className="home-test-access-title-row">
+          <div>
+            <span>About</span>
+            <h2 id="portal-about-title">Storm Water Asset Intelligence Portal</h2>
+          </div>
+          <button type="button" aria-label="Close About Portal" onClick={onClose}><X size={20} /></button>
+        </div>
+        <div className="home-about-version">
+          <Info size={27} aria-hidden="true" />
+          <div>
+            <span>{desktopRuntime ? 'Installed application' : 'Application'}</span>
+            <strong>{versionText}</strong>
+          </div>
+        </div>
+        {error ? <div className="home-test-access-error" role="alert">{error}</div> : null}
+        <p>Charlotte-Mecklenburg Storm Water Services desktop portal for business data, operational resources, and review workflows.</p>
+        <div className="home-test-access-actions">
+          <button type="button" autoFocus onClick={onClose}>Close</button>
+        </div>
+      </section>
+    </div>
+  )
+}
+
 function TestAccessDialog({
   users,
   current,
   loading,
   error,
+  allowReadWrite,
   onClose,
   onStart,
 }: {
@@ -901,17 +869,23 @@ function TestAccessDialog({
   current: PortalTestAccess | null
   loading: boolean
   error: string
+  allowReadWrite: boolean
   onClose: () => void
   onStart: (value: PortalTestAccess) => void
 }) {
   const [userId, setUserId] = useState<number | null>(current?.userId ?? null)
   const [role, setRole] = useState<PortalRole>(current?.role ?? 'user')
+  const [mode, setMode] = useState<PortalTestAccessMode>(current?.mode ?? 'read_only')
   const selectedUser = users.find((user) => user.id === userId) ?? null
   const availableRoles = selectedUser?.roles ?? []
 
   useEffect(() => {
     if (selectedUser && !availableRoles.includes(role)) setRole(availableRoles[0] ?? 'user')
   }, [availableRoles, role, selectedUser])
+
+  useEffect(() => {
+    if (!allowReadWrite && mode !== 'read_only') setMode('read_only')
+  }, [allowReadWrite, mode])
 
   return (
     <div className="home-test-access-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -925,7 +899,10 @@ function TestAccessDialog({
             <X size={21} />
           </button>
         </div>
-        <p>Preview the portal as a real active user. Their team, manager access, direct permissions, and featured resources are used. Changes are disabled.</p>
+        <p>
+          Run the portal as a real active user. Their team, manager access, direct permissions, and featured resources are used.
+          Read-only mode blocks changes. Read/write mode sends operations through that user&apos;s actual permissions and changes the local business data.
+        </p>
         <label>
           User
           <select value={userId ?? ''} disabled={loading} onChange={(event) => setUserId(event.target.value ? Number(event.target.value) : null)}>
@@ -943,15 +920,31 @@ function TestAccessDialog({
             {availableRoles.map((availableRole) => <option key={availableRole} value={availableRole}>{roleText(availableRole)}</option>)}
           </select>
         </label>
+        <label>
+          Simulation mode
+          <select value={mode} disabled={loading || !allowReadWrite} onChange={(event) => setMode(event.target.value as PortalTestAccessMode)}>
+            <option value="read_only">Read-only — block all changes</option>
+            {allowReadWrite ? <option value="read_write">Read/write — simulate operations</option> : null}
+          </select>
+        </label>
+        {mode === 'read_write' ? (
+          <div className="home-test-access-warning" role="note">
+            Read/write simulation can create, edit, review, or delete local business data when the selected user has that permission. Stop the simulation to return to the signed-in account.
+          </div>
+        ) : null}
         {error ? <div className="home-test-access-error">{error}</div> : null}
         <div className="home-test-access-actions">
           <button type="button" onClick={onClose}>Cancel</button>
           <button
             type="button"
             disabled={!selectedUser || loading || !availableRoles.includes(role)}
-            onClick={() => selectedUser && onStart({ userId: selectedUser.id, displayName: selectedUser.display_name, email: selectedUser.email, role })}
+            onClick={() => {
+              if (!selectedUser) return
+              if (mode === 'read_write' && !window.confirm(`Start read/write simulation as ${selectedUser.display_name}? Local business-data changes will be applied as the selected user.`)) return
+              onStart({ userId: selectedUser.id, displayName: selectedUser.display_name, email: selectedUser.email, role, mode })
+            }}
           >
-            Start preview
+            Start simulation
           </button>
         </div>
       </section>
@@ -966,8 +959,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const activeFeaturedCategoryRef = useRef(activeFeaturedCategory)
   activeFeaturedCategoryRef.current = activeFeaturedCategory
   const [searchTerm, setSearchTerm] = useState('')
-  const [defaultFeaturedResourcesByCategory, setDefaultFeaturedResourcesByCategory] = useState<PortalFeaturedResourcesByCategory>({})
-  const [defaultConfiguredFeaturedCategories, setDefaultConfiguredFeaturedCategories] = useState<PortalFeaturedCategory[]>([])
   const [favoriteResourceIds, setFavoriteResourceIds] = useState<string[]>([])
   const [favoriteBusyResourceId, setFavoriteBusyResourceId] = useState<string | null>(null)
   const [favoritesLoadingTeam, setFavoritesLoadingTeam] = useState(false)
@@ -983,6 +974,28 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [testUsers, setTestUsers] = useState<PortalUser[]>([])
   const [testUsersLoading, setTestUsersLoading] = useState(false)
   const [testUsersError, setTestUsersError] = useState('')
+  const [aboutOpen, setAboutOpen] = useState(false)
+  const [applicationVersion, setApplicationVersion] = useState('')
+  const [applicationVersionLoading, setApplicationVersionLoading] = useState(false)
+  const [applicationVersionError, setApplicationVersionError] = useState('')
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    let cancelled = false
+    setApplicationVersionLoading(true)
+    setApplicationVersionError('')
+    getDesktopContext()
+      .then((context) => {
+        if (!cancelled) setApplicationVersion(context.applicationVersion)
+      })
+      .catch((error) => {
+        if (!cancelled) setApplicationVersionError(error instanceof Error ? error.message : 'Could not read the installed Portal version.')
+      })
+      .finally(() => {
+        if (!cancelled) setApplicationVersionLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [desktopRuntime])
 
   useEffect(() => {
     // Desktop authentication comes from the current Windows account, so it has
@@ -1017,27 +1030,19 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       setPreviewUser(null)
     }
 
-    Promise.all([fetchMyResources(), fetchMyFeaturedResources()])
-      .then(([resourcesResponse, featuredResponse]) => {
-        if (!cancelled) {
-          setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
-          setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
-          setDefaultConfiguredFeaturedCategories(
-            featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
-          )
-        }
+    fetchMyResources()
+      .then((resourcesResponse) => {
+        if (!cancelled) setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
       })
       .catch(() => {
         if (cancelled) return
         setAccessibleManagedResources([])
-        setDefaultFeaturedResourcesByCategory({})
-        setDefaultConfiguredFeaturedCategories([])
       })
 
     return () => {
       cancelled = true
     }
-  }, [desktopRuntime, testAccess?.role, testAccess?.userId])
+  }, [desktopRuntime, testAccess?.mode, testAccess?.role, testAccess?.userId])
 
   useEffect(() => {
     if (!desktopRuntime || testAccess) {
@@ -1092,8 +1097,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     clearManagementToken()
     setPortalUser(null)
     setAccessibleManagedResources([])
-    setDefaultFeaturedResourcesByCategory({})
-    setDefaultConfiguredFeaturedCategories([])
     setFavoriteResourceIds([])
     setFavoritesError('')
     setDesktopResourceTabs([])
@@ -1188,34 +1191,27 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     setPortalUser(switchedUser)
 
     try {
-      const [resourcesResponse, featuredResponse] = await Promise.all([
-        fetchMyResources(response.token),
-        fetchMyFeaturedResources(response.token),
-      ])
+      const resourcesResponse = await fetchMyResources(response.token)
       const refreshedUser = switchedUser
       saveManagementUser(refreshedUser)
       setPortalUser(refreshedUser)
       setAccessibleManagedResources(portalCardResourcesFromResponse(resourcesResponse.resources))
-      setDefaultFeaturedResourcesByCategory(featuredResponse.default_featured ?? { all: featuredResponse.default_resources ?? [] })
-      setDefaultConfiguredFeaturedCategories(
-        featuredResponse.default_configured_categories ?? (featuredResponse.default_resources?.length ? ['all'] : []),
-      )
     } catch {
       saveManagementUser(switchedUser)
       setPortalUser(switchedUser)
       setAccessibleManagedResources([])
-      setDefaultFeaturedResourcesByCategory({})
-      setDefaultConfiguredFeaturedCategories([])
     }
   }
 
   function handleOpenTestAccess() {
-    if (!portalUser || !isManagementRole(portalUser.selected_role)) return
+    const allowed = portalUser && (desktopRuntime ? portalUser.is_system_admin : canTestAccess(portalUser))
+    if (!allowed) return
     setTestAccessDialogOpen(true)
     setTestUsersError('')
     if (testUsers.length || testUsersLoading) return
     setTestUsersLoading(true)
-    fetchUsers()
+    const loadUsers = desktopRuntime ? fetchTestAccessUsers() : fetchUsers()
+    loadUsers
       .then((response) => setTestUsers(response.users.filter((user) => user.is_active)))
       .catch((error) => setTestUsersError(error instanceof Error ? error.message : 'Could not load portal users.'))
       .finally(() => setTestUsersLoading(false))
@@ -1252,7 +1248,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     () => mergeResources(managedCardResources),
     [managedCardResources],
   )
-  const availableResourceKeys = useMemo(() => new Set(allResources.map((resource) => resource.id)), [allResources])
   const favoriteResourceIdSet = useMemo(() => new Set(favoriteResourceIds), [favoriteResourceIds])
   const visibleCategoryOptions = useMemo(
     () =>
@@ -1274,10 +1269,15 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     }
   }, [activeCategory, visibleCategoryOptions])
 
-  const filteredResources = useMemo(
-    () => orderAllResources(allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)), activeCategory),
-    [activeCategory, allResources, searchTerm],
-  )
+  const filteredResources = useMemo(() => {
+    const matchingResources = allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm))
+    const normalResources =
+      desktopRuntime && !testAccess
+        ? matchingResources.filter((resource) => !resource.resourceId || !favoriteResourceIdSet.has(resource.resourceId))
+        : matchingResources
+
+    return orderAllResources(normalResources, activeCategory)
+  }, [activeCategory, allResources, desktopRuntime, favoriteResourceIdSet, searchTerm, testAccess])
   const favoriteResources = useMemo(() => {
     const resourcesById = new Map(
       allResources
@@ -1289,47 +1289,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       .filter((resource): resource is PortalResource => Boolean(resource))
       .filter((resource) => resourceMatches(resource, activeCategory, searchTerm))
   }, [activeCategory, allResources, favoriteResourceIds, searchTerm])
-  const hasExplicitTeamDefaultFeaturedCategory = defaultConfiguredFeaturedCategories.includes(activeFeaturedCategory)
-  const hasComposedTeamDefaultForAll =
-    activeFeaturedCategory === 'all' &&
-    !hasExplicitTeamDefaultFeaturedCategory &&
-    FEATURED_CATEGORY_COMPOSE_ORDER.some((category) => defaultConfiguredFeaturedCategories.includes(category))
-  const hasTeamDefaultFeaturedCategory = hasExplicitTeamDefaultFeaturedCategory || hasComposedTeamDefaultForAll
-  const teamDefaultFeaturedResources = useMemo(() => {
-    if (!hasTeamDefaultFeaturedCategory) return []
-    const defaultResources =
-      activeFeaturedCategory === 'all' && !hasExplicitTeamDefaultFeaturedCategory
-        ? composeAllFeaturedResources(defaultFeaturedResourcesByCategory)
-        : defaultFeaturedResourcesByCategory[activeFeaturedCategory]
-    return featuredResourcesForDisplay(defaultResources, allResources, availableResourceKeys, activeCategory, searchTerm)
-  }, [
-    activeCategory,
-    activeFeaturedCategory,
-    allResources,
-    availableResourceKeys,
-    defaultFeaturedResourcesByCategory,
-    hasExplicitTeamDefaultFeaturedCategory,
-    hasTeamDefaultFeaturedCategory,
-    searchTerm,
-  ])
-  const featuredResourceMatches = useMemo(
-    () => {
-      if (hasTeamDefaultFeaturedCategory) return teamDefaultFeaturedResources
-      return orderFeaturedResources(
-        allResources.filter((resource) => resourceMatches(resource, activeCategory, searchTerm)),
-        activeCategory,
-      )
-    },
-    [
-      activeCategory,
-      allResources,
-      hasTeamDefaultFeaturedCategory,
-      searchTerm,
-      teamDefaultFeaturedResources,
-    ],
-  )
-  const featuredResources = useMemo(() => featuredResourceMatches.slice(0, 4), [featuredResourceMatches])
-
   return (
     <main className="home-page">
       <header className="home-header">
@@ -1355,13 +1314,16 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
             {portalUser ? (
               <AccountMenu
                 user={portalUser}
+                applicationVersion={applicationVersion}
                 showAdmin={!desktopRuntime}
                 showSignOut={!desktopRuntime}
                 testAccess={testAccess}
+                allowTestAccess={desktopRuntime ? Boolean(portalUser.is_system_admin) : canTestAccess(portalUser)}
                 onSignOut={handlePortalSignOut}
                 onSwitchRole={handlePortalRoleSwitch}
                 onStartTestAccess={handleOpenTestAccess}
                 onStopTestAccess={handleStopTestAccess}
+                onOpenAbout={() => setAboutOpen(true)}
               />
             ) : desktopRuntime ? null : (
               <a href={PORTAL_LOGIN_ROUTE}>
@@ -1389,8 +1351,11 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       {testAccess ? (
         <section className="home-test-access-banner" aria-label="Test access is active">
           <ShieldCheck size={18} />
-          <span>Viewing as <strong>{previewUser?.display_name ?? testAccess.displayName}</strong> ({roleText(testAccess.role)}). Changes are disabled.</span>
-          <button type="button" onClick={handleStopTestAccess}>Stop preview</button>
+          <span>
+            {testAccess.mode === 'read_write' ? <strong>Read/write simulation</strong> : <strong>Read-only simulation</strong>} as <strong>{previewUser?.display_name ?? testAccess.displayName}</strong> ({roleText(testAccess.role)}).
+            {testAccess.mode === 'read_write' ? ' Changes are enabled according to this user\'s permissions.' : ' Changes are disabled.'}
+          </span>
+          <button type="button" onClick={handleStopTestAccess}>Stop simulation</button>
         </section>
       ) : null}
 
@@ -1463,50 +1428,6 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           </section>
         ) : null}
 
-        <section className="home-team-featured" aria-labelledby="team-featured-heading">
-        <div className="home-featured-heading">
-          <h2 id="team-featured-heading">Team Featured</h2>
-          <p>
-            {featuredResources.length.toLocaleString()} {featuredResources.length === 1 ? 'Resource' : 'Resources'} found
-          </p>
-        </div>
-
-        {featuredResources.length ? (
-          <div className="home-resource-grid">
-            {featuredResources.map((resource) => (
-              <ResourceCard
-                key={resource.id}
-                resource={resource}
-                theme={theme}
-                onOpen={handleOpenResource}
-                favorite={Boolean(resource.resourceId && favoriteResourceIdSet.has(resource.resourceId))}
-                favoriteBusy={favoriteBusyResourceId === resource.resourceId}
-                onToggleFavorite={desktopRuntime && !testAccess ? handleToggleFavorite : undefined}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="home-empty-results">
-            <Search size={28} />
-            <strong>No resources found</strong>
-          </div>
-        )}
-
-        {featuredResourceMatches.length > 4 ? (
-          <nav className="home-pagination" aria-label="Featured resource pages">
-            <button type="button" disabled>
-              <ChevronLeft size={26} />
-            </button>
-            <button className="active" type="button">
-              1
-            </button>
-            <button type="button">
-              <ChevronRight size={26} />
-            </button>
-          </nav>
-        ) : null}
-        </section>
-
         <section className="home-all-resources">
           <div className="home-all-heading">
             <h2>All resources</h2>
@@ -1577,8 +1498,18 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           current={testAccess}
           loading={testUsersLoading}
           error={testUsersError}
+          allowReadWrite={desktopRuntime && Boolean(portalUser?.is_system_admin)}
           onClose={() => setTestAccessDialogOpen(false)}
           onStart={handleStartTestAccess}
+        />
+      ) : null}
+      {aboutOpen ? (
+        <AboutPortalDialog
+          version={applicationVersion}
+          loading={applicationVersionLoading}
+          error={applicationVersionError}
+          desktopRuntime={desktopRuntime}
+          onClose={() => setAboutOpen(false)}
         />
       ) : null}
     </main>

@@ -22,6 +22,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { formatDateOnly } from '../../lib/dateTime'
+import { createPortalExcelWorkbook, downloadExcelWorkbook } from '../../lib/excelExport'
 import {
   Select,
   SelectContent,
@@ -532,232 +533,25 @@ function downloadDataUrl(dataUrl: string, fileName: string) {
   link.remove()
 }
 
-function escapeXml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
-}
-
-function columnLetter(index: number) {
-  let column = ''
-  let value = index + 1
-  while (value > 0) {
-    const remainder = (value - 1) % 26
-    column = String.fromCharCode(65 + remainder) + column
-    value = Math.floor((value - 1) / 26)
-  }
-  return column
-}
-
-function encodeText(value: string) {
-  return new TextEncoder().encode(value)
-}
-
-const CRC32_TABLE = (() => {
-  const table: number[] = []
-  for (let index = 0; index < 256; index += 1) {
-    let current = index
-    for (let bit = 0; bit < 8; bit += 1) {
-      current = current & 1 ? 0xedb88320 ^ (current >>> 1) : current >>> 1
-    }
-    table[index] = current >>> 0
-  }
-  return table
-})()
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function concatBytes(chunks: Uint8Array[]) {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const output = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.length
-  }
-  return output
-}
-
-function zipDateTime(date: Date) {
-  return {
-    date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
-    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-  }
-}
-
-function createZip(files: Array<{ name: string; content: string }>) {
-  const now = zipDateTime(new Date())
-  const localChunks: Uint8Array[] = []
-  const centralChunks: Uint8Array[] = []
-  const entries: Array<{ nameBytes: Uint8Array; bytes: Uint8Array; crc: number; offset: number }> = []
-  let offset = 0
-
-  for (const file of files) {
-    const nameBytes = encodeText(file.name)
-    const bytes = encodeText(file.content)
-    const fileCrc = crc32(bytes)
-    const header = new Uint8Array(30 + nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x04034b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 0x0800, true)
-    view.setUint16(8, 0, true)
-    view.setUint16(10, now.time, true)
-    view.setUint16(12, now.date, true)
-    view.setUint32(14, fileCrc, true)
-    view.setUint32(18, bytes.length, true)
-    view.setUint32(22, bytes.length, true)
-    view.setUint16(26, nameBytes.length, true)
-    header.set(nameBytes, 30)
-
-    entries.push({ nameBytes, bytes, crc: fileCrc, offset })
-    localChunks.push(header, bytes)
-    offset += header.length + bytes.length
-  }
-
-  const centralOffset = offset
-  for (const entry of entries) {
-    const header = new Uint8Array(46 + entry.nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x02014b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 20, true)
-    view.setUint16(8, 0x0800, true)
-    view.setUint16(10, 0, true)
-    view.setUint16(12, now.time, true)
-    view.setUint16(14, now.date, true)
-    view.setUint32(16, entry.crc, true)
-    view.setUint32(20, entry.bytes.length, true)
-    view.setUint32(24, entry.bytes.length, true)
-    view.setUint16(28, entry.nameBytes.length, true)
-    view.setUint32(42, entry.offset, true)
-    header.set(entry.nameBytes, 46)
-    centralChunks.push(header)
-    offset += header.length
-  }
-
-  const centralSize = offset - centralOffset
-  const end = new Uint8Array(22)
-  const endView = new DataView(end.buffer)
-  endView.setUint32(0, 0x06054b50, true)
-  endView.setUint16(8, entries.length, true)
-  endView.setUint16(10, entries.length, true)
-  endView.setUint32(12, centralSize, true)
-  endView.setUint32(16, centralOffset, true)
-
-  return concatBytes([...localChunks, ...centralChunks, end])
-}
-
-function worksheetPackage(sheetName: string, worksheet: string) {
-  const safeSheetName = sheetName.replace(/[\[\]:*?\/\\]/g, ' ').slice(0, 31) || 'Sheet1'
-  return createZip([
-    {
-      name: '[Content_Types].xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>`,
-    },
-    {
-      name: '_rels/.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/workbook.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="${escapeXml(safeSheetName)}" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`,
-    },
-    {
-      name: 'xl/_rels/workbook.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/styles.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>
-  <fills count="1"><fill><patternFill patternType="none"/></fill></fills>
-  <borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>`,
-    },
-    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
-  ])
-}
-
-function xlsxCell(value: CellValue, rowIndex: number, columnIndex: number) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  if (value === null || value === undefined || value === '') {
-    return `<c r="${cellRef}"/>`
-  }
-  if (typeof value === 'number' && Number.isFinite(value)) {
-    return `<c r="${cellRef}"><v>${value}</v></c>`
-  }
-  return `<c r="${cellRef}" t="inlineStr"><is><t>${escapeXml(String(formatCellValue(value)))}</t></is></c>`
-}
-
 function createRowsXlsx(columns: string[], rows: AssetRow[], sheetName: string) {
-  const headerCells = columns
-    .map((column, columnIndex) => `<c r="${columnLetter(columnIndex)}1" t="inlineStr"><is><t>${escapeXml(column)}</t></is></c>`)
-    .join('')
-  const bodyRows = rows
-    .map((row, rowIndex) => {
-      const sheetRowIndex = rowIndex + 2
-      const cells = columns.map((column, columnIndex) => xlsxCell(row[column], sheetRowIndex, columnIndex)).join('')
-      return `<row r="${sheetRowIndex}">${cells}</row>`
-    })
-    .join('')
-  const lastCell = `${columnLetter(Math.max(columns.length - 1, 0))}${Math.max(1, rows.length + 1)}`
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <dimension ref="A1:${lastCell}"/>
-  <sheetData>
-    <row r="1">${headerCells}</row>
-    ${bodyRows}
-  </sheetData>
-</worksheet>`
-  return worksheetPackage(sheetName, worksheet)
+  return createPortalExcelWorkbook({
+    title: `${sheetName} - ${formatNumber(rows.length)} ${rows.length === 1 ? 'record' : 'records'}`,
+    sheetName,
+    columns: columns.map((column) => ({ heading: column, minWidth: 10, maxWidth: 38 })),
+    rows: rows.map((row) => ({
+      cells: columns.map((column) => {
+        const value = row[column]
+        if (value === null || value === undefined || value === '') return null
+        return typeof value === 'number' && Number.isFinite(value) ? value : String(formatCellValue(value))
+      }),
+    })),
+  })
 }
 
 function downloadRowsXlsx(columns: string[], rows: AssetRow[], sheetName: string) {
   const workbook = createRowsXlsx(columns, rows, sheetName)
-  const blob = new Blob([workbook], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `${fileNameSlug(sheetName)}-${new Date().toISOString().slice(0, 10)}.xlsx`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
+  return downloadExcelWorkbook(workbook, `${fileNameSlug(sheetName)}-${new Date().toISOString().slice(0, 10)}.xlsx`)
 }
-
 function createAggregateChartOption(
   sheet: AssetSheet,
   rows: AggregateRow[],
@@ -1184,7 +978,7 @@ export default function CriticalAssetTrackingDashboard({ initialSheetId }: Criti
         )
         rows.push(...page.rows)
       }
-      downloadRowsXlsx(table.columns, rows, selectedSheet.title)
+      await downloadRowsXlsx(table.columns, rows, selectedSheet.title)
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : String(nextError))
     } finally {

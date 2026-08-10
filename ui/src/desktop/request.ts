@@ -4,11 +4,14 @@ import { isDesktopRuntime } from './runtime'
 
 const DESKTOP_DATA_ORIGIN = 'http://portal-data.localhost'
 
+export type PortalTestAccessMode = 'read_only' | 'read_write'
+
 export type PortalTestAccess = {
   userId: number
   displayName: string
   email: string
   role: 'user' | 'admin' | 'system_admin'
+  mode: PortalTestAccessMode
 }
 
 const PORTAL_TEST_ACCESS_KEY = 'portal_test_access'
@@ -24,7 +27,13 @@ export function storedPortalTestAccess(): PortalTestAccess | null {
       typeof value.email === 'string' &&
       (value.role === 'user' || value.role === 'admin' || value.role === 'system_admin')
     ) {
-      return value as PortalTestAccess
+      return {
+        userId: value.userId,
+        displayName: value.displayName,
+        email: value.email,
+        role: value.role,
+        mode: value.mode === 'read_write' ? 'read_write' : 'read_only',
+      }
     }
   } catch {
     // Ignore stale or malformed session data.
@@ -95,6 +104,7 @@ export async function portalRequest<T>(path: string, options: RequestInit = {}):
     headers['X-Portal-Test-Access'] = '1'
     headers['X-Portal-Test-User-Id'] = String(testAccess.userId)
     headers['X-Portal-Test-Role'] = testAccess.role
+    headers['X-Portal-Test-Mode'] = testAccess.mode
   }
   const response = await invoke<LocalResponse<T>>('python_request', {
     request: {
@@ -126,6 +136,18 @@ export async function portalRequestFile(path: string, options: RequestInit = {})
     throw new Error(`Expected a file from ${path}, but the local command returned ${response.kind}.`)
   }
   return response
+}
+
+export async function portalRequestBinary(path: string, options: RequestInit = {}) {
+  const response = await portalRequest<never>(path, options)
+  if (response.kind !== 'binary' || !response.bytes) {
+    throw new Error(`Expected binary data from ${path}, but the local command returned ${response.kind}.`)
+  }
+  return {
+    bytes: new Uint8Array(response.bytes),
+    mediaType: response.mediaType ?? 'application/octet-stream',
+    headers: response.headers ?? {},
+  }
 }
 
 export function portalDataUrl(path: string) {

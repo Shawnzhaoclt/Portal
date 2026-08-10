@@ -15,6 +15,7 @@ RESOURCE_TYPE_PREFIXES = {
     "service": "SEV",
     "api": "API",
     "admin": "ADM",
+    "form": "FRM",
 }
 
 RESOURCE_ID_RANDOM_ALPHABET = string.ascii_uppercase + string.digits

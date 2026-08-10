@@ -44,7 +44,7 @@ export type PortalResource = {
   resource_slug: string
   resource_key: string
   name: string
-  resource_type: 'dashboard' | 'map' | 'tab' | 'doc' | 'report' | 'dataset' | 'service' | 'admin' | 'api'
+  resource_type: 'dashboard' | 'map' | 'tab' | 'doc' | 'report' | 'form' | 'dataset' | 'service' | 'admin' | 'api'
   url: string
   description: string | null
   category: string | null
@@ -145,6 +145,7 @@ export type CctvReviewReportStatus = 'pending' | 'ready_to_review' | 'completed'
 
 export type CctvReviewReport = {
   id: number
+  record_revision: string
   report_key: string
   report_name: string
   binding_type: 'address' | 'project_title'
@@ -210,6 +211,7 @@ export type CctvReviewReportSavePayload = {
   binding_type: CctvReviewReport['binding_type']
   binding_text: string
   inspection_date_text: string
+  record_revision?: string | null
   memo?: string | null
   pipes: CctvReviewPipeSave[]
 }
@@ -545,6 +547,10 @@ export function fetchUsers(search = '') {
   return requestJson<{ users: PortalUser[] }>(`/api/admin/users${query}`)
 }
 
+export function fetchTestAccessUsers() {
+  return requestJson<{ users: PortalUser[] }>('/api/test-access/users')
+}
+
 export function createUser(payload: {
   first_name: string
   last_name: string
@@ -745,7 +751,7 @@ export function saveCctvReviewReport(payload: CctvReviewReportSavePayload) {
 
 export function updateCctvReviewReportStatus(
   reportId: number,
-  payload: { action: 'submit_to_review' | 'return_to_edit' | 'complete'; memo?: string },
+  payload: { action: 'submit_to_review' | 'return_to_edit' | 'complete'; record_revision: string; memo?: string },
 ) {
   return requestJson<{ ok: boolean; report_id: number; from_status: CctvReviewReportStatus; to_status: CctvReviewReportStatus }>(
     `/api/reports/proactive-team-cctv-review/reports/${reportId}/status`,

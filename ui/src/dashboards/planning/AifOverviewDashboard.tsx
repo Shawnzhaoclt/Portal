@@ -6,6 +6,7 @@ import '../critical-team/CriticalTeamDashboard.css'
 import './AifOverviewDashboard.css'
 import { portalRequestJson } from '../../desktop/request'
 import { formatDateOnly, formatDateTime, formatMonthYear } from '../../lib/dateTime'
+import { createPortalExcelWorkbook, downloadExcelWorkbook } from '../../lib/excelExport'
 
 type AifOverviewPoint = {
   month_key: string
@@ -293,278 +294,45 @@ function aggregateAifOverviewData(data: AifOverviewResponse | null, mode: AifPer
   }
 }
 
-function escapeXml(value: string) {
-  return value
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&apos;')
-}
-
-function columnLetter(index: number) {
-  let column = ''
-  let value = index + 1
-  while (value > 0) {
-    const remainder = (value - 1) % 26
-    column = String.fromCharCode(65 + remainder) + column
-    value = Math.floor((value - 1) / 26)
-  }
-  return column
-}
-
-function xlsxTextCell(columnIndex: number, rowIndex: number, value: string, style = 0) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  return `<c r="${cellRef}" t="inlineStr" s="${style}"><is><t>${escapeXml(value)}</t></is></c>`
-}
-
-function xlsxNumberCell(columnIndex: number, rowIndex: number, value: number, style = 0) {
-  const cellRef = `${columnLetter(columnIndex)}${rowIndex}`
-  return `<c r="${cellRef}" s="${style}"><v>${value}</v></c>`
-}
-
-function encodeText(value: string) {
-  return new TextEncoder().encode(value)
-}
-
-const CRC32_TABLE = (() => {
-  const table: number[] = []
-  for (let index = 0; index < 256; index += 1) {
-    let current = index
-    for (let bit = 0; bit < 8; bit += 1) {
-      current = current & 1 ? 0xedb88320 ^ (current >>> 1) : current >>> 1
-    }
-    table[index] = current >>> 0
-  }
-  return table
-})()
-
-function crc32(bytes: Uint8Array) {
-  let crc = 0xffffffff
-  for (const byte of bytes) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8)
-  }
-  return (crc ^ 0xffffffff) >>> 0
-}
-
-function concatBytes(chunks: Uint8Array[]) {
-  const length = chunks.reduce((sum, chunk) => sum + chunk.length, 0)
-  const output = new Uint8Array(length)
-  let offset = 0
-  for (const chunk of chunks) {
-    output.set(chunk, offset)
-    offset += chunk.length
-  }
-  return output
-}
-
-function zipDateTime(date: Date) {
-  return {
-    date: ((date.getFullYear() - 1980) << 9) | ((date.getMonth() + 1) << 5) | date.getDate(),
-    time: (date.getHours() << 11) | (date.getMinutes() << 5) | Math.floor(date.getSeconds() / 2),
-  }
-}
-
-function createZip(files: Array<{ name: string; content: string }>) {
-  const now = zipDateTime(new Date())
-  const localChunks: Uint8Array[] = []
-  const centralChunks: Uint8Array[] = []
-  const entries: Array<{ nameBytes: Uint8Array; bytes: Uint8Array; crc: number; offset: number }> = []
-  let offset = 0
-
-  for (const file of files) {
-    const nameBytes = encodeText(file.name)
-    const bytes = encodeText(file.content)
-    const fileCrc = crc32(bytes)
-    const header = new Uint8Array(30 + nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x04034b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 0x0800, true)
-    view.setUint16(8, 0, true)
-    view.setUint16(10, now.time, true)
-    view.setUint16(12, now.date, true)
-    view.setUint32(14, fileCrc, true)
-    view.setUint32(18, bytes.length, true)
-    view.setUint32(22, bytes.length, true)
-    view.setUint16(26, nameBytes.length, true)
-    header.set(nameBytes, 30)
-
-    entries.push({ nameBytes, bytes, crc: fileCrc, offset })
-    localChunks.push(header, bytes)
-    offset += header.length + bytes.length
-  }
-
-  const centralOffset = offset
-  for (const entry of entries) {
-    const header = new Uint8Array(46 + entry.nameBytes.length)
-    const view = new DataView(header.buffer)
-    view.setUint32(0, 0x02014b50, true)
-    view.setUint16(4, 20, true)
-    view.setUint16(6, 20, true)
-    view.setUint16(8, 0x0800, true)
-    view.setUint16(10, 0, true)
-    view.setUint16(12, now.time, true)
-    view.setUint16(14, now.date, true)
-    view.setUint32(16, entry.crc, true)
-    view.setUint32(20, entry.bytes.length, true)
-    view.setUint32(24, entry.bytes.length, true)
-    view.setUint16(28, entry.nameBytes.length, true)
-    view.setUint32(42, entry.offset, true)
-    header.set(entry.nameBytes, 46)
-    centralChunks.push(header)
-    offset += header.length
-  }
-
-  const centralSize = offset - centralOffset
-  const end = new Uint8Array(22)
-  const endView = new DataView(end.buffer)
-  endView.setUint32(0, 0x06054b50, true)
-  endView.setUint16(8, entries.length, true)
-  endView.setUint16(10, entries.length, true)
-  endView.setUint32(12, centralSize, true)
-  endView.setUint32(16, centralOffset, true)
-
-  return concatBytes([...localChunks, ...centralChunks, end])
-}
-
 function createAifOverviewWorkbook(data: AifOverviewResponse, periodMode: AifPeriodMode) {
   const seriesByKey = new Map(data.series.map((series) => [series.key, series]))
-  const rows = data.months.map((month, index) => {
-    const rowIndex = index + 5
-    const valueFor = (key: string) => seriesByKey.get(key)?.points.find((point) => point.month_key === month.key)?.count_value ?? 0
-    return `<row r="${rowIndex}">${[
-      xlsxTextCell(0, rowIndex, month.label, index % 2 === 0 ? 4 : 0),
-      xlsxNumberCell(1, rowIndex, valueFor('completed'), index % 2 === 0 ? 4 : 0),
-      xlsxNumberCell(2, rowIndex, valueFor('inspections'), index % 2 === 0 ? 4 : 0),
-      xlsxNumberCell(3, rowIndex, valueFor('project_started'), index % 2 === 0 ? 4 : 0),
-    ].join('')}</row>`
+  const valueFor = (monthKey: string, key: string) =>
+    seriesByKey.get(key)?.points.find((point) => point.month_key === monthKey)?.count_value ?? 0
+  return createPortalExcelWorkbook({
+    title: `AIF Overview Chart Data (${PERIOD_MODE_LABELS[periodMode]})`,
+    sheetName: 'AIF Overview',
+    columns: [
+      { heading: PERIOD_MODE_LABELS[periodMode], width: 18 },
+      { heading: 'AIFs Completed', width: 20 },
+      { heading: 'Inspections Performed', width: 22 },
+      { heading: 'Projects Started', width: 20 },
+    ],
+    metadata: [
+      `Date range: ${formatDate(data.date_from)} to ${formatDate(data.date_to)}`,
+      `Generated at: ${formatDateTime(new Date())}`,
+    ],
+    rows: [
+      ...data.months.map((month) => ({
+        cells: [
+          month.label,
+          valueFor(month.key, 'completed'),
+          valueFor(month.key, 'inspections'),
+          valueFor(month.key, 'project_started'),
+        ],
+      })),
+      {
+        kind: 'total' as const,
+        cells: ['Total', data.metrics.completed, data.metrics.inspections, data.metrics.project_started],
+      },
+    ],
+    autoFilter: false,
   })
-  const totalRowIndex = data.months.length + 5
-  const worksheet = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <dimension ref="A1:D${totalRowIndex}"/>
-  <cols>
-    <col min="1" max="1" width="18" customWidth="1"/>
-    <col min="2" max="4" width="20" customWidth="1"/>
-  </cols>
-  <sheetData>
-    <row r="1" ht="24" customHeight="1">${xlsxTextCell(0, 1, `AIF Overview Chart Data (${PERIOD_MODE_LABELS[periodMode]})`, 2)}</row>
-    <row r="2">${xlsxTextCell(0, 2, `Date range: ${formatDate(data.date_from)} to ${formatDate(data.date_to)}`, 5)}</row>
-    <row r="3">${xlsxTextCell(0, 3, `Generated at: ${formatDateTime(new Date())}`, 5)}</row>
-    <row r="4">${[
-      xlsxTextCell(0, 4, PERIOD_MODE_LABELS[periodMode], 3),
-      xlsxTextCell(1, 4, 'AIFs Completed', 3),
-      xlsxTextCell(2, 4, 'Inspections Performed', 3),
-      xlsxTextCell(3, 4, 'Projects Started', 3),
-    ].join('')}</row>
-    ${rows.join('\n    ')}
-    <row r="${totalRowIndex}">${[
-      xlsxTextCell(0, totalRowIndex, 'Total', 3),
-      xlsxNumberCell(1, totalRowIndex, data.metrics.completed, 3),
-      xlsxNumberCell(2, totalRowIndex, data.metrics.inspections, 3),
-      xlsxNumberCell(3, totalRowIndex, data.metrics.project_started, 3),
-    ].join('')}</row>
-  </sheetData>
-  <mergeCells count="3">
-    <mergeCell ref="A1:D1"/>
-    <mergeCell ref="A2:D2"/>
-    <mergeCell ref="A3:D3"/>
-  </mergeCells>
-</worksheet>`
-
-  return createZip([
-    {
-      name: '[Content_Types].xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
-  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
-  <Default Extension="xml" ContentType="application/xml"/>
-  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
-  <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
-  <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
-</Types>`,
-    },
-    {
-      name: '_rels/.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/workbook.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
-  <sheets><sheet name="AIF Overview" sheetId="1" r:id="rId1"/></sheets>
-</workbook>`,
-    },
-    {
-      name: 'xl/_rels/workbook.xml.rels',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
-  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
-  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
-</Relationships>`,
-    },
-    {
-      name: 'xl/styles.xml',
-      content: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-  <fonts count="4">
-    <font><sz val="11"/><name val="Calibri"/></font>
-    <font><b/><sz val="15"/><color rgb="FFFFFFFF"/><name val="Calibri"/></font>
-    <font><b/><sz val="11"/><color rgb="FF0B3558"/><name val="Calibri"/></font>
-    <font><i/><sz val="10"/><color rgb="FF5B6B80"/><name val="Calibri"/></font>
-  </fonts>
-  <fills count="5">
-    <fill><patternFill patternType="none"/></fill>
-    <fill><patternFill patternType="gray125"/></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FF1F5D8F"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFD6E7F2"/><bgColor indexed="64"/></patternFill></fill>
-    <fill><patternFill patternType="solid"><fgColor rgb="FFEAF3FA"/><bgColor indexed="64"/></patternFill></fill>
-  </fills>
-  <borders count="2">
-    <border><left/><right/><top/><bottom/><diagonal/></border>
-    <border>
-      <left style="thin"><color rgb="FFB7C7D8"/></left>
-      <right style="thin"><color rgb="FFB7C7D8"/></right>
-      <top style="thin"><color rgb="FFB7C7D8"/></top>
-      <bottom style="thin"><color rgb="FFB7C7D8"/></bottom>
-      <diagonal/>
-    </border>
-  </borders>
-  <cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>
-  <cellXfs count="6">
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="2" fillId="3" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="0" fillId="4" borderId="1" xfId="0" applyFill="1" applyBorder="1" applyAlignment="1"><alignment horizontal="center" vertical="center"/></xf>
-    <xf numFmtId="0" fontId="3" fillId="0" borderId="1" xfId="0" applyFont="1" applyBorder="1" applyAlignment="1"><alignment horizontal="left" vertical="center"/></xf>
-  </cellXfs>
-  <cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>
-</styleSheet>`,
-    },
-    { name: 'xl/worksheets/sheet1.xml', content: worksheet },
-  ])
 }
 
 function downloadAifOverviewData(data: AifOverviewResponse, periodMode: AifPeriodMode) {
   const workbook = createAifOverviewWorkbook(data, periodMode)
-  const blob = new Blob([workbook], {
-    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement('a')
-  link.href = url
-  link.download = `aif-overview-${periodMode}-${data.date_from}-to-${data.date_to}.xlsx`
-  document.body.appendChild(link)
-  link.click()
-  link.remove()
-  URL.revokeObjectURL(url)
+  return downloadExcelWorkbook(workbook, `aif-overview-${periodMode}-${data.date_from}-to-${data.date_to}.xlsx`)
 }
-
 function makeAifChartOption(data: AifOverviewResponse | null): EChartsOption {
   const months = data?.months ?? []
   const seriesList = data?.series ?? []
@@ -732,8 +500,13 @@ export default function AifOverviewDashboard() {
                 type="button"
                 className="aif-overview-export-button"
                 disabled={!canDownload}
-                onClick={() => {
-                  if (chartData) downloadAifOverviewData(chartData, periodMode)
+                onClick={async () => {
+                  if (!chartData) return
+                  try {
+                    await downloadAifOverviewData(chartData, periodMode)
+                  } catch (exportError) {
+                    setError(exportError instanceof Error ? exportError.message : 'Unable to open the Excel export.')
+                  }
                 }}
               >
                 <Download size={14} />

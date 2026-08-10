@@ -358,7 +358,10 @@ class DataCoordinator:
         entity_type: str,
         *,
         filters: Mapping[str, object] | None = None,
+        predicates: Sequence[tuple[str, str, object]] | None = None,
+        search: tuple[Sequence[str], str] | None = None,
         order_by: Sequence[tuple[str, bool]] | None = None,
+        keyset_after: Sequence[tuple[str, object, bool]] | None = None,
         limit: int | None = None,
         offset: int = 0,
         include_deleted: bool = False,
@@ -367,7 +370,10 @@ class DataCoordinator:
         return self.store.query_entities(
             entity_type,
             filters=filters,
+            predicates=predicates,
+            search=search,
             order_by=order_by,
+            keyset_after=keyset_after,
             limit=limit,
             offset=offset,
             include_deleted=include_deleted,
@@ -378,12 +384,16 @@ class DataCoordinator:
         entity_type: str,
         *,
         filters: Mapping[str, object] | None = None,
+        predicates: Sequence[tuple[str, str, object]] | None = None,
+        search: tuple[Sequence[str], str] | None = None,
         include_deleted: bool = False,
     ) -> int:
         self.sync_if_due()
         return self.store.count_entities(
             entity_type,
             filters=filters,
+            predicates=predicates,
+            search=search,
             include_deleted=include_deleted,
         )
 

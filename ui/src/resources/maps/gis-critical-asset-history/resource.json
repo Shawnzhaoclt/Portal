@@ -6,6 +6,10 @@
   "url": "/map_critical_asset_history",
   "category": "Maps",
   "description": "Spatial view focused on assets with multiple inspections and risk changes over time.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/gis-critical-asset-history.png",
+    "thumbnail_dark": "assets/portal-thumbnails/gis-critical-asset-history-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

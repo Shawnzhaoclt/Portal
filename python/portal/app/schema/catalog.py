@@ -14,6 +14,10 @@ from typing import Any
 
 from portal.app.sync.local_store import LocalStore
 from portal.app.sync.physical_entities import all_physical_specs, validate_physical_registry
+from portal.app.schema.sqlite_types import (
+    normalize_sqlite_declared_type,
+    sqlite_logical_type,
+)
 
 
 BASELINE_HANDLER = "baseline"
@@ -23,7 +27,6 @@ ALEMBIC_SCHEMA_HANDLER = "alembic_structural"
 _DRAFT_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _GENERATED_TABLE_ID = re.compile(r"^tbl_[0-9a-f]{32}$")
 _DRAFT_PHYSICAL_TABLE = re.compile(r"^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$")
-_DRAFT_SQLITE_TYPES = {"TEXT", "INTEGER", "REAL", "BLOB", "NUMERIC"}
 
 BUSINESS_TABLES = tuple(
     (
@@ -57,16 +60,7 @@ def _readonly_connection(path: Path) -> sqlite3.Connection:
 
 
 def _logical_type(sqlite_type: str) -> str:
-    normalized = sqlite_type.upper()
-    if "INT" in normalized:
-        return "integer"
-    if any(token in normalized for token in ("REAL", "FLOA", "DOUB", "DEC")):
-        return "number"
-    if any(token in normalized for token in ("DATE", "TIME")):
-        return "datetime"
-    if "BLOB" in normalized:
-        return "binary"
-    return "text"
+    return sqlite_logical_type(sqlite_type)
 
 
 def _business_catalog(business_database: Path) -> list[dict[str, Any]]:
@@ -780,9 +774,14 @@ def apply_schema_draft(
                 raise ValueError(f"Invalid SQLite field name: {column!r}.")
             if any(str(field["physical_column"]).lower() == column.lower() for field in table["fields"]):
                 raise ValueError(f"Field {table['physical_table']}.{column} already exists.")
-            sqlite_type = str(operation.get("sqlite_type") or "TEXT").upper()
-            if sqlite_type not in _DRAFT_SQLITE_TYPES:
-                raise ValueError(f"Unsupported SQLite field type: {sqlite_type}.")
+            try:
+                sqlite_type = normalize_sqlite_declared_type(
+                    operation.get("sqlite_type")
+                )
+            except ValueError as error:
+                raise ValueError(
+                    f"Unsupported SQLite field type: {operation.get('sqlite_type')}."
+                ) from error
             nullable = bool(operation.get("nullable", True))
             default = operation.get("default")
             if not nullable and default is None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 
 from dotenv import load_dotenv
@@ -19,6 +20,7 @@ from portal.app.dashboards.gis import router as gis_router
 from portal.app.dashboards.planning import router as planning_router
 from portal.app.resources.maps.stm_risk_map import router as map_tiles_router
 from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
+from portal.app.resources.forms.create_aif_from_itpipes.router import router as create_aif_router
 from portal.app.holidays import router as holiday_router
 from portal.app.favorites import router as favorites_router
 from portal.app.weekly_time import router as weekly_time_router
@@ -41,6 +43,7 @@ app.include_router(gis_router)
 app.include_router(planning_router)
 app.include_router(map_tiles_router)
 app.include_router(cctv_review_report_router)
+app.include_router(create_aif_router)
 app.include_router(holiday_router)
 app.include_router(favorites_router)
 app.include_router(weekly_time_router)
@@ -51,6 +54,14 @@ app.include_router(sync_router)
 
 @app.on_event("startup")
 def startup() -> None:
+    if (
+        os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes"}
+        and os.getenv("PORTAL_SYSTEM_DB_WRITE_ENABLED", "").strip() != "1"
+    ):
+        # The portable Desktop consumes the catalog snapshot exactly as
+        # published by Portal Manager. Runtime seed reconciliation would
+        # attempt to mutate that intentionally read-only database.
+        return
     initialize_management_database()
 
 

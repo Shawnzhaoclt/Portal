@@ -109,6 +109,28 @@
   max-width: 480px;
 }
 
+.desktop-startup-countdown {
+  display: grid;
+  justify-items: center;
+  gap: 0;
+  margin-top: 8px;
+}
+
+.desktop-startup-countdown strong {
+  color: #c21f16;
+  font-size: clamp(52px, 9vw, 76px);
+  font-variant-numeric: tabular-nums;
+  font-weight: 850;
+  line-height: 1;
+}
+
+.desktop-startup-countdown span {
+  margin-top: 2px;
+  color: #9e261c;
+  font-size: 15px;
+  font-weight: 750;
+}
+
 .desktop-startup-actions {
   display: flex;
   gap: 12px;
@@ -146,6 +168,47 @@
   }
   100% {
     transform: translateX(365%);
+  }
+}
+
+@media (max-height: 520px) {
+  .desktop-startup-screen {
+    align-items: start;
+    padding: 10px 24px;
+    overflow-y: auto;
+  }
+
+  .desktop-startup-content.maintenance {
+    min-height: 0;
+  }
+
+  .desktop-startup-content.maintenance .desktop-startup-logo {
+    width: 95px;
+    margin-bottom: 7px;
+  }
+
+  .desktop-startup-content.maintenance .desktop-startup-rule {
+    margin-bottom: 7px;
+  }
+
+  .desktop-startup-content.maintenance h1 {
+    font-size: 24px;
+  }
+
+  .desktop-startup-content.maintenance h2,
+  .desktop-startup-content.maintenance p,
+  .desktop-startup-content.maintenance .desktop-startup-actions {
+    margin-top: 6px;
+  }
+
+  .desktop-startup-content.maintenance .desktop-startup-maintenance-icon {
+    width: 26px;
+    height: 26px;
+    margin-top: 9px;
+  }
+
+  .desktop-startup-content.maintenance .desktop-startup-countdown strong {
+    font-size: 48px;
   }
 }
 

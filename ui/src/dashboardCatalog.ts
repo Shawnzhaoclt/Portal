@@ -6,7 +6,12 @@ export type DashboardCatalogItem = {
   path: string
   helpUrl?: string
   category: 'Operations' | 'Planning' | 'Risk' | 'Maps'
-  kind: 'dashboard' | 'map' | 'tab' | 'doc' | 'report'
+  kind: 'dashboard' | 'map' | 'tab' | 'doc' | 'report' | 'form'
+}
+
+export type ResourcePresentation = {
+  thumbnail_light?: string
+  thumbnail_dark?: string
 }
 
 type ResourceMetadataItem = {
@@ -19,6 +24,7 @@ type ResourceMetadataItem = {
   category: DashboardCatalogItem['category']
   description?: string
   show_in_catalog?: boolean
+  presentation?: ResourcePresentation
 }
 
 type ResourceMetadataModule = {
@@ -30,9 +36,14 @@ const RESOURCE_METADATA = Object.values(resourceMetadataModules)
   .map((module) => module.default)
   .sort((left, right) => left.resource_slug.localeCompare(right.resource_slug))
 
+export const RESOURCE_PRESENTATION_BY_KEY = Object.fromEntries(
+  RESOURCE_METADATA.map((resource) => [resource.resource_slug, resource.presentation]),
+) as Record<string, ResourcePresentation | undefined>
+
 export const DASHBOARD_LINKS_ROUTE = '/dashboard_links'
 export const PROACTIVE_TEAM_CCTV_REVIEW_ROUTE = '/report_proactive_team_cctv_review'
 export const PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE = '/help_proactive_team_cctv_review'
+export const CREATE_AIF_FROM_ITPIPES_ROUTE = '/form_create_aif_from_itpipes'
 export const WEEKLY_TIME_REPORTING_ROUTE = '/report_weekly_time_reporting'
 export const AIF_OVERVIEW_ROUTE = '/dashboard_aif_overview'
 export const CRITICAL_ASSET_TRACKING_ROUTE = '/dashboard_critical_asset_tracking'
@@ -104,7 +115,7 @@ export function criticalAssetSheetIdFromPath(path: string) {
 export const DASHBOARD_CATALOG: DashboardCatalogItem[] = RESOURCE_METADATA
   .filter((resource) => resource.show_in_catalog !== false)
   .filter((resource): resource is ResourceMetadataItem & { type: DashboardCatalogItem['kind'] } =>
-    ['dashboard', 'map', 'tab', 'doc', 'report'].includes(resource.type),
+    ['dashboard', 'map', 'tab', 'doc', 'report', 'form'].includes(resource.type),
   )
   .map((resource) => ({
     resource_id: resource.resource_id,

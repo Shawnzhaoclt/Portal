@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import sqlite3
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -123,3 +125,141 @@ def test_critical_team_reader_selects_serving_contract(tmp_path: Path) -> None:
     assert critical_team_uses_serving_tables(source)
     assert "critical_asset_work_orders" in critical_team_source_cte(source)
     assert critical_team_base_params(source) == []
+
+
+def test_planning_endpoints_read_serving_contract(tmp_path: Path, monkeypatch) -> None:
+    from portal.app.core.data_sources import CriticalTeamDataSource
+    from portal.runtime.transport import Parameter
+
+    planning = importlib.import_module("portal.app.dashboards.planning.router")
+
+    database = tmp_path / "serving.sqlite3"
+    connection = sqlite3.connect(database)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE critical_asset_work_orders (
+                workorder_id TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE asset_inspection_workflows (
+                inspection_id INTEGER NOT NULL,
+                asset_id TEXT,
+                inspection_date TEXT,
+                inspection_by TEXT,
+                inspection_status TEXT,
+                submit_to TEXT,
+                related_workorder_id INTEGER,
+                related_wo_status TEXT,
+                critical_team_status TEXT,
+                investigation_id INTEGER,
+                investigation_status TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO asset_inspection_workflows
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                101,
+                "P_100",
+                "2026-08-06 10:30:00",
+                "Inspector, One",
+                "PENDING",
+                "Reviewer, One",
+                202,
+                "OPEN",
+                "Ready For Review",
+                303,
+                "OPEN",
+            ),
+        )
+        connection.execute(
+            """
+            CREATE TABLE asset_inspection_events (
+                inspection_id INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                actor_name TEXT,
+                inspection_status TEXT
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT INTO asset_inspection_events VALUES (?, ?, ?, ?, ?)",
+            [
+                (101, "inspection", "2026-08-06 10:30:00", "Inspector, One", "PENDING"),
+                (101, "project_started", "2026-08-07 09:00:00", "Inspector, One", "PENDING"),
+                (101, "completed", "2026-08-08 16:00:00", "Reviewer, One", "COMPLETED"),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    manifest = tmp_path / "current.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "format": "sqlite",
+                "database": database.name,
+                "published_at_utc": "2026-08-09T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    source = CriticalTeamDataSource(
+        source_type="sqlite_snapshot",
+        workbook="",
+        manifest=manifest,
+        workorder_table="azteca_WORKORDER",
+        wocustfield_table="azteca_WOCUSTFIELD",
+        inspection_table="azteca_INSPECTION",
+        workorder_entity_table="azteca_WORKORDERENTITY",
+        activity_link_table="azteca_ACTIVITYLINK",
+        critical_workorders_serving_table="critical_asset_work_orders",
+        inspection_workflows_serving_table="asset_inspection_workflows",
+        inspection_events_serving_table="asset_inspection_events",
+        description_filter="Critical Asset Inspection",
+    )
+
+    @contextmanager
+    def serving_connection():
+        read_connection = sqlite3.connect(database)
+        read_connection.execute("PRAGMA query_only = ON")
+        try:
+            yield read_connection
+        finally:
+            read_connection.close()
+
+    monkeypatch.setattr(planning, "critical_team_data_source", lambda: source)
+    monkeypatch.setattr(planning, "critical_team_connection", serving_connection)
+    monkeypatch.setattr(planning, "pending_aif_person_team_lookup", lambda: {})
+    monkeypatch.setattr(planning, "pending_aif_link_templates", lambda: {})
+
+    options = planning.pending_aif_filter_options()
+    assert options["inspection_status"] == ["PENDING"]
+    assert options["critical_team_status"] == ["Ready For Review"]
+
+    defaults = {}
+    for name, parameter in inspect.signature(planning.pending_aif_rows).parameters.items():
+        default = parameter.default
+        defaults[name] = default.default if isinstance(default, Parameter) else default
+    pending = planning.pending_aif_rows(**defaults)
+    assert pending["total"] == 1
+    assert pending["source_published_at_utc"] == "2026-08-09T12:00:00Z"
+    assert pending["rows"][0]["inspection_id"] == 101
+    assert pending["rows"][0]["asset_id"] == "P_100"
+
+    overview = planning.aif_overview("2026-08-01", "2026-08-31")
+    assert overview["metrics"] == {
+        "total": 3,
+        "completed": 1,
+        "inspections": 1,
+        "project_started": 1,
+    }

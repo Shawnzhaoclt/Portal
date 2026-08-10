@@ -41,6 +41,16 @@
                                                      "readOnly":  true
                                                  }
                     },
+    "aifSources":  {
+                       "itpipesIntermediateDatabase":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/itpipes/itpipes.db",
+                       "cityworksIntermediateDatabase":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/cityworks/cityworks.db",
+                       "itpipesProductionDatabase":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/itpipes_stormwater_prod.duckdb",
+                       "itpipesDefectsTable":  "ITPipes_Defects_Merged_PT",
+                       "itpipesMaximumConditionTable":  "DEFECTS_NS_LN_MAX_CL_PT",
+                       "cityworksInspectionHistoryTable":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT",
+                       "itpipesInspectionTable":  "MLI",
+                       "itpipesObservationTable":  "MLO"
+                   },
     "maps":  {
                  "runtimeRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles",
                  "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",

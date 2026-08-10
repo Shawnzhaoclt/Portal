@@ -6,6 +6,10 @@
   "url": "/dashboard_critical_asset_clog_facility_aggregate_pipes",
   "category": "Risk",
   "description": "Clog risk summarized by facility for pipe assets.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes.png",
+    "thumbnail_dark": "assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes-dark.png"
+  },
   "is_public": false,
   "is_active": true,
   "show_in_catalog": true

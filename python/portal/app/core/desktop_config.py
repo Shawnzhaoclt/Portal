@@ -9,6 +9,19 @@ from typing import Any
 
 _TOKEN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
+_AIF_SOURCE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PORTAL_AIF_ITPIPES_INTERMEDIATE_DATABASE",
+        "PORTAL_AIF_CITYWORKS_INTERMEDIATE_DATABASE",
+        "PORTAL_AIF_ITPIPES_PRODUCTION_DATABASE",
+        "PORTAL_AIF_ITPIPES_DEFECTS_TABLE",
+        "PORTAL_AIF_ITPIPES_MAXIMUM_CONDITION_TABLE",
+        "PORTAL_AIF_CITYWORKS_HISTORY_TABLE",
+        "PORTAL_AIF_ITPIPES_INSPECTION_TABLE",
+        "PORTAL_AIF_ITPIPES_OBSERVATION_TABLE",
+    }
+)
+
 
 def desktop_config_path() -> Path:
     configured = os.getenv("PORTAL_CONFIG_FILE", "").strip()
@@ -79,6 +92,14 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_SOURCES_MANIFEST": _value(config, "dataSources", "portalSources", "manifest"),
         "PORTAL_ITPIPES_DUCKDB": _value(config, "dataSources", "itpipes", "database"),
         "PORTAL_ITPIPES_MERGED_DUCKDB": _value(config, "dataSources", "itpipesMerged", "database"),
+        "PORTAL_AIF_ITPIPES_INTERMEDIATE_DATABASE": _value(config, "aifSources", "itpipesIntermediateDatabase"),
+        "PORTAL_AIF_CITYWORKS_INTERMEDIATE_DATABASE": _value(config, "aifSources", "cityworksIntermediateDatabase"),
+        "PORTAL_AIF_ITPIPES_PRODUCTION_DATABASE": _value(config, "aifSources", "itpipesProductionDatabase"),
+        "PORTAL_AIF_ITPIPES_DEFECTS_TABLE": _value(config, "aifSources", "itpipesDefectsTable"),
+        "PORTAL_AIF_ITPIPES_MAXIMUM_CONDITION_TABLE": _value(config, "aifSources", "itpipesMaximumConditionTable"),
+        "PORTAL_AIF_CITYWORKS_HISTORY_TABLE": _value(config, "aifSources", "cityworksInspectionHistoryTable"),
+        "PORTAL_AIF_ITPIPES_INSPECTION_TABLE": _value(config, "aifSources", "itpipesInspectionTable"),
+        "PORTAL_AIF_ITPIPES_OBSERVATION_TABLE": _value(config, "aifSources", "itpipesObservationTable"),
         "PORTAL_GIS_FACILITY_DUCKDB": _value(config, "dataSources", "gisFacility", "database"),
         "PORTAL_SDW_DUCKDB": _value(config, "dataSources", "spatialDataWarehouse", "database"),
         "PORTAL_MAP_TILES_RUNTIME_ROOT": _value(config, "maps", "runtimeRoot"),
@@ -110,7 +131,15 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_TEMP_ROOT": _value(config, "application", "tempRoot"),
     }
     for name, value in mappings.items():
-        if value:
+        if name in _AIF_SOURCE_ENVIRONMENT_KEYS:
+            # The packaged, Manager-owned Portal settings are authoritative for
+            # AIF source routing. Do not allow a stale .env or machine variable
+            # to redirect one table to a different database.
+            if value:
+                os.environ[name] = value
+            else:
+                os.environ.pop(name, None)
+        elif value:
             os.environ.setdefault(name, value)
     map_configuration_root = mappings["PORTAL_MAP_CONFIG_ROOT"]
     if map_configuration_root:

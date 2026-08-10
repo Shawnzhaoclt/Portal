@@ -8,6 +8,23 @@ import type {
 } from './types'
 import { portalDataUrl, portalRequestJson } from '../../desktop/request'
 
+export type PortalDictionaryItem = {
+  id: number
+  item_code: string
+  label: string
+  sort_order: number
+  is_active: boolean
+}
+
+export type PortalDictionaryItemsResponse = {
+  dictionary: {
+    dictionary_key: string
+    name: string
+    is_active: boolean
+  }
+  items: PortalDictionaryItem[]
+}
+
 async function apiGet<T>(path: string, params?: URLSearchParams): Promise<T> {
   const suffix = params && params.size > 0 ? `?${params.toString()}` : ''
   return portalRequestJson<T>(`${path}${suffix}`)
@@ -39,6 +56,12 @@ export function fetchAmTeamPipeGroups(search: string, kind?: string) {
 
 export function fetchAmTeamInspections(mlId: string) {
   return apiGet<AmTeamInspectionResponse>(`/api/amteam/pipes/${encodeURIComponent(mlId)}/inspections`)
+}
+
+export function fetchPortalDictionaryItems(dictionaryKey: string) {
+  return apiGet<PortalDictionaryItemsResponse>(
+    `/api/dictionaries/${encodeURIComponent(dictionaryKey)}/items`,
+  )
 }
 
 function normalizeObservationResponse(response: AmTeamObservationResponse): AmTeamObservationResponse {
