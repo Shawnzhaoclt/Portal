@@ -1,4 +1,99 @@
 @import "tailwindcss";
+
+.app-message-dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(3 24 39 / 52%);
+  backdrop-filter: blur(2px);
+}
+
+.app-message-dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  border: 1px solid #9eb9d0;
+  background: #fff;
+  color: #0c2941;
+  box-shadow: 0 18px 56px rgb(0 27 49 / 32%);
+}
+
+.app-message-dialog header {
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid #c9d9e6;
+  background: #edf5fb;
+}
+
+.app-message-dialog--warning header { border-top: 4px solid #c47a00; }
+.app-message-dialog--danger header { border-top: 4px solid #b32720; }
+.app-message-dialog--default header { border-top: 4px solid #17639c; }
+
+.app-message-dialog h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+  color: #0b4f84;
+}
+
+.app-message-dialog__message {
+  padding: 20px 22px;
+  white-space: pre-wrap;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.app-message-dialog input {
+  display: block;
+  width: calc(100% - 44px);
+  min-height: 44px;
+  margin: 0 22px 20px;
+  border: 1px solid #9eb9d0;
+  background: #fff;
+  color: #0c2941;
+  padding: 8px 11px;
+  font: inherit;
+}
+
+.app-message-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 14px 22px 18px;
+  border-top: 1px solid #d5e1ea;
+  background: #f8fbfd;
+}
+
+.app-message-dialog footer button {
+  min-width: 96px;
+  min-height: 42px;
+  border: 1px solid #9eb9d0;
+  padding: 0 18px;
+  background: #fff;
+  color: #0b4f84;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.app-message-dialog footer .app-message-dialog__confirm {
+  border-color: #17639c;
+  background: #17639c;
+  color: #fff;
+}
+
+.app-message-dialog footer .app-message-dialog__confirm--danger {
+  border-color: #b32720;
+  background: #b32720;
+}
+
+.app-message-dialog footer button:focus-visible,
+.app-message-dialog input:focus-visible {
+  outline: 3px solid #f0a400;
+  outline-offset: 2px;
+}
 @import "tw-animate-css";
 
 @custom-variant dark (&:is(.dark *));

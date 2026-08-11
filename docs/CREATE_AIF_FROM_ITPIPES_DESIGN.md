@@ -534,6 +534,8 @@ pending --Submit to review--> ready_to_review --Complete review--> completed
    ^                              |
    |-------- Return to edit ------|
 
+pending --Delete draft--> coordinator tombstone
+
 completed --Reopen--> ready_to_review
 ```
 
@@ -623,6 +625,7 @@ Backend authorization is required for every operation.
 | View an existing AIF | `View` |
 | Create an AIF | `Create` |
 | Edit, save, or submit a pending AIF | `Edit` or `Manage` |
+| Delete a pending AIF | Draft owner, or `Delete`, `Manage`, or administrator role |
 | Return or complete an assigned AIF | `Review` or `Manage` |
 | Reopen a completed AIF | `Manage` or administrator role |
 | View event history | `View` |
@@ -732,19 +735,21 @@ Available row operations are:
 
 | Status | Operations |
 | --- | --- |
-| `pending` | View, Edit, Submit to review, Events. |
+| `pending` | View, Edit, Submit to review, Events, Delete when authorized. |
 | `ready_to_review` | View, Complete review, Return to edit, Events. |
 | `completed` | View, Events. |
 | `completed` with `Manage` or administrator role | View, Reopen, Events. |
 
-The backend returns explicit `can_view`, `can_edit`, `can_submit`, `can_review`, and
-`can_reopen` flags for each row or result context. The frontend does
+The backend returns explicit `can_view`, `can_edit`, `can_submit`, `can_delete`,
+`can_review`, and `can_reopen` flags for each row or result context. The frontend does
 not reconstruct authorization from status alone.
 
-Hard delete is not available in the first release. AIFs and their audit records must
-not disappear from ordinary workflows. If the business later needs invalidation, it
-must be designed as an explicit `voided` status with actor, time, reason, permissions,
-and event history rather than reusing deletion.
+Only a saved draft whose current status is `pending` may be deleted. The UI requires
+explicit confirmation before sending the request. Deletion writes a coordinator
+tombstone rather than physically removing the business row, releases the active MLO
+reservation, and removes the AIF from ordinary registers and exports. A `deleted`
+event records the actor and time and all existing audit events remain preserved.
+Ready-to-review and completed AIFs cannot be deleted.
 
 Selecting an AIF ID or row operation opens the full-page AIF workspace. **Back to AIF
 Register** restores the previous saved view, filters, sort, page, selected page size,
@@ -1141,9 +1146,9 @@ the other process.
 All business writes use the Portal Data Coordinator. Direct SQLite writes, route
 startup DDL, and resource-specific databases are prohibited.
 
-One create, save, or workflow operation is one coordinator transaction containing:
+One create, save, delete, or workflow operation is one coordinator transaction containing:
 
-1. the AIF insert or update mutation; and
+1. the AIF insert, update, or tombstone mutation; and
 2. the `SYS_RESOURCE_REVIEW_EVENTS` insert.
 
 Review events use:
@@ -1161,7 +1166,8 @@ Supported event types:
 - `submitted_to_review`;
 - `returned_to_edit`;
 - `completed`; and
-- `reopened`.
+- `reopened`; and
+- `deleted`.
 
 Events contain the actor's employee ID as `actor_user_id`, actor display name, event
 time, previous status, new status, optional memo, and correlation ID. The universal
@@ -1294,13 +1300,15 @@ than being assigned to the migration operator.
 - Filtered XLSX export contains the complete authorized result rather than only the
   loaded page.
 - Exported dates follow the operating-system format and omit fractional seconds.
-- Hard delete is absent.
+- Authorized pending AIFs expose Delete, require confirmation, create a `deleted`
+  event, and become coordinator tombstones excluded from ordinary lists and exports.
+- Ready-to-review and completed AIFs cannot be deleted.
 - Empty, loading, no-data, filtered-empty, and error states are distinguishable and
   accessible.
 
 ### 21.5 Workflow and permissions
 
-- Only authorized users can create, edit, submit, review, complete, or reopen.
+- Only authorized users can create, edit, submit, delete, review, complete, or reopen.
 - Reviewer selection includes the submitter's active configured direct manager and
   active users with effective `Review`, `Manage`, or `Admin` permission; the direct
   manager appears first and can act on the AIF assigned to them.

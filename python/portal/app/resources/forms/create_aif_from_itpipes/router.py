@@ -149,6 +149,10 @@ class AifSaveRequest(AifFieldsRequest):
     memo: str | None = Field(default=None, max_length=2000)
 
 
+class AifDeleteRequest(BaseModel):
+    record_revision: str = Field(min_length=1)
+
+
 class AifSubmitRequest(BaseModel):
     record_revision: str = Field(min_length=1)
     reviewer_employee_id: str = Field(min_length=1, max_length=64)
@@ -333,9 +337,28 @@ def _action_flags(db: Session, user: User, values: dict[str, Any]) -> dict[str, 
         "can_view": admin or "view" in permissions or bool(permissions),
         "can_edit": status == "pending" and edit,
         "can_submit": status == "pending" and edit,
+        "can_delete": _can_delete_aif(db, user, values, permissions=permissions, admin=admin),
         "can_review": status == "ready_to_review" and review,
         "can_reopen": status == "completed" and manage,
     }
+
+
+def _can_delete_aif(
+    db: Session,
+    user: User,
+    values: dict[str, Any],
+    *,
+    permissions: set[str] | None = None,
+    admin: bool | None = None,
+) -> bool:
+    if str(values.get("status") or "") != "pending":
+        return False
+    current_employee_id = _employee_id(user)
+    if str(values.get("initiated_by_user_id") or "").strip() == current_employee_id:
+        return True
+    current_permissions = permissions if permissions is not None else _permission_types(db, user)
+    is_admin = _is_admin(user) if admin is None else admin
+    return is_admin or bool(current_permissions.intersection({"delete", "manage", "admin"}))
 
 
 def _aif_response(db: Session, user: User, entity: dict[str, object]) -> dict[str, Any]:
@@ -523,7 +546,7 @@ def _event_mutation(
     event_type: str,
     user: User,
     from_status: str | None,
-    to_status: str,
+    to_status: str | None,
     memo: str | None,
     correlation_id: str,
 ) -> Mutation:
@@ -982,6 +1005,58 @@ def save_aif(
     event = _event_mutation(coordinator, _resource(db), global_id, str(values["inspection_id"]), "saved", current_user, "pending", "pending", payload.memo, correlation_id)
     _commit(current_user, [mutation, event])
     return {"aif": _aif_response(db, current_user, coordinator.get_entity(ENTITY_TYPE, global_id))}
+
+
+@router.delete("/aifs/{global_id}")
+def delete_aif(
+    global_id: str,
+    payload: AifDeleteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    coordinator = _coordinator(current_user)
+    entity = coordinator.get_entity(ENTITY_TYPE, global_id)
+    values = _entity_values(entity)
+    if values is None:
+        raise HTTPException(status_code=404, detail="AIF was not found.")
+    if str(values.get("status") or "") != "pending":
+        raise HTTPException(status_code=409, detail="Only draft or pending AIFs can be deleted.")
+    if not _can_delete_aif(db, current_user, values):
+        raise HTTPException(
+            status_code=403,
+            detail="Only the draft owner or a user with Delete, Manage, or Admin permission can delete this AIF.",
+        )
+    correlation_id = uuid4().hex
+    _commit(
+        current_user,
+        [
+            _event_mutation(
+                coordinator,
+                _resource(db),
+                global_id,
+                str(values["inspection_id"]),
+                "deleted",
+                current_user,
+                "pending",
+                None,
+                None,
+                correlation_id,
+            ),
+            Mutation(
+                entity_type=ENTITY_TYPE,
+                entity_id=global_id,
+                operation_type="delete_entity",
+                base_record_revision=payload.record_revision,
+                unique_lock_keys=(f"aif-active-mlo:{values.get('source_mlo_id')}",),
+            ),
+        ],
+    )
+    return {
+        "ok": True,
+        "global_id": global_id,
+        "inspection_id": str(values["inspection_id"]),
+        "events_retained": True,
+    }
 
 
 def _reviewer(db: Session, submitter: User, employee_id: str) -> User:

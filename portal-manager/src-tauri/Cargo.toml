@@ -2,6 +2,7 @@
 name = "portal-workstation-manager"
 version = "0.1.0"
 description = "Portal workstation source-data manager"
+authors = ["Charlotte-Mecklenburg Storm Water Services"]
 edition = "2021"
 rust-version = "1.77.2"
 

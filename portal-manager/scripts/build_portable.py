@@ -95,6 +95,7 @@ def main() -> int:
     copy_required(PROJECT_ROOT / "coordinator" / "repository_runner.py", coordinator_directory / "repository_runner.py")
     copy_required(PROJECT_ROOT / "coordinator" / "schema_runner.py", coordinator_directory / "schema_runner.py")
     copy_required(PROJECT_ROOT / "coordinator" / "maintenance_runner.py", coordinator_directory / "maintenance_runner.py")
+    copy_required(PROJECT_ROOT / "coordinator" / "source_backup_runner.py", coordinator_directory / "source_backup_runner.py")
     for filename in (
         "run-business-retention.bat",
         "register-weekly-business-retention-task.bat",
@@ -145,6 +146,14 @@ def main() -> int:
     ):
         copy_required(PROJECT_ROOT / "sync" / filename, sync_directory / filename)
 
+    source_backup_directory = output_directory / "source-backup"
+    shutil.copytree(
+        PROJECT_ROOT / "source-backup",
+        source_backup_directory,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.log"),
+    )
+
     for obsolete_name in (
         "start_sync.bat",
         "stop_sync.bat",
@@ -160,7 +169,7 @@ def main() -> int:
         "==========================\n\n"
         "Start the application by double-clicking:\n\n"
         "  PortalManager.exe\n\n"
-        "The config, coordinator, and sync directories must remain beside the executable.\n"
+        "The config, coordinator, source-backup, and sync directories must remain beside the executable.\n"
         "config\\system.db is the authoritative Manager administration database.\n",
         encoding="utf-8",
     )

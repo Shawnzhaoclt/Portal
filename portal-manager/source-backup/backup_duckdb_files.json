@@ -1,0 +1,29 @@
+{
+  "duckdb_source_dir": "G:\\Strategic Planning\\Planning\\stm_risk_data\\databases_local",
+  "backup_dir": "G:\\Strategic Planning\\Planning\\stm_risk_data_bak",
+  "archive_prefix": "duckdb_backup",
+  "retention_days": 180,
+  "exclude_duckdb_files": [
+    "virt_sdw_01_sdw_spatial_warehouse.duckdb"
+  ],
+  "email": {
+    "mechanism": "outlook",
+    "to_addresses": [
+      "shawn.zhao@charlottenc.gov"
+    ]
+  },
+  "directory_sources": [
+    {
+      "source": "G:\\Strategic Planning\\Planning\\stm_risk_data\\deliverables",
+      "archive_path": "deliverables"
+    },
+    {
+      "source": "G:\\Strategic Planning\\Planning\\stm_risk_data\\qaqc",
+      "archive_path": "qaqc"
+    },
+    {
+      "source": "G:\\Strategic Planning\\Planning\\stm_risk_data\\resources\\lookup",
+      "archive_path": "resources/lookup"
+    }
+  ]
+}

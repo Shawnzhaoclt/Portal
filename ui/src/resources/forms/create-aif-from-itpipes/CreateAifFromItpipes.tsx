@@ -18,10 +18,12 @@ import {
   Save,
   Search,
   Send,
+  Trash2,
   Undo2,
   X,
 } from 'lucide-react'
 import { formatDateOnly, formatDateTime } from '../../../lib/dateTime'
+import { appConfirm } from '../../../components/messageDialogService'
 import { fetchPortalDictionaryItems } from '../../../dashboards/amteam/api'
 import { openExternalUrl } from '../../../desktop/runtime'
 import {
@@ -31,6 +33,7 @@ import {
 } from '../../../dashboards/amteam/inspectionDates'
 import {
   createAif,
+  deleteAif,
   exportAifRegister,
   fetchAif,
   fetchAifAssetCandidates,
@@ -83,6 +86,15 @@ function itpipesInspectionUrl(mliId: string) {
 }
 
 function formatConditionRisk(value: number | null) {
+  if (value === null || !Number.isFinite(Number(value))) return '-'
+  return Number(value).toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    useGrouping: false,
+  })
+}
+
+function formatStationDistance(value: number | null) {
   if (value === null || !Number.isFinite(Number(value))) return '-'
   return Number(value).toLocaleString(undefined, {
     minimumFractionDigits: 1,
@@ -201,6 +213,7 @@ function AifRegister({
   const [data, setData] = useState<Awaited<ReturnType<typeof fetchAifs>> | null>(null)
   const [loading, setLoading] = useState(true)
   const [exporting, setExporting] = useState(false)
+  const [deletingGlobalId, setDeletingGlobalId] = useState<string | null>(null)
   const [message, setMessage] = useState<Message | null>(null)
   const [advanced, setAdvanced] = useState(false)
   const [severityOptions, setSeverityOptions] = useState<string[]>([])
@@ -243,6 +256,24 @@ function AifRegister({
       setMessage({ kind: 'error', text: errorText(error) })
     } finally {
       setExporting(false)
+    }
+  }
+
+  async function deleteDraft(row: AifRecord) {
+    const confirmed = await appConfirm(
+      `Delete draft ${row.inspection_id}? This action cannot be undone. Its audit events will be retained.`,
+      { title: 'Delete AIF draft', kind: 'danger', confirmLabel: 'Delete draft' },
+    )
+    if (!confirmed) return
+    setDeletingGlobalId(row.global_id)
+    try {
+      await deleteAif(row)
+      setMessage({ kind: 'success', text: `${row.inspection_id} was deleted.` })
+      await load()
+    } catch (error) {
+      setMessage({ kind: 'error', text: errorText(error) })
+    } finally {
+      setDeletingGlobalId(null)
     }
   }
 
@@ -334,6 +365,7 @@ function AifRegister({
                   {row.actions.can_review ? <button type="button" onClick={() => onOpen({ mode: 'review', record: row })}><CheckCircle2 size={15} /> Review</button> : null}
                   {row.actions.can_reopen ? <button type="button" onClick={() => onOpen({ mode: 'review', record: row, initialDialog: 'reopen' })}><RotateCcw size={15} /> Reopen</button> : null}
                   <button type="button" onClick={() => onOpen({ mode: 'view', record: row, initialDialog: 'events' })}><History size={15} /> Events</button>
+                  {row.actions.can_delete ? <button className="danger" type="button" disabled={deletingGlobalId === row.global_id} onClick={() => void deleteDraft(row)}>{deletingGlobalId === row.global_id ? <Loader2 className="spin" size={15} /> : <Trash2 size={15} />} Delete</button> : null}
                 </div></td>
               </tr>
             ))}</tbody>
@@ -506,7 +538,10 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
 
   async function loadAsset(asset = assetInput, resetSelection = true) {
     if (!asset.trim()) { setMessage({ kind: 'error', text: 'Enter an Asset ID.' }); return }
-    if (resetSelection && dirty && !window.confirm('Searching another asset will replace the current unsaved source values. Continue?')) return
+    if (resetSelection && dirty && !(await appConfirm(
+      'Searching another asset will replace the current unsaved source values. Continue?',
+      { title: 'Replace unsaved source values', kind: 'warning', confirmLabel: 'Continue search' },
+    ))) return
     setCandidateOpen(false)
     setAssetCandidates([])
     setBusy(true)
@@ -558,13 +593,16 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
     setDirty(false)
   }
 
-  function confirmInspectionChange() {
+  async function confirmInspectionChange() {
     if (!selectedMlo && !dirty) return true
     const selection = selectedMlo ? `selected MLO ${selectedMlo}` : 'current edited values'
-    return window.confirm(`Changing the inspection will clear ${selection} and its source-populated form values. Continue?`)
+    return appConfirm(
+      `Changing the inspection will clear ${selection} and its source-populated form values. Continue?`,
+      { title: 'Change inspection', kind: 'warning', confirmLabel: 'Change inspection' },
+    )
   }
 
-  function confirmObservationSelection(observation: SourceObservation) {
+  async function confirmObservationSelection(observation: SourceObservation) {
     const warnings: string[] = []
     const conditionRisk = observation.condition_risk
     if (conditionRisk !== null && Number.isFinite(Number(conditionRisk)) && Number(conditionRisk) < LOW_CONDITION_RISK_THRESHOLD) {
@@ -576,11 +614,14 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
       const current = selectedMlo ? `MLO ${selectedMlo}` : 'the current edited values'
       warnings.push(`Selecting MLO ${observation.mlo_id} will replace source-populated fields from ${current}.`)
     }
-    return warnings.length === 0 || window.confirm(`${warnings.join('\n\n')}\n\nContinue with this observation?`)
+    return warnings.length === 0 || appConfirm(
+      `${warnings.join('\n\n')}\n\nContinue with this observation?`,
+      { title: 'Confirm observation selection', kind: 'warning', confirmLabel: 'Select observation' },
+    )
   }
 
-  function changeDateOption(option: string) {
-    if (!assetResult || option === dateOption || !confirmInspectionChange()) return
+  async function changeDateOption(option: string) {
+    if (!assetResult || option === dateOption || !(await confirmInspectionChange())) return
     const keys = new Set(inspectionDateKeysFromOption(option))
     const next = assetResult.inspections.find((item) => keys.has(inspectionDateKey(item.inspection_date)))
     if (!next) return
@@ -590,8 +631,8 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
     void loadObservations(assetResult.asset_id, next.mli_id)
   }
 
-  function changeInspection(mliId: string) {
-    if (!assetResult || mliId === selectedMli || !confirmInspectionChange()) return
+  async function changeInspection(mliId: string) {
+    if (!assetResult || mliId === selectedMli || !(await confirmInspectionChange())) return
     clearObservationSelection()
     setSelectedMli(mliId)
     void loadObservations(assetResult.asset_id, mliId)
@@ -599,7 +640,7 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
 
   async function selectObservation(observation: SourceObservation) {
     if (selectedMlo === observation.mlo_id) return
-    if (!confirmObservationSelection(observation)) return
+    if (!(await confirmObservationSelection(observation))) return
     const observationMliId = String(observation.mli_id ?? '').trim()
     const observationMloId = String(observation.mlo_id ?? '').trim()
     if (!observationMliId || !observationMloId) {
@@ -701,15 +742,21 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
   }
 
   async function copyPrevious(globalId: string) {
-    if (dirty && !window.confirm('Copying a previous AIF will replace the current editable values. Continue?')) return
+    if (dirty && !(await appConfirm(
+      'Copying a previous AIF will replace the current editable values. Continue?',
+      { title: 'Copy previous AIF', kind: 'warning', confirmLabel: 'Copy values' },
+    ))) return
     try {
       const previous = (await fetchAif(globalId)).aif
       setFields(editableFromRecord(previous)); setDirty(true); setMessage({ kind: 'info', text: `Values copied from ${previous.inspection_id}. Source IDs and workflow identities were not copied.` })
     } catch (error) { setMessage({ kind: 'error', text: errorText(error) }) }
   }
 
-  function back() {
-    if (!dirty || window.confirm('Discard unsaved changes and return to the AIF Register?')) onBack(record)
+  async function back() {
+    if (!dirty || await appConfirm(
+      'Discard unsaved changes and return to the AIF Register?',
+      { title: 'Discard unsaved changes', kind: 'warning', confirmLabel: 'Discard changes' },
+    )) onBack(record)
   }
 
   const sourceInspection = assetResult?.inspections.find((inspection) => inspection.mli_id === selectedMli)
@@ -727,7 +774,7 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
   return (
     <main className="aif-resource aif-workspace">
       <header className="aif-command-bar">
-        <div className="aif-command-left"><button type="button" onClick={back}><ArrowLeft size={18} /> Back</button><strong>Create AIF from ITPipes</strong>{record ? <span>{record.inspection_id}</span> : <span>New AIF</span>}<span className={`aif-status aif-status-${currentStatus}`}>{statusLabel(currentStatus)}</span></div>
+        <div className="aif-command-left"><button type="button" onClick={() => void back()}><ArrowLeft size={18} /> Back</button><strong>Create AIF from ITPipes</strong>{record ? <span>{record.inspection_id}</span> : <span>New AIF</span>}<span className={`aif-status aif-status-${currentStatus}`}>{statusLabel(currentStatus)}</span></div>
         <div className="aif-command-actions">
           {editable ? <button className={canSaveDraft ? 'primary' : 'secondary'} type="button" disabled={busy || !canSaveDraft} title={!record && !selectedMlo ? 'Select one observation before saving the draft.' : undefined} onClick={() => void save()}><Save size={17} /> Save draft</button> : null}
           {editable && record?.actions.can_submit ? <button className={!dirty ? 'primary' : 'secondary'} type="button" disabled={busy || dirty} onClick={() => void openSubmit()}><Send size={17} /> Submit to review</button> : null}
@@ -793,8 +840,8 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
           </section>
           {assetResult ? <>
             <section className="aif-history"><button className="aif-section-toggle" type="button" onClick={() => setHistoryOpen(!historyOpen)}><span><History size={17} /> Previous inspections ({assetResult.history.length}){assetResult.history[0]?.inspection_date ? ` · Latest ${recordDate(assetResult.history[0].inspection_date, true)}` : ''}</span><ChevronDown size={17} /></button>{historyOpen ? <div className="aif-history-list">{assetResult.history.length ? assetResult.history.map((item, index) => <article key={`${item.source}-${item.inspection_id}-${index}`}><div><strong>{item.inspection_id}</strong><span>{item.source} · {recordDate(item.inspection_date, true)}</span><span>{item.status || '-'} · {item.actor || '-'}</span></div>{item.source === 'Portal AIF' && item.global_id && editable ? <button type="button" onClick={() => void copyPrevious(item.global_id!)}>Copy values</button> : null}</article>) : <p>No previous inspections found.</p>}</div> : null}</section>
-            <section><Field label="Inspection date period"><select value={dateOption} onChange={(event) => changeDateOption(event.target.value)} disabled={Boolean(record)}>{dates.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></Field>
-              <Field label="ITPipes inspection"><select value={selectedMli} onChange={(event) => changeInspection(event.target.value)} disabled={Boolean(record)}>{filteredInspections.map((item) => <option key={item.mli_id} value={item.mli_id}>{recordDate(item.inspection_date, true)} · MLI {item.mli_id} · {inspectionDirectionLabel(item.inspection_direction, directionOptions)} · {item.observation_count} observations</option>)}</select></Field>
+            <section><Field label="Inspection date period"><select value={dateOption} onChange={(event) => void changeDateOption(event.target.value)} disabled={Boolean(record)}>{dates.map((item) => <option key={item.key} value={item.key}>{item.label}</option>)}</select></Field>
+              <Field label="ITPipes inspection"><select value={selectedMli} onChange={(event) => void changeInspection(event.target.value)} disabled={Boolean(record)}>{filteredInspections.map((item) => <option key={item.mli_id} value={item.mli_id}>{recordDate(item.inspection_date, true)} · MLI {item.mli_id} · {inspectionDirectionLabel(item.inspection_direction, directionOptions)} · {item.observation_count} observations</option>)}</select></Field>
             </section>
             <section className="aif-observations">
               <div className="aif-observation-heading">
@@ -812,7 +859,7 @@ function AifWorkspace({ workspace, onBack }: { workspace: Workspace; onBack: (re
                       <td><a className="aif-observation-link" href={inspectionUrl} target="_blank" rel="noreferrer" onClick={(event) => { event.preventDefault(); event.stopPropagation(); void openExternalUrl(inspectionUrl).catch((error) => setMessage({ kind: 'error', text: `Could not open ITPipes inspection ${item.mli_id}: ${errorText(error)}` })) }}>{item.mli_id}</a></td>
                       <td><strong>{item.mlo_id}</strong></td>
                       <td className="numeric">{formatConditionRisk(item.condition_risk)}</td>
-                      <td className="numeric">{item.stationing ?? '-'}</td>
+                      <td className="numeric">{formatStationDistance(item.stationing)}</td>
                       <td title={`${item.us_asset_id || '-'} → ${item.ds_asset_id || '-'}`}>{item.us_asset_id || '-'} → {item.ds_asset_id || '-'}</td>
                     </tr>
                   })}</tbody>

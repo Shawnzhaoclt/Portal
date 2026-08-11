@@ -1,0 +1,46 @@
+{
+  "output_root": "G:\\Strategic Planning\\Planning\\stm_risk_data\\databases_local",
+  "odbc_driver": "ODBC Driver 17 for SQL Server",
+  "create_filegdb": false,
+  "databases": {
+    "stm_inventory": {
+      "server": "virt-sde-01",
+      "database": "stm",
+      "duckdb_name": "virt_sde_01_stm.duckdb"
+    },
+    "sdw_stm": {
+      "server": "virt-sdw-01",
+      "database": "stm",
+      "duckdb_name": "virt_sdw_01_stm.duckdb"
+    },
+    "sdw": {
+      "server": "virt-sdw-01",
+      "database": "sdw",
+      "duckdb_name": "virt_sdw_01_sdw.duckdb"
+    },
+    "sdw_tableau": {
+      "server": "virt-sdw-01",
+      "database": "SDW_Tableau",
+      "duckdb_name": "virt_sdw_01_sdw_tableau.duckdb"
+    },
+    "cityworks_prod": {
+      "server": "myrs-cwdbprd-1",
+      "database": "swpt_cityworks_db",
+      "duckdb_name": "myrs_cwdbprd_1_swpt_cityworks_db.duckdb"
+    },
+    "new_cityworks_sqlserver": {
+      "server": "myrs-cwdbprd-1",
+      "database": "stw_cityworks_sd",
+      "duckdb_name": "myrs_cwdbprd_1_stw_cityworks_sd.duckdb"
+    },
+    "itpipes_prod": {
+      "server": "172.24.0.14",
+      "database": "CLTStormWater",
+      "duckdb_name": "itpipes_stormwater_prod.duckdb",
+      "auth_method": "sql_server",
+      "username": "CharlotteWater_Read",
+      "password": "",
+      "password_env": "PORTAL_ITPIPES_SQL_PASSWORD"
+    }
+  }
+}

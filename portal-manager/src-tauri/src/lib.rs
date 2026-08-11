@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use std::os::windows::process::CommandExt;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+const PORTAL_TASK_PREFIX: &str = "StormWater Portal";
 const SOURCE_SYNC_TASK_NAME: &str = "StormWater Portal Source Data Sync";
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +35,24 @@ struct ManagerSettings {
     python_executable: Option<String>,
     #[serde(default)]
     portal_python_worker: Option<String>,
+    #[serde(default)]
+    source_backup_directory: Option<String>,
+    #[serde(default)]
+    source_backup_runner: Option<String>,
+    #[serde(default)]
+    source_backup_python_executable: Option<String>,
+    #[serde(default)]
+    source_backup_daily_time: Option<String>,
+    #[serde(default)]
+    source_backup_weekday: Option<String>,
+    #[serde(default)]
+    source_backup_heartbeat_day: Option<String>,
+    #[serde(default)]
+    source_backup_heartbeat_time: Option<String>,
+    #[serde(default)]
+    source_backup_workflow_task_name: Option<String>,
+    #[serde(default)]
+    source_backup_heartbeat_task_name: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -86,6 +105,30 @@ struct RepositoryPaths {
     portal_settings: PathBuf,
     release_portal_settings: Option<PathBuf>,
     python_executable: String,
+}
+
+struct SourceBackupPaths {
+    manager_settings: PathBuf,
+    scripts_directory: PathBuf,
+    runner: PathBuf,
+    python_executable: String,
+    daily_minute: u16,
+    backup_weekday: String,
+    heartbeat_day: String,
+    heartbeat_minute: u16,
+    workflow_task_name: String,
+    heartbeat_task_name: String,
+}
+
+fn normalize_managed_task_name(configured: Option<String>, default_name: &str) -> String {
+    let candidate = configured
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| default_name.to_string());
+    if candidate.starts_with(PORTAL_TASK_PREFIX) {
+        candidate
+    } else {
+        format!("{PORTAL_TASK_PREFIX} {candidate}")
+    }
 }
 
 struct PortalReleasePaths {
@@ -216,6 +259,23 @@ fn parse_clock(value: Option<&str>, fallback: u16) -> u16 {
     }
 }
 
+fn required_clock(value: &str, label: &str) -> Result<String, String> {
+    let minutes = parse_clock(Some(value), u16::MAX);
+    if minutes == u16::MAX {
+        return Err(format!("{label} must use HH:MM format with a valid 24-hour time."));
+    }
+    Ok(format!("{:02}:{:02}", minutes / 60, minutes % 60))
+}
+
+fn required_weekday(value: &str, label: &str) -> Result<String, String> {
+    let weekday = value.trim().to_uppercase();
+    if matches!(weekday.as_str(), "SUN" | "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT") {
+        Ok(weekday)
+    } else {
+        Err(format!("{label} must be a valid weekday."))
+    }
+}
+
 fn configuration_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("PORTAL_WORKSTATION_MANAGER_CONFIG") {
         let path = PathBuf::from(path);
@@ -305,6 +365,61 @@ fn repository_paths() -> Result<RepositoryPaths, String> {
                 .python_executable
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "python.exe".to_string()),
+        ),
+    })
+}
+
+fn source_backup_paths() -> Result<SourceBackupPaths, String> {
+    let settings_path = configuration_path()?;
+    let settings: ManagerSettings = serde_json::from_value(read_json(&settings_path)?)
+        .map_err(|error| format!("Invalid workstation manager settings: {error}"))?;
+    let config_directory = settings_path
+        .parent()
+        .ok_or_else(|| "The workstation manager settings path has no parent directory.".to_string())?;
+    let scripts_directory = settings
+        .source_backup_directory
+        .as_deref()
+        .map(|value| resolve_configured_path(value, config_directory))
+        .unwrap_or_else(|| config_directory.join(r"..\source-backup"));
+    let runner = settings
+        .source_backup_runner
+        .as_deref()
+        .map(|value| resolve_configured_path(value, config_directory))
+        .unwrap_or_else(|| config_directory.join(r"..\coordinator\source_backup_runner.py"));
+    let python_executable = expand_environment_tokens(
+        &settings
+            .source_backup_python_executable
+            .or(settings.python_executable)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "python.exe".to_string()),
+    );
+    Ok(SourceBackupPaths {
+        manager_settings: settings_path,
+        scripts_directory,
+        runner,
+        python_executable,
+        daily_minute: parse_clock(settings.source_backup_daily_time.as_deref(), 1),
+        backup_weekday: settings
+            .source_backup_weekday
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "SAT".to_string())
+            .to_uppercase(),
+        heartbeat_day: settings
+            .source_backup_heartbeat_day
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "SUN".to_string())
+            .to_uppercase(),
+        heartbeat_minute: parse_clock(
+            settings.source_backup_heartbeat_time.as_deref(),
+            20 * 60,
+        ),
+        workflow_task_name: normalize_managed_task_name(
+            settings.source_backup_workflow_task_name,
+            "Source Backup Workflow",
+        ),
+        heartbeat_task_name: normalize_managed_task_name(
+            settings.source_backup_heartbeat_task_name,
+            "Machine Heartbeat",
         ),
     })
 }
@@ -2087,6 +2202,340 @@ fn stop_scheduler() -> Result<(), String> {
     .map(|_| ())
 }
 
+fn source_backup_runner_arguments(paths: &SourceBackupPaths) -> Vec<String> {
+    vec![
+        paths.runner.display().to_string(),
+        "--manager-settings".to_string(),
+        paths.manager_settings.display().to_string(),
+    ]
+}
+
+fn source_backup_runner_result(paths: &SourceBackupPaths) -> Result<Value, String> {
+    if !paths.runner.is_file() {
+        return Err(format!(
+            "The source-backup coordinator was not found: {}",
+            paths.runner.display()
+        ));
+    }
+    if !paths.scripts_directory.is_dir() {
+        return Err(format!(
+            "The Portal Manager source-backup directory was not found: {}",
+            paths.scripts_directory.display()
+        ));
+    }
+    let mut arguments = source_backup_runner_arguments(paths);
+    arguments.push("--status".to_string());
+    let output = run_hidden(&paths.python_executable, &arguments)?;
+    let payload = output
+        .lines()
+        .rev()
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())
+        .ok_or_else(|| "The source-backup coordinator returned an invalid response.".to_string())?;
+    if payload.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("The source-backup coordinator status check failed.")
+            .to_string());
+    }
+    payload
+        .get("result")
+        .cloned()
+        .ok_or_else(|| "The source-backup coordinator returned no status.".to_string())
+}
+
+fn scheduled_task_field(output: &str, label: &str) -> String {
+    output
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case(label)
+                .then(|| value.trim().to_string())
+        })
+        .unwrap_or_default()
+}
+
+fn source_backup_task_status(task_name: &str, runner: &Path) -> Value {
+    let output = run_hidden(
+        "schtasks.exe",
+        &[
+            "/Query".to_string(),
+            "/TN".to_string(),
+            task_name.to_string(),
+            "/FO".to_string(),
+            "LIST".to_string(),
+            "/V".to_string(),
+        ],
+    );
+    let Ok(output) = output else {
+        return serde_json::json!({
+            "task_name": task_name,
+            "registered": false,
+            "managed": false,
+            "state": "Not registered",
+            "next_run": "",
+            "last_run": "",
+            "last_result": "",
+        });
+    };
+    let xml = run_hidden(
+        "schtasks.exe",
+        &[
+            "/Query".to_string(),
+            "/TN".to_string(),
+            task_name.to_string(),
+            "/FO".to_string(),
+            "XML".to_string(),
+        ],
+    )
+    .unwrap_or_default()
+    .to_ascii_lowercase();
+    let runner_name = runner
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("source_backup_runner.py")
+        .to_ascii_lowercase();
+    serde_json::json!({
+        "task_name": task_name,
+        "registered": true,
+        "managed": xml.contains(&runner_name),
+        "state": scheduled_task_field(&output, "Status"),
+        "next_run": scheduled_task_field(&output, "Next Run Time"),
+        "last_run": scheduled_task_field(&output, "Last Run Time"),
+        "last_result": scheduled_task_field(&output, "Last Result"),
+    })
+}
+
+#[tauri::command]
+fn source_backup_status() -> Result<Value, String> {
+    let paths = source_backup_paths()?;
+    let mut status = source_backup_runner_result(&paths)?;
+    let object = status
+        .as_object_mut()
+        .ok_or_else(|| "The source-backup status was not a JSON object.".to_string())?;
+    object.insert(
+        "workflow_schedule".to_string(),
+        source_backup_task_status(&paths.workflow_task_name, &paths.runner),
+    );
+    object.insert(
+        "heartbeat_schedule".to_string(),
+        source_backup_task_status(&paths.heartbeat_task_name, &paths.runner),
+    );
+    object.insert(
+        "daily_schedule".to_string(),
+        Value::String(format!("Daily {} local time", format_clock(paths.daily_minute))),
+    );
+    object.insert(
+        "weekly_backup_schedule".to_string(),
+        Value::String(format!(
+            "{} during the daily workflow",
+            paths.backup_weekday
+        )),
+    );
+    object.insert(
+        "heartbeat_schedule_label".to_string(),
+        Value::String(format!(
+            "{} {} local time",
+            paths.heartbeat_day,
+            format_clock(paths.heartbeat_minute)
+        )),
+    );
+    object.insert(
+        "workflow_time".to_string(),
+        Value::String(format_clock(paths.daily_minute)),
+    );
+    object.insert(
+        "backup_weekday".to_string(),
+        Value::String(paths.backup_weekday.clone()),
+    );
+    object.insert(
+        "heartbeat_day".to_string(),
+        Value::String(paths.heartbeat_day.clone()),
+    );
+    object.insert(
+        "heartbeat_time".to_string(),
+        Value::String(format_clock(paths.heartbeat_minute)),
+    );
+    Ok(status)
+}
+
+#[tauri::command]
+fn run_source_backup(action: String) -> Result<Value, String> {
+    if !matches!(
+        action.as_str(),
+        "check" | "workflow" | "refresh" | "backup" | "heartbeat"
+    ) {
+        return Err(format!("Unsupported source-backup action: {action}"));
+    }
+    let paths = source_backup_paths()?;
+    let current = source_backup_runner_result(&paths)?;
+    if current
+        .get("state")
+        .and_then(|value| value.get("status"))
+        .and_then(Value::as_str)
+        == Some("running")
+    {
+        return Err("A source-backup task is already running.".to_string());
+    }
+    let mut arguments = source_backup_runner_arguments(&paths);
+    arguments.extend(["--action".to_string(), action.clone()]);
+    let mut process = Command::new(&paths.python_executable);
+    process
+        .args(&arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(target_os = "windows")]
+    process.creation_flags(CREATE_NO_WINDOW);
+    let child = process
+        .spawn()
+        .map_err(|error| format!("Could not start the source-backup task: {error}"))?;
+    let process_id = child.id();
+    drop(child);
+    Ok(serde_json::json!({
+        "status": "started",
+        "action": action,
+        "process_id": process_id,
+    }))
+}
+
+fn quote_task_argument(value: &str) -> String {
+    if value.contains(' ') || value.contains('\\') {
+        format!("\"{value}\"")
+    } else {
+        value.to_string()
+    }
+}
+
+fn register_source_backup_task(
+    paths: &SourceBackupPaths,
+    schedule: &str,
+) -> Result<(), String> {
+    let (task_name, action, schedule_kind, day, minute) = match schedule {
+        "workflow" => (
+            &paths.workflow_task_name,
+            "workflow",
+            "DAILY",
+            None,
+            paths.daily_minute,
+        ),
+        "heartbeat" => (
+            &paths.heartbeat_task_name,
+            "heartbeat",
+            "WEEKLY",
+            Some(paths.heartbeat_day.as_str()),
+            paths.heartbeat_minute,
+        ),
+        _ => return Err(format!("Unsupported source-backup schedule: {schedule}")),
+    };
+    let executable = windowless_python_executable(&paths.python_executable)
+        .unwrap_or_else(|| paths.python_executable.clone());
+    // The runner resolves config/workstation-manager.settings.json relative to
+    // itself. Omitting the settings path keeps Task Scheduler's /TR command
+    // safely below its Windows length limit.
+    let runner_arguments = vec![
+        paths.runner.display().to_string(),
+        "--action".to_string(),
+        action.to_string(),
+    ];
+    let task_command = format!(
+        "\"{}\" {}",
+        executable,
+        runner_arguments
+            .iter()
+            .map(|argument| quote_task_argument(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut arguments = vec![
+        "/Create".to_string(),
+        "/TN".to_string(),
+        task_name.to_string(),
+        "/SC".to_string(),
+        schedule_kind.to_string(),
+        "/ST".to_string(),
+        format_clock(minute),
+        "/TR".to_string(),
+        task_command,
+        "/F".to_string(),
+    ];
+    if let Some(day) = day {
+        arguments.extend(["/D".to_string(), day.to_string()]);
+    }
+    run_hidden("schtasks.exe", &arguments).map(|_| ())
+}
+
+#[tauri::command]
+fn set_source_backup_schedule(schedule: String, enabled: bool) -> Result<Value, String> {
+    let paths = source_backup_paths()?;
+    let task_name = match schedule.as_str() {
+        "workflow" => &paths.workflow_task_name,
+        "heartbeat" => &paths.heartbeat_task_name,
+        _ => return Err(format!("Unsupported source-backup schedule: {schedule}")),
+    };
+    if enabled {
+        register_source_backup_task(&paths, &schedule)?;
+    } else if source_backup_task_status(task_name, &paths.runner)
+        .get("registered")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        run_hidden(
+            "schtasks.exe",
+            &[
+                "/Delete".to_string(),
+                "/TN".to_string(),
+                task_name.to_string(),
+                "/F".to_string(),
+            ],
+        )?;
+    }
+    source_backup_status()
+}
+
+#[tauri::command]
+fn save_source_backup_schedule(
+    workflow_time: String,
+    backup_weekday: String,
+    heartbeat_day: String,
+    heartbeat_time: String,
+) -> Result<Value, String> {
+    let workflow_time = required_clock(&workflow_time, "Daily workflow time")?;
+    let backup_weekday = required_weekday(&backup_weekday, "Archive weekday")?;
+    let heartbeat_day = required_weekday(&heartbeat_day, "Heartbeat weekday")?;
+    let heartbeat_time = required_clock(&heartbeat_time, "Heartbeat time")?;
+    let paths = source_backup_paths()?;
+    let workflow_registered = source_backup_task_status(&paths.workflow_task_name, &paths.runner)
+        .get("registered")
+        .and_then(Value::as_bool)
+        == Some(true);
+    let heartbeat_registered = source_backup_task_status(&paths.heartbeat_task_name, &paths.runner)
+        .get("registered")
+        .and_then(Value::as_bool)
+        == Some(true);
+
+    let mut settings = read_json(&paths.manager_settings)?;
+    let object = settings
+        .as_object_mut()
+        .ok_or_else(|| "The workstation manager settings must be a JSON object.".to_string())?;
+    object.insert("sourceBackupDailyTime".to_string(), Value::String(workflow_time));
+    object.insert("sourceBackupWeekday".to_string(), Value::String(backup_weekday));
+    object.insert("sourceBackupHeartbeatDay".to_string(), Value::String(heartbeat_day));
+    object.insert("sourceBackupHeartbeatTime".to_string(), Value::String(heartbeat_time));
+    write_json_replace(&paths.manager_settings, &settings)
+        .map_err(|error| format!("Could not save source-backup schedule settings: {error}"))?;
+
+    let updated_paths = source_backup_paths()?;
+    if workflow_registered {
+        register_source_backup_task(&updated_paths, "workflow")?;
+    }
+    if heartbeat_registered {
+        register_source_backup_task(&updated_paths, "heartbeat")?;
+    }
+    source_backup_status()
+}
+
 #[tauri::command]
 fn repository_status() -> Result<Value, String> {
     repository_task("repository.status", None, None)
@@ -2465,6 +2914,10 @@ pub fn run() {
             stop_scheduler,
             enable_source_scheduler_schedule,
             disable_source_scheduler_schedule,
+            source_backup_status,
+            run_source_backup,
+            set_source_backup_schedule,
+            save_source_backup_schedule,
             repository_status,
             validate_repository,
             inspect_repository,

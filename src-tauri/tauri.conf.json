@@ -31,6 +31,7 @@
   "bundle": {
     "active": false,
     "targets": [],
+    "publisher": "Charlotte-Mecklenburg Storm Water Services",
     "icon": [
       "icons/16x16.png",
       "icons/20x20.png",

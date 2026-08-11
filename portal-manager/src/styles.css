@@ -5,6 +5,21 @@
 }
 
 * { box-sizing: border-box; }
+
+.app-message-dialog-backdrop { position: fixed; inset: 0; z-index: 10000; display: grid; place-items: center; padding: 24px; background: rgb(3 24 39 / 52%); backdrop-filter: blur(2px); }
+.app-message-dialog { width: min(560px, 100%); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid #9eb9d0; background: #fff; color: #0c2941; box-shadow: 0 18px 56px rgb(0 27 49 / 32%); }
+.app-message-dialog header { padding: 18px 22px 14px; border-bottom: 1px solid #c9d9e6; background: #edf5fb; }
+.app-message-dialog--warning header { border-top: 4px solid #c47a00; }
+.app-message-dialog--danger header { border-top: 4px solid #b32720; }
+.app-message-dialog--default header { border-top: 4px solid #17639c; }
+.app-message-dialog h2 { margin: 0; color: #0b4f84; font-size: 20px; line-height: 1.25; }
+.app-message-dialog__message { padding: 20px 22px; white-space: pre-wrap; font-size: 16px; line-height: 1.55; }
+.app-message-dialog input { display: block; width: calc(100% - 44px); min-height: 44px; margin: 0 22px 20px; border: 1px solid #9eb9d0; padding: 8px 11px; background: #fff; color: #0c2941; font: inherit; }
+.app-message-dialog footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 22px 18px; border-top: 1px solid #d5e1ea; background: #f8fbfd; }
+.app-message-dialog footer button { min-width: 96px; min-height: 42px; border: 1px solid #9eb9d0; padding: 0 18px; background: #fff; color: #0b4f84; font: inherit; font-weight: 700; cursor: pointer; }
+.app-message-dialog footer .app-message-dialog__confirm { border-color: #17639c; background: #17639c; color: #fff; }
+.app-message-dialog footer .app-message-dialog__confirm--danger { border-color: #b32720; background: #b32720; }
+.app-message-dialog footer button:focus-visible, .app-message-dialog input:focus-visible { outline: 3px solid #f0a400; outline-offset: 2px; }
 body { margin: 0; min-width: 1024px; }
 button, input { font: inherit; }
 button { cursor: pointer; }
@@ -103,9 +118,9 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .repository-location-panel p:not(.eyebrow) { color: #5d7186; font-size: 12px; line-height: 1.4; }
 .repository-location-controls { display: grid; gap: 9px; }
 .repository-location-controls label { display: grid; gap: 5px; color: #60778f; font-size: 10px; font-weight: 700; text-transform: uppercase; }
-.repository-location-controls label > div { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; }
+.repository-location-controls label > div { display: grid; grid-template-columns: minmax(220px, 1fr) auto auto auto; align-items: center; gap: 8px; }
 .repository-location-controls input { width: 100%; min-width: 0; height: 36px; border: 1px solid #a8bfd4; padding: 0 9px; background: #fff; color: #1f2f43; font-size: 12px; text-transform: none; }
-.repository-location-controls .quiet-button { min-height: 36px; white-space: nowrap; }
+.repository-location-controls .quiet-button { min-height: 36px; height: 36px; white-space: nowrap; }
 .repository-location-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .repository-health-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; border: 1px solid #cbd9e5; background: #fff; }
 .repository-health-grid > div { display: grid; min-width: 0; gap: 4px; padding: 10px 12px; border-right: 1px solid #dce5ed; }
@@ -244,7 +259,9 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .retention-readout strong { overflow: hidden; color: #1f2f43; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .retention-schedule-action { display: flex; align-items: flex-end; }
 .retention-schedule-action button { min-width: 96px; min-height: 34px; white-space: nowrap; }
-.nightly-note { margin: 0; color: #5d7186; font-size: 12px; line-height: 1.35; }
+.nightly-note { min-width: 0; margin: 0; color: #5d7186; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+.snapshot-schedules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.snapshot-schedules .retention-controls { grid-template-columns: minmax(120px, .75fr) minmax(170px, 1fr) auto minmax(0, 1.4fr); min-width: 0; margin-top: 0; overflow: hidden; }
 @media (max-width: 1280px) { .retention-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); } .nightly-note { grid-column: 1 / -1; } .retention-schedule-action { align-items: start; } }
 .maintenance-table { min-height: 180px; flex: 1; display: flex; flex-direction: column; margin-top: 16px; border: 1px solid #cbd9e5; background: #fff; }
 .maintenance-table th:last-child, .maintenance-table td:last-child { width: auto; text-align: center; }
@@ -286,6 +303,27 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .source-schedule-form .primary-button { white-space: nowrap; }
 .source-schedule-help { flex-basis: 100%; color: #687f96; font-size: 11px; text-align: right; }
 .text-button { border: 0; background: transparent; color: #16548d; font-weight: 650; text-decoration: underline; }
+.source-backup-actions .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.source-backup-schedules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.source-backup-schedules .retention-controls { grid-template-columns: 105px 118px 118px minmax(0, 1fr); min-width: 0; margin-top: 0; }
+.source-backup-schedules .retention-schedule-action { align-self: end; position: relative; top: -4px; min-width: 0; gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
+.source-backup-schedules .retention-schedule-action button { min-width: 0; height: 36px; min-height: 36px; padding-left: 8px; padding-right: 8px; }
+.source-backup-schedules .nightly-note { grid-column: 1 / -1; min-width: 0; overflow-wrap: anywhere; }
+.schedule-input { display: grid; gap: 4px; min-width: 0; color: #60778f; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.schedule-input input, .schedule-input select { width: 100%; min-width: 0; height: 36px; min-height: 36px; border: 1px solid #aac2d8; background: #fff; color: #1f2f43; font: inherit; font-size: 13px; font-weight: 650; text-transform: none; }
+.schedule-save-row { grid-column: 1 / -1; display: flex; align-items: center; justify-content: flex-end; gap: 12px; padding: 8px 12px; border: 1px solid #cbd9e5; background: #f7fbfe; color: #5d7186; font-size: 12px; }
+.source-backup-details { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.source-backup-details > div { grid-template-columns: 125px minmax(0, 1fr); }
+.source-backup-details > div:nth-child(odd) { border-right: 1px solid #dce5ed; }
+.source-backup-details > div:nth-last-child(-n + 2) { border-bottom: 0; }
+.source-backup-tables { min-height: 180px; flex: 1; display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(500px, .85fr); gap: 8px; overflow: hidden; }
+.source-backup-tables .maintenance-table { min-height: 0; margin-top: 8px; }
+.source-backup-tables .table-scroll { min-height: 0; overflow: auto; }
+.source-backup-tables td { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-archives-table th:first-child, .source-archives-table td:first-child { width: 30%; }
+.source-archives-table th:nth-child(2), .source-archives-table td:nth-child(2) { width: 52%; text-align: left; }
+.source-archives-table th:last-child, .source-archives-table td:last-child { width: 18%; text-align: right; }
+.source-archives-pagination { flex: 0 0 auto; }
 .table-toolbar > label { display: flex; align-items: center; gap: 9px; color: #5c6f83; font-size: 12px; font-weight: 700; text-transform: uppercase; }
 .toolbar-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; }
 
@@ -326,6 +364,10 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
   .activity-filters .activity-search { grid-column: span 2; }
   .activity-pagination { grid-template-columns: 1fr; justify-items: center; }
   .activity-pagination > div { justify-content: center; }
+  .source-backup-schedules, .source-backup-tables { grid-template-columns: 1fr; }
+  .snapshot-schedules { grid-template-columns: 1fr; }
+  .source-backup-schedules .retention-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .source-backup-schedules .retention-schedule-action, .source-backup-schedules .nightly-note { grid-column: 1 / -1; }
 }
 
 @media (max-width: 900px) {

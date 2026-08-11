@@ -54,7 +54,10 @@ portal-manager/
 `PortalManager.exe` is the portable interactive entry point. It is a
 Tauri executable with a React UI and Rust native host, without a local web server.
 The portable folder includes a `config` directory and the required
-`portal-manager/sync` Python/scheduler files. Existing non-GUI launchers may remain for
+`portal-manager/sync`, `portal-manager/source-backup`, and coordinator Python/scheduler
+files. Source-backup scripts are maintained in this repository and copied into the
+portable Manager package; production operation does not depend on
+`C:\Users\105692\scripts\backup_scripts`. Existing non-GUI launchers may remain for
 Task Scheduler, but operators normally use the workstation manager.
 
 ## 3. Navigation
@@ -66,19 +69,23 @@ work area:
    latest snapshot, and recent failures.
 2. **Source Data** - scheduled serving-table rebuilds, run now, input checks,
    published SQLite versions, and source logs.
-3. **Repository** - initialize or inspect the shared protocol root, membership release,
+3. **Source Backup** - clean SQL Server-to-DuckDB mirror rebuilds, weekly source-data
+   archives, retained archive inventory, Outlook notifications, machine heartbeat,
+   Task Scheduler registration, and diagnostic logs. The recent-run history is capped
+   at the 10 most recent source-backup tasks, including their managed log files.
+4. **Repository** - initialize or inspect the shared protocol root, membership release,
    active epoch, writers, locks, and repository health.
-4. **Schema** - catalog validation, release build/test/publish, database status, plan,
+5. **Schema** - catalog validation, release build/test/publish, database status, plan,
    migration, validation, and rollback.
-5. **Snapshots** - build, validate, publish, inspect, and retain full snapshots.
-6. **Backup** - create, verify, list, restore, and prune independent backups.
-7. **Conflicts** - list, export, open, and resolve coordinator conflict reports.
-8. **Logs** - filter task results by date, task, severity, and correlation ID.
-9. **Settings** - edit validated workstation settings and test configured paths.
-10. **Portal Administration** - manage the system catalog and prepare a replacement
+6. **Snapshots** - build, validate, publish, inspect, and retain full snapshots.
+7. **Backup** - create, verify, list, restore, and prune independent business-database backups.
+8. **Conflicts** - list, export, open, and resolve coordinator conflict reports.
+9. **Logs** - filter task results by date, task, severity, and correlation ID.
+10. **Settings** - edit validated workstation settings and test configured paths.
+11. **Portal Administration** - manage the system catalog and prepare a replacement
     `system.db` release for users, teams, resources, permissions, dictionaries, and
     holidays.
-11. **Database Maintenance** - design and review physical business tables, fields,
+12. **Database Maintenance** - design and review physical business tables, fields,
     indexes, migration plans, schema tests, release publication, and recovery.
 
 Pages are task-focused. A long-running command does not block navigation or freeze the
@@ -103,6 +110,12 @@ command from a settings file.
 | Source Data | `source.run` | Run one publication immediately |
 | Source Data | `source.check` | Validate selected source connectivity and tables |
 | Source Data | `source.version.open` | Open the active or selected immutable publication |
+| Source Backup | `source-backup.check` | Validate maintained scripts and non-secret configuration |
+| Source Backup | `source-backup.workflow` | Run the daily mirror rebuild and the weekly archive when due; on the configured weekly day, rebuild the separate 68-layer Spatial Data Warehouse DuckDB mirror after the archive, with ST_Hilbert ordering and DuckDB R-Tree indexes for spatial layers |
+| Source Backup | `source-backup.refresh` | Cleanly rebuild the standard SQL Server DuckDB mirrors and the separate 68-layer Spatial Data Warehouse mirror, without FileGDB generation or creating an archive |
+| Source Backup | `source-backup.backup` | Create the retained DuckDB and supporting-directory archive immediately |
+| Source Backup | `source-backup.heartbeat` | Send the configured workstation heartbeat test |
+| Source Backup | `source-backup.schedule` | Register, update, or remove only the two approved Windows scheduled tasks: `StormWater Portal Source Backup Workflow` and `StormWater Portal Machine Heartbeat` |
 | Repository | `repository.status` | Read-only health and current-pointer inspection |
 | Repository | `repository.bootstrap` | Initialize an empty root after a typed confirmation |
 | Repository | `repository.validate` | Verify pointers, hashes, membership, and layout |
@@ -200,6 +213,14 @@ tracebacks go to diagnostic logs and are not used as the primary operator messag
 
 The manager reads paths from the existing Portal and source-sync settings. It does not
 embed drive letters, server names, passwords, or database paths.
+
+`config/workstation-manager.settings.json` is authoritative for the in-project
+source-backup directory, approved Python runtime, daily workflow time, weekly archive
+day, heartbeat schedule, and fixed Task Scheduler names. The two source-backup JSON
+files define mirror sources, archive inputs, output locations, retention, and
+notification recipients. SQL-authenticated source passwords are resolved from named
+environment variables and are never committed to the repository, returned by status
+commands, passed on command lines, or written to ordinary logs.
 
 The Settings page presents fields by logical group, validates them, and writes through a
 temporary file plus atomic replacement. It provides:

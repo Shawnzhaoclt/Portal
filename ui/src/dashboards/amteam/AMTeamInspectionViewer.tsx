@@ -19,6 +19,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
+import { appPrompt } from '../../components/messageDialogService'
 import {
   fetchAmTeamObservations,
   fetchAmTeamObservationsBatch,
@@ -1408,7 +1409,11 @@ async function saveReviewReportFile(report: ReviewReportFile) {
     return
   }
 
-  const fallbackName = window.prompt('Save report as .docx or .pdf', suggestedName)
+  const fallbackName = await appPrompt('Save report as .docx or .pdf', {
+    title: 'Save CCTV review report',
+    confirmLabel: 'Download',
+    defaultValue: suggestedName,
+  })
   if (!fallbackName) return
   const format = reportFormatFromFileName(fallbackName)
   const downloadName = fallbackName.toLowerCase().endsWith(`.${format}`) ? fallbackName : reportFileName(fallbackName, format)
@@ -3265,7 +3270,9 @@ export default function AMTeamInspectionViewer({
       return
     }
     if (!selectedInspection) return
-    const memo = reportSaveContext ? window.prompt('Memo for this generated report (optional)', '') : ''
+    const memo = reportSaveContext
+      ? await appPrompt('Memo for this generated report (optional)', { title: 'Generate CCTV review report', confirmLabel: 'Generate report' })
+      : ''
     if (reportSaveContext && memo === null) return
     setReportProgressMessage(reportSaveContext ? 'Saving report data.' : 'Generating report file.')
     try {

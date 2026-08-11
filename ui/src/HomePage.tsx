@@ -57,6 +57,7 @@ import ThemeToggle from './ThemeToggle'
 import type { AppTheme } from './theme'
 import './HomePage.css'
 import { getDesktopContext, isDesktopRuntime } from './desktop/runtime'
+import { appConfirm } from './components/messageDialogService'
 import {
   clearPortalTestAccess,
   savePortalTestAccess,
@@ -938,9 +939,12 @@ function TestAccessDialog({
           <button
             type="button"
             disabled={!selectedUser || loading || !availableRoles.includes(role)}
-            onClick={() => {
+            onClick={async () => {
               if (!selectedUser) return
-              if (mode === 'read_write' && !window.confirm(`Start read/write simulation as ${selectedUser.display_name}? Local business-data changes will be applied as the selected user.`)) return
+              if (mode === 'read_write' && !(await appConfirm(
+                `Start read/write simulation as ${selectedUser.display_name}? Local business-data changes will be applied as the selected user.`,
+                { title: 'Start read/write simulation', kind: 'warning', confirmLabel: 'Start simulation' },
+              ))) return
               onStart({ userId: selectedUser.id, displayName: selectedUser.display_name, email: selectedUser.email, role, mode })
             }}
           >
@@ -1159,7 +1163,10 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     if (!desktopRuntime || testAccess || favoritesLoadingTeam || favoriteBusyResourceId) return
     if (
       favoriteResourceIds.length > 0 &&
-      !window.confirm(`Replace My Favorites for ${CATEGORY_OPTIONS.find((option) => option.key === activeCategory)?.label ?? 'this category'} with the current team settings?`)
+      !(await appConfirm(
+        `Replace My Favorites for ${CATEGORY_OPTIONS.find((option) => option.key === activeCategory)?.label ?? 'this category'} with the current team settings?`,
+        { title: 'Load team settings', confirmLabel: 'Replace favorites' },
+      ))
     ) {
       return
     }

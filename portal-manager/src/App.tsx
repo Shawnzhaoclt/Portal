@@ -17,6 +17,7 @@ import {
   ChevronsRight,
   CircleAlert,
   Database,
+  DatabaseBackup,
   FileCog,
   FolderOpen,
   GitBranch,
@@ -42,6 +43,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import ManagerWorkspaceHub from "./ManagerWorkspaceHub";
 import PortalAdministrationPage from "./management/PortalAdministrationPage";
+import { appConfirm } from "./messageDialogService";
 import { formatDateOnly, formatDateTime, formatLocalClock, formatScheduleLabel, todayIsoDate } from "../../ui/src/lib/dateTime";
 
 type SyncRun = {
@@ -272,6 +274,7 @@ type PortalReleaseStatus = {
 type PageId =
   | "overview"
   | "source-data"
+  | "source-backup"
   | "repository"
   | "releases"
   | "schema"
@@ -345,6 +348,69 @@ type BackupStatus = {
   invalid?: string[];
   verified?: boolean;
   backup_path?: string;
+};
+
+type SourceBackupTaskSchedule = {
+  task_name: string;
+  registered: boolean;
+  managed: boolean;
+  state: string;
+  next_run: string;
+  last_run: string;
+  last_result: string;
+};
+
+type SourceBackupRun = {
+  run_id: string;
+  action: string;
+  status: string;
+  details: string;
+  started_at: string;
+  finished_at: string;
+  log_path: string;
+};
+
+type SourceBackupArchive = {
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_at: string;
+};
+
+type SourceBackupStatus = {
+  available: boolean;
+  missing_files: string[];
+  scripts_directory: string;
+  manager_settings_file: string;
+  backup_settings_file?: string;
+  clone_settings_file?: string;
+  state_directory: string;
+  log_directory: string;
+  source_directory?: string;
+  backup_directory?: string;
+  output_root?: string;
+  retention_days?: number;
+  database_count?: number;
+  refresh_ready?: boolean;
+  credential_issues?: string[];
+  directory_source_count?: number;
+  notification_recipient_count?: number;
+  create_filegdb?: boolean;
+  spatial_warehouse_output_path?: string;
+  spatial_warehouse_layer_count?: number;
+  archive_count?: number;
+  daily_schedule: string;
+  weekly_backup_schedule: string;
+  heartbeat_schedule_label: string;
+  workflow_time: string;
+  backup_weekday: string;
+  heartbeat_day: string;
+  heartbeat_time: string;
+  workflow_schedule: SourceBackupTaskSchedule;
+  heartbeat_schedule: SourceBackupTaskSchedule;
+  state: Partial<SourceBackupRun> & { pid?: number };
+  runs: SourceBackupRun[];
+  archives: SourceBackupArchive[];
 };
 
 type ConflictRecord = {
@@ -428,6 +494,7 @@ const today = todayIsoDate();
 const navigation: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
   { id: "source-data", label: "Source Data", icon: Database },
+  { id: "source-backup", label: "Source Backup", icon: DatabaseBackup },
   { id: "repository", label: "Repository", icon: GitBranch },
   { id: "releases", label: "Releases", icon: PackageCheck },
   { id: "schema", label: "Schema", icon: FileCog },
@@ -442,6 +509,7 @@ const navigation: NavigationItem[] = [
 const pageDescriptions: Record<PageId, string> = {
   overview: "Monitor source synchronization and open workstation maintenance tools.",
   "source-data": "Schedule and monitor resource-ready serving-table rebuilds for Portal.",
+  "source-backup": "Rebuild SQL Server source mirrors and maintain retained source-data archives.",
   repository: "Inspect and validate the shared business-data repository.",
   releases: "Publish approved portable Portal updates to the shared release location.",
   schema: "Validate and publish approved shared business-data schema snapshots.",
@@ -478,6 +546,11 @@ function fileName(path?: string) {
   if (!path) return "-";
   const normalized = path.replaceAll("\\", "/");
   return normalized.split("/").filter(Boolean).at(-1) || path;
+}
+
+function friendlyBackupName(name: string) {
+  const snapshotMatch = name.match(/^backup-\d{8}-([0-9a-f]{8})[0-9a-f-]*-[0-9a-f]{64}\.db$/i);
+  return snapshotMatch ? `Snapshot ${snapshotMatch[1]}` : name.replace(/\.[^.]+$/, "");
 }
 
 function Overview({ status, navigate }: { status: SyncStatus | null; navigate: (page: PageId) => void }) {
@@ -740,7 +813,10 @@ function SchemaWorkspace({
 
   async function dropIndex(index: SchemaCatalogIndex) {
     if (!catalog || !selectedTable) return;
-    if (!window.confirm(`Remove index ${index.physical_name} in the next schema release? No table data will be deleted.`)) return;
+    if (!(await appConfirm(
+      `Remove index ${index.physical_name} in the next schema release? No table data will be deleted.`,
+      { title: "Remove schema index", kind: "warning", confirmLabel: "Remove index" },
+    ))) return;
     await saveDraft([...catalog.operations, {
       kind: "drop_index",
       table_id: selectedTable.table_id,
@@ -1070,9 +1146,6 @@ function RepositoryWorkspace({
 
       <section className="repository-details">
         <div><span>Configured repository</span><strong>{configuredNetworkRoot || "Not configured"}</strong></div>
-        <div><span>Selected repository</span><strong>{status?.network_root ?? (selectedPath || "Checking configuration")}</strong></div>
-        <div><span>Protocol root</span><strong>{status?.protocol_root ?? "-"}</strong></div>
-        <div><span>System database</span><strong>{status?.system_database ?? "-"}</strong></div>
         <div><span>Membership release</span><strong>{status?.membership_release_id || "-"}</strong></div>
         <div><span>Snapshot / epoch</span><strong>{status?.snapshot_id ? `${status.snapshot_id} / ${status.snapshot_epoch_id}` : "-"}</strong></div>
       </section>
@@ -1094,6 +1167,11 @@ function RepositoryWorkspace({
               <button className="quiet-button" disabled={busy !== null || !selectedPath} onClick={() => inspect(selectedPath)}>
                 {busy === "inspect" ? "Inspecting" : "Inspect path"}
               </button>
+              {sharedAvailable ? (
+                <button className="quiet-button" disabled={busy !== null} onClick={() => openPath(selectedPath)}>
+                  <FolderOpen size={17} /> Open location
+                </button>
+              ) : null}
             </div>
           </label>
           {(canConfigure || canInitialize) ? (
@@ -1111,11 +1189,6 @@ function RepositoryWorkspace({
             {canInitialize ? (
               <button className="danger-button" disabled={busy !== null || !confirmationMatches} onClick={() => bootstrap(selectedPath, confirmation)}>
                 <Database size={17} /> {busy === "bootstrap" ? "Initializing" : "Initialize repository"}
-              </button>
-            ) : null}
-            {sharedAvailable ? (
-              <button className="quiet-button" disabled={busy !== null} onClick={() => openPath(selectedPath)}>
-                <FolderOpen size={17} /> Open location
               </button>
             ) : null}
           </div>
@@ -1271,6 +1344,15 @@ function SourceDataWorkspace({
   const serviceRunning = status?.schedulerRunning ?? false;
   const [intervalDraft, setIntervalDraft] = useState("");
   const [intervalDirty, setIntervalDirty] = useState(false);
+  const [runPage, setRunPage] = useState(1);
+  const runs = status?.runs ?? [];
+  const runPageSize = 10;
+  const runTotalPages = Math.max(1, Math.ceil(runs.length / runPageSize));
+  const safeRunPage = Math.min(runPage, runTotalPages);
+  const runFirstIndex = (safeRunPage - 1) * runPageSize;
+  const pageRuns = runs.slice(runFirstIndex, runFirstIndex + runPageSize);
+  const runFirstResult = runs.length ? runFirstIndex + 1 : 0;
+  const runLastResult = runs.length ? Math.min(runFirstIndex + runPageSize, runs.length) : 0;
 
   useEffect(() => {
     if (status?.intervalMinutes === undefined || intervalDirty) return;
@@ -1285,6 +1367,10 @@ function SourceDataWorkspace({
     setIntervalDraft(String(response.intervalMinutes));
     setIntervalDirty(false);
   };
+
+  useEffect(() => {
+    setRunPage(1);
+  }, [selectedDate, runs.length]);
 
   return (
     <section className="source-workspace table-focused-workspace">
@@ -1395,7 +1481,7 @@ function SourceDataWorkspace({
               </tr>
             </thead>
             <tbody>
-              {(status?.runs ?? []).map((run, index) => (
+              {pageRuns.map((run, index) => (
                 <tr key={[run.startedAt, index].join("-")}>
                   <td data-status={run.status}>{run.status}</td>
                   <td>{formatTimestamp(run.startedAt)}</td>
@@ -1412,6 +1498,7 @@ function SourceDataWorkspace({
             </tbody>
           </table>
         </div>
+        <footer className="activity-pagination source-sync-pagination"><span>Rows 10</span><strong>{runFirstResult}-{runLastResult} of {runs.length}</strong><div><button className="quiet-button icon-button" aria-label="First synchronization runs page" disabled={safeRunPage === 1} onClick={() => setRunPage(1)}><ChevronsLeft size={16} /></button><button className="quiet-button icon-button" aria-label="Previous synchronization runs page" disabled={safeRunPage === 1} onClick={() => setRunPage(safeRunPage - 1)}><ChevronLeft size={16} /></button><span>Page {safeRunPage} of {runTotalPages}</span><button className="quiet-button icon-button" aria-label="Next synchronization runs page" disabled={safeRunPage === runTotalPages} onClick={() => setRunPage(safeRunPage + 1)}><ChevronRight size={16} /></button><button className="quiet-button icon-button" aria-label="Last synchronization runs page" disabled={safeRunPage === runTotalPages} onClick={() => setRunPage(runTotalPages)}><ChevronsRight size={16} /></button></div></footer>
       </section>
     </section>
   );
@@ -1432,6 +1519,20 @@ function SnapshotWorkspace({
   execute: (action: "schedule-enable" | "schedule-disable" | "nightly-schedule-enable" | "nightly-schedule-disable") => void;
   openLocation: (path: string) => void;
 }) {
+  const [snapshotPage, setSnapshotPage] = useState(1);
+  const snapshots = status?.snapshots ?? [];
+  const snapshotPageSize = 10;
+  const snapshotTotalPages = Math.max(1, Math.ceil(snapshots.length / snapshotPageSize));
+  const safeSnapshotPage = Math.min(snapshotPage, snapshotTotalPages);
+  const snapshotFirstIndex = (safeSnapshotPage - 1) * snapshotPageSize;
+  const pageSnapshots = snapshots.slice(snapshotFirstIndex, snapshotFirstIndex + snapshotPageSize);
+  const snapshotFirstResult = snapshots.length ? snapshotFirstIndex + 1 : 0;
+  const snapshotLastResult = snapshots.length ? Math.min(snapshotFirstIndex + snapshotPageSize, snapshots.length) : 0;
+
+  useEffect(() => {
+    setSnapshotPage(1);
+  }, [status?.active_snapshot_id, snapshots.length]);
+
   return (
     <section className="maintenance-workspace table-focused-workspace">
       <section className="status running compact-status">
@@ -1450,24 +1551,145 @@ function SnapshotWorkspace({
         <div><span>Active snapshot</span><strong title={status?.active_snapshot_path || undefined}>{status?.active_snapshot_id || "Checking configuration"}</strong></div>
         <div><span>Epoch</span><strong>{status?.active_snapshot_epoch_id || "-"}</strong></div>
       </section>
-      <section className="retention-controls scheduled-task-controls">
-        <div className="retention-readout"><span>Task state</span><strong>{nightlySchedule?.state || "Checking"}</strong></div>
-        <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(nightlySchedule?.schedule, `Daily ${formatLocalClock(120)} local time`)}</strong></div>
-        <div className="retention-schedule-action">{nightlySchedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("nightly-schedule-disable")}><CalendarClock size={17} />{busy === "nightly-schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !nightlySchedule?.automatic_enabled} onClick={() => execute("nightly-schedule-enable")}><CalendarClock size={17} />{busy === "nightly-schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
-        <p className="nightly-note">Publishes one verified checkpoint. Backups and retention run only in the Friday maintenance task.</p>
-      </section>
-      <section className="retention-controls scheduled-task-controls">
-        <div className="retention-readout"><span>Task state</span><strong>{schedule?.state || "Checking"}</strong></div>
-        <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(schedule?.schedule || status?.automatic_schedule, "Checking configuration")}</strong></div>
-        <div className="retention-schedule-action">{schedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("schedule-disable")}><CalendarClock size={17} />{busy === "schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !schedule?.automatic_enabled} onClick={() => execute("schedule-enable")}><CalendarClock size={17} />{busy === "schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
-        <p className="nightly-note">Creates and verifies the protected backups, archives eligible online packages, and removes backup artifacts older than 90 days.</p>
+      <section className="snapshot-schedules">
+        <section className="retention-controls scheduled-task-controls">
+          <div className="retention-readout"><span>Task state</span><strong>{nightlySchedule?.state || "Checking"}</strong></div>
+          <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(nightlySchedule?.schedule, `Daily ${formatLocalClock(120)} local time`)}</strong></div>
+          <div className="retention-schedule-action">{nightlySchedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("nightly-schedule-disable")}><CalendarClock size={17} />{busy === "nightly-schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !nightlySchedule?.automatic_enabled} onClick={() => execute("nightly-schedule-enable")}><CalendarClock size={17} />{busy === "nightly-schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
+          <p className="nightly-note">Publishes a verified checkpoint.</p>
+        </section>
+        <section className="retention-controls scheduled-task-controls">
+          <div className="retention-readout"><span>Task state</span><strong>{schedule?.state || "Checking"}</strong></div>
+          <div className="retention-readout"><span>Scheduled run</span><strong>{formatScheduleLabel(schedule?.schedule || status?.automatic_schedule, "Checking configuration")}</strong></div>
+          <div className="retention-schedule-action">{schedule?.registered ? <button className="quiet-button" disabled={busy !== null} onClick={() => execute("schedule-disable")}><CalendarClock size={17} />{busy === "schedule-disable" ? "Removing" : "Disable"}</button> : <button className="quiet-button" disabled={busy !== null || !schedule?.automatic_enabled} onClick={() => execute("schedule-enable")}><CalendarClock size={17} />{busy === "schedule-enable" ? "Enabling" : "Enable"}</button>}</div>
+          <p className="nightly-note">Creates verified backups and removes artifacts older than 90 days.</p>
+        </section>
       </section>
       <section className="maintenance-table">
         <div className="table-toolbar"><div><p className="eyebrow">SNAPSHOT HISTORY</p><h2>Verified shared snapshots</h2></div></div>
         <div className="table-scroll"><table className="snapshot-history-table"><thead><tr><th>Created</th><th>Snapshot ID</th><th>Size</th><th>Status</th><th>Location</th></tr></thead><tbody>
-          {(status?.snapshots ?? []).map((snapshot) => <tr key={snapshot.path}><td>{formatTimestamp(snapshot.created_at)}</td><td title={snapshot.path}>{snapshot.snapshot_id}</td><td>{formatBytes(snapshot.size_bytes)}</td><td data-status={snapshot.is_active ? "Succeeded" : ""}>{snapshot.is_active ? "Active" : "Retained"}</td><td><button className="text-button" onClick={() => openLocation(snapshot.path)}>Open location</button></td></tr>)}
+          {pageSnapshots.map((snapshot) => <tr key={snapshot.path}><td>{formatTimestamp(snapshot.created_at)}</td><td title={snapshot.path}>{snapshot.snapshot_id}</td><td>{formatBytes(snapshot.size_bytes)}</td><td data-status={snapshot.is_active ? "Succeeded" : ""}>{snapshot.is_active ? "Active" : "Retained"}</td><td><button className="text-button" onClick={() => openLocation(snapshot.path)}>Open location</button></td></tr>)}
           {!status?.snapshots.length && <tr><td colSpan={5} className="empty compact-empty">No snapshots were found.</td></tr>}
         </tbody></table></div>
+        <footer className="activity-pagination snapshot-history-pagination"><span>Rows 10</span><strong>{snapshotFirstResult}-{snapshotLastResult} of {snapshots.length}</strong><div><button className="quiet-button icon-button" aria-label="First snapshot history page" disabled={safeSnapshotPage === 1} onClick={() => setSnapshotPage(1)}><ChevronsLeft size={16} /></button><button className="quiet-button icon-button" aria-label="Previous snapshot history page" disabled={safeSnapshotPage === 1} onClick={() => setSnapshotPage(safeSnapshotPage - 1)}><ChevronLeft size={16} /></button><span>Page {safeSnapshotPage} of {snapshotTotalPages}</span><button className="quiet-button icon-button" aria-label="Next snapshot history page" disabled={safeSnapshotPage === snapshotTotalPages} onClick={() => setSnapshotPage(safeSnapshotPage + 1)}><ChevronRight size={16} /></button><button className="quiet-button icon-button" aria-label="Last snapshot history page" disabled={safeSnapshotPage === snapshotTotalPages} onClick={() => setSnapshotPage(snapshotTotalPages)}><ChevronsRight size={16} /></button></div></footer>
+      </section>
+    </section>
+  );
+}
+
+function SourceBackupWorkspace({
+  status,
+  busy,
+  execute,
+  updateSchedule,
+  saveSchedule,
+  openPath,
+}: {
+  status: SourceBackupStatus | null;
+  busy: string | null;
+  execute: (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat") => void;
+  updateSchedule: (schedule: "workflow" | "heartbeat", enabled: boolean) => void;
+  saveSchedule: (schedule: { workflowTime: string; backupWeekday: string; heartbeatDay: string; heartbeatTime: string }) => void;
+  openPath: (path: string) => void;
+}) {
+  const [workflowTime, setWorkflowTime] = useState("");
+  const [backupWeekday, setBackupWeekday] = useState("");
+  const [heartbeatDay, setHeartbeatDay] = useState("");
+  const [heartbeatTime, setHeartbeatTime] = useState("");
+  const [archivePageSize, setArchivePageSize] = useState(10);
+  const [archivePage, setArchivePage] = useState(1);
+  const running = status?.state?.status === "running";
+  const latestStatus = !status?.available
+    ? "unavailable"
+    : status?.refresh_ready === false
+      ? "configuration required"
+      : status?.state?.status || "ready";
+  const latestArchive = status?.archives?.[0];
+  const archives = status?.archives ?? [];
+  const archiveTotalPages = Math.max(1, Math.ceil(archives.length / archivePageSize));
+  const safeArchivePage = Math.min(archivePage, archiveTotalPages);
+  const archiveFirstIndex = (safeArchivePage - 1) * archivePageSize;
+  const pageArchives = archives.slice(archiveFirstIndex, archiveFirstIndex + archivePageSize);
+  const archiveFirstResult = archives.length ? archiveFirstIndex + 1 : 0;
+  const archiveLastResult = archives.length ? Math.min(archiveFirstIndex + archivePageSize, archives.length) : 0;
+  const unavailableReason = status?.missing_files?.length
+    ? `Missing: ${status.missing_files.join(", ")}`
+    : "The in-project source-backup scripts are not available.";
+  const statusMessage = !status?.available
+    ? unavailableReason
+    : status?.credential_issues?.length
+      ? status.credential_issues.join("; ")
+      : status?.state?.details || "The maintained source-backup workflow is ready.";
+  const actionLabel = (action: string) => action.replaceAll("_", " ");
+  const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+  useEffect(() => {
+    if (!status) return;
+    setWorkflowTime(status.workflow_time || "00:01");
+    setBackupWeekday(status.backup_weekday || "SAT");
+    setHeartbeatDay(status.heartbeat_day || "SUN");
+    setHeartbeatTime(status.heartbeat_time || "20:00");
+  }, [status?.workflow_time, status?.backup_weekday, status?.heartbeat_day, status?.heartbeat_time]);
+  useEffect(() => {
+    setArchivePage(1);
+  }, [archivePageSize, status?.archive_count]);
+  const scheduleBusy = busy === "schedule-save";
+  return (
+    <section className="maintenance-workspace table-focused-workspace source-backup-workspace">
+      <div className="module-actions source-backup-actions"><div className="actions">
+        <button className="quiet-button" disabled={busy !== null || running || !status?.available} onClick={() => execute("check")}><CheckCircle2 size={17} />Check configuration</button>
+        <button className="quiet-button" disabled={busy !== null || running || !status?.available} onClick={() => execute("backup")}><ArchiveRestore size={17} />Backup now</button>
+        <button className="quiet-button" disabled={busy !== null || running || !status?.refresh_ready} onClick={() => execute("refresh")}><Database size={17} />Refresh mirrors</button>
+        <button className="primary-button" disabled={busy !== null || running || !status?.refresh_ready} onClick={() => execute("workflow")}><Play size={17} />Run workflow</button>
+        <button className="primary-button" disabled={busy !== null || scheduleBusy} onClick={() => saveSchedule({ workflowTime, backupWeekday, heartbeatDay, heartbeatTime })}>{scheduleBusy ? "Saving..." : "Save configuration"}</button>
+      </div></div>
+      <section className={`${latestStatus === "failed" || latestStatus === "unavailable" || latestStatus === "configuration required" ? "status stopped" : "status running"} compact-status`}>
+        <div><p className="eyebrow">SOURCE MIRROR AND ARCHIVE WORKFLOW</p><h2>{latestStatus.toUpperCase()}</h2></div>
+        <p>{statusMessage}</p>
+      </section>
+      <section className="metrics maintenance-metrics">
+        <div><span>DATABASE MIRRORS</span><strong>{status?.database_count ?? "-"}</strong></div>
+        <div><span>RETAINED ARCHIVES</span><strong>{status?.archive_count ?? "-"}</strong></div>
+        <div><span>RETENTION</span><strong>{status?.retention_days ? `${status.retention_days} days` : "-"}</strong></div>
+        <div><span>LATEST ARCHIVE</span><strong>{latestArchive ? formatTimestamp(latestArchive.modified_at) : "None"}</strong></div>
+      </section>
+      <section className="source-backup-schedules">
+        <article className="retention-controls scheduled-task-controls">
+          <div className="retention-readout"><span>Daily workflow</span><strong>{status?.workflow_schedule?.state || "Checking"}</strong></div>
+          <label className="schedule-input"><span>Run time</span><input type="time" value={workflowTime} onChange={(event) => setWorkflowTime(event.target.value)} disabled={busy !== null} /></label>
+          <label className="schedule-input"><span>Archive day</span><select value={backupWeekday} onChange={(event) => setBackupWeekday(event.target.value)} disabled={busy !== null}>{weekdays.map((day) => <option key={day} value={day}>{day}</option>)}</select></label>
+          <div className="retention-schedule-action">
+            <button className="quiet-button" disabled={busy !== null} onClick={() => updateSchedule("workflow", true)}><CalendarClock size={17} />{status?.workflow_schedule?.registered ? "Update task" : "Enable"}</button>
+            {status?.workflow_schedule?.registered && <button className="danger-button" disabled={busy !== null} onClick={() => updateSchedule("workflow", false)}>Disable</button>}
+          </div>
+          <p className="nightly-note">The clean SQL Server mirror rebuild runs daily. The retained archive and separate Spatial Data Warehouse mirror refresh run on the selected archive day.</p>
+        </article>
+        <article className="retention-controls scheduled-task-controls">
+          <div className="retention-readout"><span>Heartbeat</span><strong>{status?.heartbeat_schedule?.state || "Checking"}</strong></div>
+          <label className="schedule-input"><span>Run day</span><select value={heartbeatDay} onChange={(event) => setHeartbeatDay(event.target.value)} disabled={busy !== null}>{weekdays.map((day) => <option key={day} value={day}>{day}</option>)}</select></label>
+          <label className="schedule-input"><span>Run time</span><input type="time" value={heartbeatTime} onChange={(event) => setHeartbeatTime(event.target.value)} disabled={busy !== null} /></label>
+          <div className="retention-schedule-action">
+            <button className="quiet-button" disabled={busy !== null} onClick={() => updateSchedule("heartbeat", true)}><CalendarClock size={17} />{status?.heartbeat_schedule?.registered ? "Update task" : "Enable"}</button>
+            {status?.heartbeat_schedule?.registered && <button className="danger-button" disabled={busy !== null} onClick={() => updateSchedule("heartbeat", false)}>Disable</button>}
+          </div>
+          <p className="nightly-note">Confirms that the workstation and scheduled task are available. <button className="text-button" disabled={busy !== null || running} onClick={() => execute("heartbeat")}>Send a test now</button></p>
+        </article>
+      </section>
+      <section className="source-backup-tables">
+        <section className="maintenance-table">
+          <div className="table-toolbar"><div><p className="eyebrow">RECENT RUNS</p><h2>{status?.runs?.length ?? 0} recorded tasks</h2></div>{status?.log_directory && <button className="quiet-button" onClick={() => openPath(status.log_directory)}><FolderOpen size={17} />Open logs</button>}</div>
+          <div className="table-scroll"><table><thead><tr><th>Started</th><th>Action</th><th>Status</th><th>Details</th></tr></thead><tbody>
+            {(status?.runs ?? []).map((run) => <tr key={run.run_id}><td>{formatTimestamp(run.started_at)}</td><td>{actionLabel(run.action)}</td><td data-status={run.status}>{run.status}</td><td title={run.log_path}>{run.details}</td></tr>)}
+            {!status?.runs?.length && <tr><td colSpan={4} className="empty compact-empty">No source-backup tasks have been recorded.</td></tr>}
+          </tbody></table></div>
+        </section>
+        <section className="maintenance-table">
+          <div className="table-toolbar"><div><p className="eyebrow">SOURCE ARCHIVES</p><h2>{status?.archive_count ?? archives.length} recent files</h2></div>{status?.backup_directory && <button className="quiet-button" onClick={() => openPath(status.backup_directory!)}><FolderOpen size={17} />Open backups</button>}</div>
+          <div className="table-scroll"><table className="source-archives-table"><thead><tr><th>Created</th><th>Archive</th><th>Size</th></tr></thead><tbody>
+            {pageArchives.map((archive) => <tr key={archive.path}><td>{formatTimestamp(archive.modified_at)}</td><td><button className="text-button" onClick={() => openPath(archive.path)}>{archive.name}</button></td><td>{formatBytes(archive.size_bytes)}</td></tr>)}
+            {!status?.archives?.length && <tr><td colSpan={3} className="empty compact-empty">No source-data archives were found.</td></tr>}
+          </tbody></table></div>
+          <footer className="activity-pagination source-archives-pagination"><label>Rows<select value={archivePageSize} onChange={(event) => setArchivePageSize(Number(event.target.value))}>{[10, 15].map((size) => <option key={size} value={size}>{size}</option>)}</select></label><strong>{archiveFirstResult}-{archiveLastResult} of {archives.length}</strong><div><button className="quiet-button icon-button" aria-label="First archive page" disabled={safeArchivePage === 1} onClick={() => setArchivePage(1)}><ChevronsLeft size={16} /></button><button className="quiet-button icon-button" aria-label="Previous archive page" disabled={safeArchivePage === 1} onClick={() => setArchivePage(safeArchivePage - 1)}><ChevronLeft size={16} /></button><span>Page {safeArchivePage} of {archiveTotalPages}</span><button className="quiet-button icon-button" aria-label="Next archive page" disabled={safeArchivePage === archiveTotalPages} onClick={() => setArchivePage(safeArchivePage + 1)}><ChevronRight size={16} /></button><button className="quiet-button icon-button" aria-label="Last archive page" disabled={safeArchivePage === archiveTotalPages} onClick={() => setArchivePage(archiveTotalPages)}><ChevronsRight size={16} /></button></div></footer>
+        </section>
       </section>
     </section>
   );
@@ -1508,7 +1730,7 @@ function BackupWorkspace({ status, busy, execute, restore, openPath }: { status:
         <div className="maintenance-confirmation-actions"><button className="danger-button" disabled={busy !== null || !status?.recovery_available || restoreConfirmation.trim() !== status?.active_snapshot_id} onClick={() => restore(restoreConfirmation)}><ArchiveRestore size={17} />{busy === "restore" ? "Restoring" : "Restore active snapshot"}</button></div>
       </section>
       <section className="maintenance-table backup-inventory-table"><div className="table-toolbar"><div><p className="eyebrow">BACKUP INVENTORY</p><h2>{backups.length} verified copies</h2></div></div><div className="table-scroll"><table><thead><tr><th><button className="table-sort-button" onClick={() => setSortDirection((value) => value === "desc" ? "asc" : "desc")}>Backup date {sortDirection === "desc" ? "DESC" : "ASC"}</button></th><th>Backup</th><th>Size</th><th>Location</th></tr></thead><tbody>
-        {pageBackups.map((backup) => <tr key={backup.path}><td>{formatTimestamp(backup.modified_at)}</td><td>{backup.name}</td><td>{formatBytes(backup.size_bytes)}</td><td><button className="text-button" onClick={() => openPath(backup.path)}>Open location</button></td></tr>)}
+        {pageBackups.map((backup) => <tr key={backup.path}><td>{formatTimestamp(backup.modified_at)}</td><td title={backup.name}>{friendlyBackupName(backup.name)}</td><td>{formatBytes(backup.size_bytes)}</td><td><button className="text-button" onClick={() => openPath(backup.path)}>Open location</button></td></tr>)}
         {!backups.length && <tr><td colSpan={4} className="empty compact-empty">No backup files were found.</td></tr>}
       </tbody></table></div><footer className="activity-pagination"><label>Rows<select value={pageSize} onChange={(event) => setPageSize(Number(event.target.value))}>{[10, 25, 50, 100].map((size) => <option key={size} value={size}>{size}</option>)}</select></label><strong>{firstResult}-{lastResult} of {backups.length}</strong><div><button className="quiet-button icon-button" aria-label="First page" disabled={safePage === 1} onClick={() => setCurrentPage(1)}><ChevronsLeft size={16} /></button><button className="quiet-button icon-button" aria-label="Previous page" disabled={safePage === 1} onClick={() => setCurrentPage(safePage - 1)}><ChevronLeft size={16} /></button><span>Page {safePage} of {totalPages}</span><button className="quiet-button icon-button" aria-label="Next page" disabled={safePage === totalPages} onClick={() => setCurrentPage(safePage + 1)}><ChevronRight size={16} /></button><button className="quiet-button icon-button" aria-label="Last page" disabled={safePage === totalPages} onClick={() => setCurrentPage(totalPages)}><ChevronsRight size={16} /></button></div></footer></section>
     </section>
@@ -1627,6 +1849,8 @@ export function App() {
   const [snapshotBusy, setSnapshotBusy] = useState<string | null>(null);
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null);
   const [backupBusy, setBackupBusy] = useState<string | null>(null);
+  const [sourceBackupStatus, setSourceBackupStatus] = useState<SourceBackupStatus | null>(null);
+  const [sourceBackupBusy, setSourceBackupBusy] = useState<string | null>(null);
   const [conflictStatus, setConflictStatus] = useState<ConflictStatus | null>(null);
   const [conflictBusy, setConflictBusy] = useState<string | null>(null);
   const [logStatus, setLogStatus] = useState<LogStatus | null>(null);
@@ -1797,7 +2021,10 @@ export function App() {
   }, [schemaCatalog]);
 
   const discardSchemaDraft = useCallback(async () => {
-    if (!window.confirm("Discard every unpublished schema draft change?")) return;
+    if (!(await appConfirm(
+      "Discard every unpublished schema draft change?",
+      { title: "Discard schema draft", kind: "warning", confirmLabel: "Discard draft" },
+    ))) return;
     setSchemaBusy("draft");
     try {
       setSchemaCatalog(await invoke<SchemaCatalog>("discard_schema_draft"));
@@ -1862,6 +2089,98 @@ export function App() {
     if (activePage !== "snapshots") return;
     void loadSnapshotStatus().catch((reason) => setError(String(reason)));
   }, [activePage, loadSnapshotStatus]);
+
+  const loadSourceBackupStatus = useCallback(async () => {
+    const response = await invoke<SourceBackupStatus>("source_backup_status");
+    setSourceBackupStatus(response);
+    return response;
+  }, []);
+
+  const executeSourceBackup = async (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat") => {
+    const confirmations: Partial<Record<typeof action, { message: string; title: string; confirmLabel: string }>> = {
+      workflow: {
+        title: "Run source-backup workflow",
+        confirmLabel: "Run workflow",
+        message: "Run the maintained source workflow now? The configured DuckDB mirrors will be rebuilt. If today is the weekly backup day, the current files will be archived first.",
+      },
+      refresh: {
+        title: "Refresh source mirrors",
+        confirmLabel: "Refresh mirrors",
+        message: "Rebuild every configured SQL Server DuckDB mirror now? Existing mirror files are replaced only by this registered workflow.",
+      },
+      backup: {
+        title: "Create source-data backup",
+        confirmLabel: "Create backup",
+        message: "Create the retained source-data archive now? An existing archive for today will be replaced.",
+      },
+      heartbeat: {
+        title: "Send heartbeat test",
+        confirmLabel: "Send test",
+        message: "Send a machine-online heartbeat email to the configured recipients now?",
+      },
+    };
+    const confirmation = confirmations[action];
+    if (confirmation && !(await appConfirm(confirmation.message, {
+      title: confirmation.title,
+      confirmLabel: confirmation.confirmLabel,
+      kind: action === "refresh" || action === "workflow" ? "warning" : "default",
+    }))) return;
+    setSourceBackupBusy(action);
+    try {
+      await invoke("run_source_backup", { action });
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+      await loadSourceBackupStatus();
+      setError("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSourceBackupBusy(null);
+    }
+  };
+
+  const updateSourceBackupSchedule = async (schedule: "workflow" | "heartbeat", enabled: boolean) => {
+    if (!enabled && !(await appConfirm(
+      `Disable the ${schedule === "workflow" ? "daily source workflow" : "machine heartbeat"} scheduled task?`,
+      { title: "Disable scheduled task", kind: "warning", confirmLabel: "Disable task" },
+    ))) return;
+    setSourceBackupBusy(`${schedule}-${enabled ? "enable" : "disable"}`);
+    try {
+      const response = await invoke<SourceBackupStatus>("set_source_backup_schedule", { schedule, enabled });
+      setSourceBackupStatus(response);
+      setError("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSourceBackupBusy(null);
+    }
+  };
+
+  const saveSourceBackupSchedule = async (schedule: {
+    workflowTime: string;
+    backupWeekday: string;
+    heartbeatDay: string;
+    heartbeatTime: string;
+  }) => {
+    setSourceBackupBusy("schedule-save");
+    try {
+      const response = await invoke<SourceBackupStatus>("save_source_backup_schedule", schedule);
+      setSourceBackupStatus(response);
+      setError("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSourceBackupBusy(null);
+    }
+  };
+
+  useEffect(() => {
+    if (activePage !== "source-backup") return;
+    void loadSourceBackupStatus().catch((reason) => setError(String(reason)));
+    const interval = window.setInterval(() => {
+      void loadSourceBackupStatus().catch((reason) => setError(String(reason)));
+    }, 3000);
+    return () => window.clearInterval(interval);
+  }, [activePage, loadSourceBackupStatus]);
 
   const loadBackupStatus = useCallback(async () => {
     const response = await invoke<BackupStatus>("maintenance_backup_status");
@@ -2106,6 +2425,10 @@ export function App() {
     if (!networkRoot) {
       return;
     }
+    if (activePage === "source-backup") {
+      void loadSourceBackupStatus().catch((reason) => setError(String(reason)));
+      return;
+    }
     setRepositoryBusy("bootstrap");
     try {
       const response = await invoke<RepositoryStatus>("bootstrap_repository", {
@@ -2126,7 +2449,10 @@ export function App() {
   const publishRelease = async () => {
     const version = releaseVersion.trim() || undefined;
     const label = releaseMode === "system-db" ? "system database only" : releaseMode === "portal-exe" ? "Portal executable only" : "the full portable folder";
-    if (!window.confirm(`Publish ${label} as release ${version ?? releaseStatus?.packageVersion ?? ""}?`)) {
+    if (!(await appConfirm(
+      `Publish ${label} as release ${version ?? releaseStatus?.packageVersion ?? ""}?`,
+      { title: "Publish Portal release", kind: "warning", confirmLabel: "Publish release" },
+    ))) {
       return;
     }
     setReleaseSuccess("");
@@ -2303,6 +2629,16 @@ export function App() {
             status={status}
           />
         )}
+        {activePage === "source-backup" && (
+          <SourceBackupWorkspace
+            busy={sourceBackupBusy}
+            execute={(action) => void executeSourceBackup(action)}
+            openPath={(path) => void openPath(path)}
+            saveSchedule={(schedule) => void saveSourceBackupSchedule(schedule)}
+            status={sourceBackupStatus}
+            updateSchedule={(schedule, enabled) => void updateSourceBackupSchedule(schedule, enabled)}
+          />
+        )}
         {activePage === "repository" && (
           <RepositoryWorkspace
             bootstrap={(networkRoot, confirmation) => void bootstrapRepository(networkRoot, confirmation)}
@@ -2341,8 +2677,11 @@ export function App() {
             execute={(action) => void schemaTask(action, schemaConfirmation)}
             loadPlan={() => void schemaTask("plan")}
             plan={schemaPlan}
-            register={() => {
-              if (window.confirm("Register these additive draft changes as the next stormwater.db schema release? You can review the migration plan before publishing.")) {
+            register={async () => {
+              if (await appConfirm(
+                "Register these additive draft changes as the next stormwater.db schema release? You can review the migration plan before publishing.",
+                { title: "Register schema release", confirmLabel: "Register changes" },
+              )) {
                 void schemaTask("register");
               }
             }}

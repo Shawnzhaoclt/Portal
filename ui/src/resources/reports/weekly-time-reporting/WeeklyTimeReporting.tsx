@@ -19,6 +19,7 @@ import { toast } from 'sonner'
 
 import { portalRequestJson } from '../../../desktop/request'
 import { formatDateOnly, formatDateTime } from '../../../lib/dateTime'
+import { appConfirm, appPrompt } from '../../../components/messageDialogService'
 import './WeeklyTimeReporting.css'
 
 type EntryType = string
@@ -423,7 +424,10 @@ export default function WeeklyTimeReporting() {
   }
 
   async function copyPreviousWeek() {
-    if (!window.confirm('Copy entries from the previous week? Existing entries will be kept.')) return
+    if (!(await appConfirm(
+      'Copy entries from the previous week? Existing entries will be kept.',
+      { title: 'Copy previous week', confirmLabel: 'Copy entries' },
+    ))) return
     setBusy(true)
     try {
       const response = await portalRequestJson<CopyPreviousWeekResponse>(
@@ -516,7 +520,7 @@ export default function WeeklyTimeReporting() {
   }
 
   async function deleteEntry(entry: TimeEntry) {
-    if (!window.confirm('Delete this time entry?')) return
+    if (!(await appConfirm('Delete this time entry?', { title: 'Delete time entry', kind: 'danger', confirmLabel: 'Delete' }))) return
     setBusy(true)
     try {
       const response = await portalRequestJson<WeeklyContext>(
@@ -533,7 +537,7 @@ export default function WeeklyTimeReporting() {
   }
 
   async function submitWeek() {
-    const memo = window.prompt('Optional note for your manager:', '') ?? null
+    const memo = await appPrompt('Optional note for your manager:', { title: 'Submit week', confirmLabel: 'Continue' })
     if (memo === null) return
     setBusy(true)
     try {
@@ -560,7 +564,10 @@ export default function WeeklyTimeReporting() {
   }
 
   async function withdrawScheduleRequest(request: ScheduleRequest) {
-    if (!window.confirm('Withdraw this pending schedule request?')) return
+    if (!(await appConfirm(
+      'Withdraw this pending schedule request?',
+      { title: 'Withdraw schedule request', kind: 'warning', confirmLabel: 'Withdraw' },
+    ))) return
     setBusy(true)
     try {
       const response = await portalRequestJson<WeeklyContext>(

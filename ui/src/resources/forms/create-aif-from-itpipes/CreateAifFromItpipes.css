@@ -107,6 +107,8 @@
 .aif-link { padding: 0; color: #0e568e; background: transparent; border: 0; font-weight: 800; text-decoration: underline; }
 .aif-row-actions { display: flex; flex-wrap: wrap; gap: 5px; }
 .aif-row-actions button { min-height: 30px; padding: 4px 7px; font-size: 12px; }
+.aif-row-actions button.danger { color: #a51f18; border-color: #dc8d87; }
+.aif-row-actions button.danger:hover:not(:disabled) { background: #fff0ee; }
 .aif-status { padding: 4px 8px; display: inline-flex; border-radius: 999px; font-size: 12px; font-weight: 800; white-space: nowrap; }
 .aif-status-pending { color: #745000; background: #fff1bf; }
 .aif-status-ready_to_review { color: #155383; background: #dcedfa; }
@@ -148,14 +150,14 @@
 .aif-observation-table { max-height: 380px; overflow-x: hidden; overflow-y: auto; scrollbar-gutter: stable; background: #fff; border: 1px solid #abc2d4; }
 .aif-observation-table table { width: 100%; min-width: 0; table-layout: fixed; border-collapse: collapse; }
 .aif-observation-table th { position: sticky; top: 0; z-index: 1; padding: 8px 6px; color: #174f7c; background: #d9e8f3; border-bottom: 1px solid #abc2d4; text-align: left; font-size: 11px; font-weight: 800; text-transform: uppercase; }
-.aif-observation-table th:first-child { width: 38px; }
-.aif-observation-table th:nth-child(2) { width: 24%; }
-.aif-observation-table th:nth-child(3) { width: 16%; }
-.aif-observation-table th:nth-child(4) { width: 12%; }
-.aif-observation-table th:nth-child(5) { width: 14%; }
+.aif-observation-table th:first-child { width: 34px; }
+.aif-observation-table th:nth-child(2) { width: 20%; }
+.aif-observation-table th:nth-child(3) { width: 12%; }
+.aif-observation-table th:nth-child(4) { width: 10%; }
+.aif-observation-table th:nth-child(5) { width: 11%; }
 .aif-observation-table td { min-width: 0; padding: 9px 6px; color: #18384f; border-bottom: 1px solid #d2e0e9; }
 .aif-observation-table th:last-child,
-.aif-observation-table td:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.aif-observation-table td:last-child { white-space: nowrap; }
 .aif-observation-table tbody tr { cursor: pointer; }
 .aif-observation-table tbody tr:last-child td { border-bottom: 0; }
 .aif-observation-table tbody tr:hover { background: #f1f7fb; }

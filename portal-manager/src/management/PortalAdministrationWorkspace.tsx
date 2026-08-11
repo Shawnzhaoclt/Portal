@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { formatDateTime } from "../../../ui/src/lib/dateTime";
+import { appConfirm, appPrompt } from "../messageDialogService";
 
 export type Role = "user" | "admin" | "system_admin" | "manager";
 
@@ -206,13 +207,13 @@ function displayRole(role: string | undefined): string {
   return role === "system_admin" ? "System admin" : role ? role.replace("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase()) : "User";
 }
 
-function promptText(label: string, current = ""): string | null {
-  const value = window.prompt(label, current);
+async function promptText(label: string, current = ""): Promise<string | null> {
+  const value = await appPrompt(label, { defaultValue: current, title: label, confirmLabel: "Continue" });
   return value === null ? null : value.trim();
 }
 
-function promptNumber(label: string, current = "0"): number | null {
-  const value = promptText(label, current);
+async function promptNumber(label: string, current = "0"): Promise<number | null> {
+  const value = await promptText(label, current);
   if (value === null) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
@@ -403,7 +404,10 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
 
   async function publishCatalog() {
     if (!isSystemAdmin) return;
-    if (!window.confirm("Publish the current system catalog as a read-only release?")) return;
+    if (!(await appConfirm(
+      "Publish the current system catalog as a read-only release?",
+      { title: "Publish system catalog", kind: "warning", confirmLabel: "Publish catalog" },
+    ))) return;
     setBusy("publish");
     setError("");
     try {
@@ -420,25 +424,25 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
     }
   }
 
-  function addUser() {
-    const firstName = promptText("First name");
+  async function addUser() {
+    const firstName = await promptText("First name");
     if (!firstName) return;
-    const lastName = promptText("Last name");
+    const lastName = await promptText("Last name");
     if (!lastName) return;
-    const email = promptText("Work email");
+    const email = await promptText("Work email");
     if (!email) return;
-    const employeeId = promptText("Employee ID");
+    const employeeId = await promptText("Employee ID");
     if (!employeeId) return;
     void runAction("user_create", { first_name: firstName, last_name: lastName, email, employee_id: employeeId }, "User created.");
   }
 
-  function editUser(row: UserRow) {
+  async function editUser(row: UserRow) {
     const data: Record<string, unknown> = { id: row.id };
-    const firstName = promptText("First name", textValue(row.first_name, ""));
+    const firstName = await promptText("First name", textValue(row.first_name, ""));
     if (firstName === null) return;
-    const lastName = promptText("Last name", textValue(row.last_name, ""));
+    const lastName = await promptText("Last name", textValue(row.last_name, ""));
     if (lastName === null) return;
-    const email = promptText("Work email", textValue(row.email, ""));
+    const email = await promptText("Work email", textValue(row.email, ""));
     if (email === null) return;
     data.first_name = firstName;
     data.last_name = lastName;
@@ -446,38 +450,44 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
     void runAction("user_update", data, "User updated.");
   }
 
-  function setUserRole(row: UserRow) {
-    const value = promptText("Role: user, admin, or system_admin", truthy(row.is_system_admin) ? "system_admin" : truthy(row.is_admin) ? "admin" : "user");
+  async function setUserRole(row: UserRow) {
+    const value = await promptText("Role: user, admin, or system_admin", truthy(row.is_system_admin) ? "system_admin" : truthy(row.is_admin) ? "admin" : "user");
     if (!value || !["user", "admin", "system_admin"].includes(value)) return;
     void runAction("user_set_role", { id: row.id, role: value }, "User role updated.");
   }
 
-  function addTeam() {
-    const name = promptText("Team name");
+  async function addTeam() {
+    const name = await promptText("Team name");
     if (!name) return;
-    void runAction("team_create", { name, description: promptText("Description", "") || null }, "Team created.");
+    const description = await promptText("Description", "");
+    if (description === null) return;
+    void runAction("team_create", { name, description: description || null }, "Team created.");
   }
 
-  function editTeam(row: TeamRow) {
-    const name = promptText("Team name", row.name);
+  async function editTeam(row: TeamRow) {
+    const name = await promptText("Team name", row.name);
     if (!name) return;
-    void runAction("team_update", { id: row.id, name, description: promptText("Description", textValue(row.description, "")) || null }, "Team updated.");
+    const description = await promptText("Description", textValue(row.description, ""));
+    if (description === null) return;
+    void runAction("team_update", { id: row.id, name, description: description || null }, "Team updated.");
   }
 
-  function editResource(row: ResourceRow) {
-    const name = promptText("Resource name", row.name);
+  async function editResource(row: ResourceRow) {
+    const name = await promptText("Resource name", row.name);
     if (!name) return;
-    void runAction("resource_update", { resource_id: row.resource_id || row.id, name, description: promptText("Description", textValue(row.description, "")) || null }, "Resource updated.");
+    const description = await promptText("Description", textValue(row.description, ""));
+    if (description === null) return;
+    void runAction("resource_update", { resource_id: row.resource_id || row.id, name, description: description || null }, "Resource updated.");
   }
 
-  function addPermission() {
-    const resourceId = promptText("Resource ID");
+  async function addPermission() {
+    const resourceId = await promptText("Resource ID");
     if (!resourceId) return;
-    const subjectType = promptText("Subject type: team or user", "team");
+    const subjectType = await promptText("Subject type: team or user", "team");
     if (subjectType !== "team" && subjectType !== "user") return;
-    const subjectId = promptText(`${subjectType} ID`);
+    const subjectId = await promptText(`${subjectType} ID`);
     if (!subjectId) return;
-    const permission = promptText("Permissions separated by commas (view, edit, manage, admin, review, create, delete)", "view");
+    const permission = await promptText("Permissions separated by commas (view, edit, manage, admin, review, create, delete)", "view");
     if (!permission) return;
     void runAction("permission_set", {
       resource_id: resourceId,
@@ -487,18 +497,19 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
     }, "Permission saved.");
   }
 
-  function addDictionaryItem(dictionary: DictionaryRow) {
-    const label = promptText("Dictionary value");
+  async function addDictionaryItem(dictionary: DictionaryRow) {
+    const label = await promptText("Dictionary value");
     if (!label) return;
-    const code = promptText("Code (optional)", "") || "";
-    const sortOrder = promptNumber("Display order", String((dictionary.items || []).length + 1));
+    const code = await promptText("Code (optional)", "");
+    if (code === null) return;
+    const sortOrder = await promptNumber("Display order", String((dictionary.items || []).length + 1));
     void runAction("dictionary_item_upsert", { dictionary_id: dictionary.id, label, item_code: code, sort_order: sortOrder || 0 }, "Dictionary value saved.");
   }
 
-  function addHoliday() {
-    const holidayName = promptText("Holiday name");
+  async function addHoliday() {
+    const holidayName = await promptText("Holiday name");
     if (!holidayName) return;
-    const holidayDate = promptText("Holiday date (YYYY-MM-DD)");
+    const holidayDate = await promptText("Holiday date (YYYY-MM-DD)");
     if (!holidayDate) return;
     void runAction("holiday_create", { holiday_name: holidayName, holiday_date: holidayDate, holiday_hours: 8, day_type: "Full day", is_active: true, reduces_weekly_target: true, extends_deadline: true }, "Holiday created.");
   }
@@ -552,7 +563,7 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
               { label: "Team", render: (row) => textValue(row.team_name) },
               { label: "Role", render: (row) => displayRole(truthy(row.is_system_admin) ? "system_admin" : truthy(row.is_admin) ? "admin" : "user") },
               { label: "Status", render: (row) => <span className={`manager-admin-status ${truthy(row.is_active) ? "active" : "inactive"}`}>{truthy(row.is_active) ? "Active" : "Disabled"}</span> },
-            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => editUser(row)} /><ActionButton label="Reset" icon={KeyRound} onClick={() => void runAction("user_reset", { id: row.id }, "Password reset to employee ID.")} /><ActionButton label="Role" icon={ShieldCheck} onClick={() => setUserRole(row)} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { if (window.confirm(`Delete ${textValue(row.email)}?`)) void runAction("user_delete", { id: row.id }, "User deleted."); }} /> : null}</>} /></section>
+            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => void editUser(row)} /><ActionButton label="Reset" icon={KeyRound} onClick={() => void runAction("user_reset", { id: row.id }, "Password reset to employee ID.")} /><ActionButton label="Role" icon={ShieldCheck} onClick={() => void setUserRole(row)} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { void appConfirm(`Delete ${textValue(row.email)}?`, { title: "Delete user", kind: "danger", confirmLabel: "Delete" }).then((confirmed) => { if (confirmed) void runAction("user_delete", { id: row.id }, "User deleted."); }); }} /> : null}</>} /></section>
           ) : null}
 
           {section === "teams" ? (
@@ -562,7 +573,7 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
               { label: "Manager", render: (row) => textValue(row.manager_name) },
               { label: "Members", render: (row) => textValue(row.member_count, "0") },
               { label: "Status", render: (row) => <span className={`manager-admin-status ${truthy(row.is_active) ? "active" : "inactive"}`}>{truthy(row.is_active) ? "Active" : "Disabled"}</span> },
-            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => editTeam(row)} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("team_update", { id: row.id, is_active: !truthy(row.is_active) }, "Team status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { if (window.confirm(`Delete ${row.name}?`)) void runAction("team_delete", { id: row.id }, "Team deleted."); }} /> : null}</>} /></section>
+            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => void editTeam(row)} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("team_update", { id: row.id, is_active: !truthy(row.is_active) }, "Team status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { void appConfirm(`Delete ${row.name}?`, { title: "Delete team", kind: "danger", confirmLabel: "Delete" }).then((confirmed) => { if (confirmed) void runAction("team_delete", { id: row.id }, "Team deleted."); }); }} /> : null}</>} /></section>
           ) : null}
 
           {section === "resources" ? (
@@ -573,7 +584,7 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
               { label: "Category", render: (row) => textValue(row.category) },
               { label: "URL", render: (row) => <code>{textValue(row.url)}</code> },
               { label: "Access", render: (row) => truthy(row.is_public) ? "Public" : truthy(row.is_active) ? "Active" : "Inactive" },
-            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => editResource(row)} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("resource_update", { resource_id: row.resource_id || row.id, is_active: !truthy(row.is_active) }, "Resource status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { if (window.confirm(`Remove ${row.name} and its permissions?`)) void runAction("resource_delete", { resource_id: row.resource_id || row.id }, "Resource removed."); }} /> : null}</>} /></section>
+            ]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => void editResource(row)} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("resource_update", { resource_id: row.resource_id || row.id, is_active: !truthy(row.is_active) }, "Resource status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { void appConfirm(`Remove ${row.name} and its permissions?`, { title: "Remove resource", kind: "danger", confirmLabel: "Remove" }).then((confirmed) => { if (confirmed) void runAction("resource_delete", { resource_id: row.resource_id || row.id }, "Resource removed."); }); }} /> : null}</>} /></section>
           ) : null}
 
           {section === "permissions" ? (
@@ -583,12 +594,12 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
               { label: "Subject", render: (row) => row.team_name ? `Team: ${row.team_name}` : `User: ${textValue(row.user_name)}` },
               { label: "Permissions", render: (row) => permissionText(row.permission_level) },
               { label: "URL", render: (row) => <code>{textValue(row.url)}</code> },
-            ]} actions={(row) => isSystemAdmin ? <ActionButton label="Clear" icon={Trash2} danger onClick={() => { if (window.confirm("Clear this direct permission?")) void runAction("permission_clear", { resource_id: row.resource_id || row.resource_record_id, team_id: row.team_id || null, user_id: row.user_id || null }, "Permission cleared."); }} /> : <span className="manager-admin-muted">System admin only</span>} /></section>
+            ]} actions={(row) => isSystemAdmin ? <ActionButton label="Clear" icon={Trash2} danger onClick={() => { void appConfirm("Clear this direct permission?", { title: "Clear direct permission", kind: "danger", confirmLabel: "Clear permission" }).then((confirmed) => { if (confirmed) void runAction("permission_clear", { resource_id: row.resource_id || row.resource_record_id, team_id: row.team_id || null, user_id: row.user_id || null }, "Permission cleared."); }); }} /> : <span className="manager-admin-muted">System admin only</span>} /></section>
           ) : null}
 
-          {section === "dictionaries" ? <section className="manager-admin-panel"><div className="manager-admin-panel-heading"><div><p className="eyebrow">CONTROLLED VALUES</p><h3>{dictionaries.length} dictionaries</h3></div><span className="manager-admin-muted">Changes are audited in the system catalog.</span></div><div className="manager-admin-dictionary-list">{dictionaries.map((dictionary) => <article className="manager-admin-dictionary" key={dictionary.id}><header><div><strong>{dictionary.name}</strong><code>{dictionary.dictionary_key}</code></div><ActionButton label="Add value" icon={UserPlus} onClick={() => addDictionaryItem(dictionary)} /></header><AdminTable rows={dictionary.items || []} columns={[{ label: "Order", render: (row) => textValue(row.sort_order, "0") }, { label: "Code", render: (row) => textValue(row.item_code) }, { label: "Value", render: (row) => <strong>{row.label}</strong> }, { label: "Status", render: (row) => truthy(row.is_active) ? "Active" : "Disabled" }]} actions={(row) => <><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("dictionary_item_disable", { id: row.id }, "Dictionary value status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { if (window.confirm(`Delete ${row.label}?`)) void runAction("dictionary_item_delete", { id: row.id }, "Dictionary value deleted."); }} /> : null}</>} /></article>)}</div></section> : null}
+          {section === "dictionaries" ? <section className="manager-admin-panel"><div className="manager-admin-panel-heading"><div><p className="eyebrow">CONTROLLED VALUES</p><h3>{dictionaries.length} dictionaries</h3></div><span className="manager-admin-muted">Changes are audited in the system catalog.</span></div><div className="manager-admin-dictionary-list">{dictionaries.map((dictionary) => <article className="manager-admin-dictionary" key={dictionary.id}><header><div><strong>{dictionary.name}</strong><code>{dictionary.dictionary_key}</code></div><ActionButton label="Add value" icon={UserPlus} onClick={() => void addDictionaryItem(dictionary)} /></header><AdminTable rows={dictionary.items || []} columns={[{ label: "Order", render: (row) => textValue(row.sort_order, "0") }, { label: "Code", render: (row) => textValue(row.item_code) }, { label: "Value", render: (row) => <strong>{row.label}</strong> }, { label: "Status", render: (row) => truthy(row.is_active) ? "Active" : "Disabled" }]} actions={(row) => <><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("dictionary_item_disable", { id: row.id }, "Dictionary value status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { void appConfirm(`Delete ${row.label}?`, { title: "Delete dictionary value", kind: "danger", confirmLabel: "Delete" }).then((confirmed) => { if (confirmed) void runAction("dictionary_item_delete", { id: row.id }, "Dictionary value deleted."); }); }} /> : null}</>} /></article>)}</div></section> : null}
 
-          {section === "holidays" ? <section className="manager-admin-panel"><div className="manager-admin-panel-heading"><div><p className="eyebrow">WORK CALENDAR</p><h3>{holidays.length} holiday entries</h3></div><ActionButton label="Add holiday" icon={CalendarDays} onClick={addHoliday} /></div><AdminTable rows={holidays} columns={[{ label: "Holiday", render: (row) => <strong>{textValue(row.holiday_name)}</strong> }, { label: "Date", render: (row) => textValue(row.holiday_date || row.actual_date) }, { label: "Hours", render: (row) => textValue(row.holiday_hours, "0") }, { label: "Day type", render: (row) => textValue(row.day_type) }, { label: "Status", render: (row) => truthy(row.is_active) ? "Active" : "Disabled" }, { label: "Notes", render: (row) => textValue(row.notes) }]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => { const name = promptText("Holiday name", textValue(row.holiday_name, "")); if (name) void runAction("holiday_update", { id: row.id, holiday_name: name }, "Holiday updated."); }} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("holiday_update", { id: row.id, is_active: !truthy(row.is_active) }, "Holiday status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { if (window.confirm("Delete this holiday?")) void runAction("holiday_delete", { id: row.id }, "Holiday deleted."); }} /> : null}</>} /></section> : null}
+          {section === "holidays" ? <section className="manager-admin-panel"><div className="manager-admin-panel-heading"><div><p className="eyebrow">WORK CALENDAR</p><h3>{holidays.length} holiday entries</h3></div><ActionButton label="Add holiday" icon={CalendarDays} onClick={() => void addHoliday()} /></div><AdminTable rows={holidays} columns={[{ label: "Holiday", render: (row) => <strong>{textValue(row.holiday_name)}</strong> }, { label: "Date", render: (row) => textValue(row.holiday_date || row.actual_date) }, { label: "Hours", render: (row) => textValue(row.holiday_hours, "0") }, { label: "Day type", render: (row) => textValue(row.day_type) }, { label: "Status", render: (row) => truthy(row.is_active) ? "Active" : "Disabled" }, { label: "Notes", render: (row) => textValue(row.notes) }]} actions={(row) => <><ActionButton label="Edit" icon={Edit3} onClick={() => { void promptText("Holiday name", textValue(row.holiday_name, "")).then((name) => { if (name) void runAction("holiday_update", { id: row.id, holiday_name: name }, "Holiday updated."); }); }} /><ActionButton label={truthy(row.is_active) ? "Disable" : "Enable"} onClick={() => void runAction("holiday_update", { id: row.id, is_active: !truthy(row.is_active) }, "Holiday status updated.")} />{isSystemAdmin ? <ActionButton label="Delete" icon={Trash2} danger onClick={() => { void appConfirm("Delete this holiday?", { title: "Delete holiday", kind: "danger", confirmLabel: "Delete" }).then((confirmed) => { if (confirmed) void runAction("holiday_delete", { id: row.id }, "Holiday deleted."); }); }} /> : null}</>} /></section> : null}
 
           {section === "audit" ? <section className="manager-admin-panel"><div className="manager-admin-panel-heading"><div><p className="eyebrow">AUDIT TRAIL</p><h3>{audit.length} recent events</h3></div><span className="manager-admin-muted">Most recent changes first.</span></div><AdminTable rows={audit} columns={[{ label: "Time", render: (row) => displayDate(row.created_at) }, { label: "User", render: (row) => textValue(row.actor_name || row.actor_email) }, { label: "Action", render: (row) => <strong>{textValue(row.action || row.event_type)}</strong> }, { label: "Entity", render: (row) => textValue(row.entity_type) }, { label: "ID", render: (row) => textValue(row.entity_id) }, { label: "Details", render: (row) => <code className="manager-admin-details">{textValue(row.details_json)}</code> }]} /></section> : null}
         </main>

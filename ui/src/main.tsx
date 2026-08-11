@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Toaster } from 'sonner'
 import './index.css'
+import { AppMessageDialogProvider } from './components/AppMessageDialog'
 import DesktopStartupSplash from './desktop/DesktopStartupSplash'
 import {
   isScheduledMaintenance,
@@ -140,19 +141,21 @@ async function bootstrap() {
   const { default: AppRoutes } = await import('./AppRoutes')
   root.render(
     <StrictMode>
-      <AppRoutes />
-      <Toaster
-        closeButton
-        expand
-        position="top-center"
-        richColors
-        toastOptions={{
-          style: {
-            borderRadius: 0,
-            fontFamily: 'inherit',
-          },
-        }}
-      />
+      <AppMessageDialogProvider>
+        <AppRoutes />
+        <Toaster
+          closeButton
+          expand
+          position="top-center"
+          richColors
+          toastOptions={{
+            style: {
+              borderRadius: 0,
+              fontFamily: 'inherit',
+            },
+          }}
+        />
+      </AppMessageDialogProvider>
     </StrictMode>,
   )
   if (desktopRuntime && !embeddedResource) monitorScheduledMaintenance()

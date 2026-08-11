@@ -3,6 +3,7 @@ import type { ButtonHTMLAttributes, CSSProperties, PointerEvent as ReactPointerE
 import { Tooltip } from 'radix-ui'
 import { toast } from 'sonner'
 import { formatDateTime } from '../../lib/dateTime'
+import { appConfirm } from '../../components/messageDialogService'
 import {
   AlertCircle,
   ArrowLeft,
@@ -584,8 +585,11 @@ export default function ProactiveTeamCCTVReview() {
     setWorkspaceModal(workspace)
   }
 
-  function closeWorkspace() {
-    if (workspaceDirty && !window.confirm('Discard unsaved review changes and return to the report list?')) return
+  async function closeWorkspace() {
+    if (workspaceDirty && !(await appConfirm(
+      'Discard unsaved review changes and return to the report list?',
+      { title: 'Discard unsaved changes', kind: 'warning', confirmLabel: 'Discard changes' },
+    ))) return
     setWorkspaceDirty(false)
     setWorkspaceModal(null)
   }
@@ -727,7 +731,10 @@ export default function ProactiveTeamCCTVReview() {
   }
 
   async function deleteReport(report: CctvReviewReport) {
-    const confirmed = window.confirm(`Delete ${formatStatus(report.status).toLowerCase()} report "${report.report_name}"? This action cannot be undone.`)
+    const confirmed = await appConfirm(
+      `Delete ${formatStatus(report.status).toLowerCase()} report "${report.report_name}"? This action cannot be undone.`,
+      { title: 'Delete CCTV review report', kind: 'danger', confirmLabel: 'Delete report' },
+    )
     if (!confirmed) return
 
     try {
@@ -931,7 +938,7 @@ export default function ProactiveTeamCCTVReview() {
       {workspaceModal ? (
         <section className="cctv-report-workspace-shell" aria-label="Report edit and view">
           <header className="cctv-report-workspace-commandbar">
-            <button className="cctv-report-workspace-back" onClick={closeWorkspace} type="button">
+            <button className="cctv-report-workspace-back" onClick={() => void closeWorkspace()} type="button">
               <ArrowLeft size={18} /> Reports
             </button>
             <div className="cctv-report-workspace-heading">

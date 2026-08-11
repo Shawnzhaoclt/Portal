@@ -145,7 +145,7 @@ def build_portal_excel_export(
     row_count = len(rows)
     column_count = len(columns)
     workbook = Workbook()
-    workbook.properties.creator = "City of Charlotte Storm Water Services"
+    workbook.properties.creator = "Charlotte-Mecklenburg Storm Water Services"
     workbook.properties.title = report_title
     workbook.properties.subject = "Portal data export"
     workbook.properties.description = f"{report_title} export containing {row_count} records."

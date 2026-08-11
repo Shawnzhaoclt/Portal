@@ -10,6 +10,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { formatDateOnly, formatDateTime } from '../lib/dateTime'
+import { appConfirm } from '../components/messageDialogService'
 import {
   createHoliday,
   createHolidayCalendar,
@@ -196,7 +197,10 @@ export default function HolidayPanel() {
   }
 
   async function handleDeleteHoliday(holiday: HolidayEntry) {
-    if (!selectedCalendar || !window.confirm(`Delete ${holiday.holiday_name} from this calendar?`)) return
+    if (!selectedCalendar || !(await appConfirm(
+      `Delete ${holiday.holiday_name} from this calendar?`,
+      { title: 'Delete holiday', kind: 'danger', confirmLabel: 'Delete' },
+    ))) return
     await runAction(async () => {
       await deleteHoliday(selectedCalendar.calendar_id, holiday.holiday_id)
       await loadCalendars(selectedCalendar.calendar_id)
@@ -217,9 +221,10 @@ export default function HolidayPanel() {
   async function handleDeleteCalendar() {
     if (!selectedCalendar) return
     if (
-      !window.confirm(
+      !(await appConfirm(
         `Delete the ${selectedCalendar.calendar_year} holiday calendar and all ${detail?.holidays.length ?? 0} holidays? This cannot be undone.`,
-      )
+        { title: 'Delete holiday calendar', kind: 'danger', confirmLabel: 'Delete calendar' },
+      ))
     ) {
       return
     }

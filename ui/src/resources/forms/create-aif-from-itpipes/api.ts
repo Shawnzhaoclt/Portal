@@ -7,6 +7,7 @@ export type AifActions = {
   can_view: boolean
   can_edit: boolean
   can_submit: boolean
+  can_delete: boolean
   can_review: boolean
   can_reopen: boolean
 }
@@ -220,6 +221,13 @@ export function saveAif(record: AifRecord, fields: AifEditableFields, memo?: str
     method: 'PUT',
     body: JSON.stringify({ ...fields, record_revision: record.record_revision, memo: memo || null }),
   })
+}
+
+export function deleteAif(record: AifRecord) {
+  return portalRequestJson<{ ok: boolean; global_id: string; inspection_id: string; events_retained: boolean }>(
+    `${ROOT}/aifs/${encodeURIComponent(record.global_id)}`,
+    { method: 'DELETE', body: JSON.stringify({ record_revision: record.record_revision }) },
+  )
 }
 
 export function fetchAifReviewers() {
