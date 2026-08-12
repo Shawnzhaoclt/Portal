@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 import traceback
 from typing import Any
 
@@ -18,10 +19,11 @@ REQUIRED_FILES = (
     "clone_sqlserver_to_duckdb.json",
     "clone_spatial_data_warehouse_to_duckdb.py",
     "clone_spatial_data_warehouse_to_duckdb.json",
+    "export_arcgis_layer_to_parquet.py",
     "send_machine_online_heartbeat.ps1",
     "send_stm_risk_data_notification.ps1",
 )
-VALID_ACTIONS = {"check", "workflow", "refresh", "backup", "heartbeat"}
+VALID_ACTIONS = {"check", "workflow", "refresh", "backup", "heartbeat", "map_tiles"}
 MAX_RECENT_LOGS = 10
 
 
@@ -53,6 +55,72 @@ def _manager_configuration(path: Path) -> tuple[dict[str, Any], Path, Path]:
     return settings, scripts_directory, state_directory
 
 
+def _map_tiles_configuration(
+    settings: dict[str, Any],
+    manager_settings: Path,
+) -> tuple[Path, Path, Path]:
+    manager_base = manager_settings.resolve().parent
+    directory = _expand_path(str(settings.get("mapTilesDirectory") or "../map-tiles"), manager_base)
+    builder_value = str(settings.get("mapTilesBuilder") or "build_pmtiles_from_duckdb.py")
+    settings_value = str(settings.get("mapTilesSettingsFile") or "pmtiles.settings.json")
+    builder = _expand_path(builder_value, directory)
+    config = _expand_path(settings_value, directory)
+    return directory, builder, config
+
+
+def _map_tiles_missing_files(builder: Path, config: Path) -> list[str]:
+    candidates = [builder, builder.parent / "pmtiles_v3.py", config]
+    return [str(path) for path in candidates if not path.is_file()]
+
+
+def _expand_map_tiles_output(value: str, config: dict[str, Any], base: Path) -> Path:
+    shared_root = os.path.expandvars(os.path.expanduser(str(config.get("sharedDataRoot") or "")))
+    expanded = value.replace("${PORTAL_SHARED_DATA_ROOT}", shared_root)
+    return _expand_path(expanded, base)
+
+
+def _safe_map_tiles_summary(directory: Path, builder: Path, config_path: Path) -> dict[str, Any]:
+    config = _read_json(config_path)
+    defaults = config.get("defaults") if isinstance(config.get("defaults"), dict) else {}
+    progress_value = str(defaults.get("progressFile") or "").strip()
+    if progress_value:
+        progress_path = _expand_map_tiles_output(progress_value, config, config_path.parent)
+    else:
+        local_app_data = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+        progress_path = local_app_data / "PortalManager" / "map-tiles" / "progress.json"
+    try:
+        progress = _read_json(progress_path)
+    except RuntimeError:
+        progress = {}
+    tilesets: list[dict[str, Any]] = []
+    for item in config.get("tilesets", []):
+        if not isinstance(item, dict) or not bool(item.get("enabled", True)):
+            continue
+        output_value = str(item.get("output") or "").strip()
+        output = _expand_map_tiles_output(output_value, config, config_path.parent) if output_value else None
+        manifest = output.with_suffix(output.suffix + ".manifest.json") if output else None
+        tilesets.append(
+            {
+                "id": str(item.get("id") or ""),
+                "name": str(item.get("name") or item.get("id") or ""),
+                "output": str(output) if output else "",
+                "available": bool(output and output.is_file()),
+                "size_bytes": output.stat().st_size if output and output.is_file() else 0,
+                "manifest": str(manifest) if manifest and manifest.is_file() else "",
+            }
+        )
+    return {
+        "map_tiles_directory": str(directory),
+        "map_tiles_builder": str(builder),
+        "map_tiles_settings_file": str(config_path),
+        "map_tiles_progress_file": str(progress_path),
+        "map_tiles_progress": progress,
+        "map_tiles_tileset_count": len(tilesets),
+        "map_tiles_output_count": sum(1 for item in tilesets if item["available"]),
+        "map_tiles_outputs": tilesets,
+    }
+
+
 def _python_executable(settings: dict[str, Any]) -> str:
     configured = str(
         settings.get("sourceBackupPythonExecutable")
@@ -64,6 +132,24 @@ def _python_executable(settings: dict[str, Any]) -> str:
 
 def _timestamp() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def _populate_duration(run: dict[str, Any]) -> bool:
+    existing = run.get("duration_seconds")
+    if isinstance(existing, (int, float)) and not isinstance(existing, bool) and existing >= 0:
+        return False
+    started_value = str(run.get("started_at") or "").strip()
+    finished_value = str(run.get("finished_at") or "").strip()
+    if not started_value or not finished_value:
+        return False
+    try:
+        started = datetime.fromisoformat(started_value)
+        finished = datetime.fromisoformat(finished_value)
+        elapsed = (finished - started).total_seconds()
+    except (TypeError, ValueError):
+        return False
+    run["duration_seconds"] = round(max(0.0, elapsed), 3)
+    return True
 
 
 def _configured_environment_value(name: str) -> str:
@@ -124,10 +210,15 @@ def _read_state(state_directory: Path) -> dict[str, Any]:
         state = _read_json(state_path)
     except RuntimeError:
         return {}
+    changed = False
     if state.get("status") == "running" and not _process_is_running(int(state.get("pid") or 0)):
         state["status"] = "failed"
         state["finished_at"] = state.get("finished_at") or _timestamp()
         state["details"] = "The previous source-backup process ended without recording a final result."
+        changed = True
+    if _populate_duration(state):
+        changed = True
+    if changed:
         _write_json_replace(state_path, state)
     return state
 
@@ -206,9 +297,16 @@ def _safe_configuration_summary(scripts_directory: Path) -> dict[str, Any]:
 def status(manager_settings: Path) -> dict[str, Any]:
     settings, scripts_directory, state_directory = _manager_configuration(manager_settings)
     missing = [name for name in REQUIRED_FILES if not (scripts_directory / name).is_file()]
+    map_tiles_directory, map_tiles_builder, map_tiles_config = _map_tiles_configuration(
+        settings,
+        manager_settings,
+    )
+    map_tiles_missing = _map_tiles_missing_files(map_tiles_builder, map_tiles_config)
     result: dict[str, Any] = {
         "available": not missing,
         "missing_files": missing,
+        "map_tiles_available": not map_tiles_missing,
+        "map_tiles_missing_files": map_tiles_missing,
         "manager_settings_file": str(manager_settings.resolve()),
         "state_directory": str(state_directory),
         "log_directory": str(state_directory / "logs"),
@@ -222,7 +320,11 @@ def status(manager_settings: Path) -> dict[str, Any]:
         if isinstance(history.get("runs"), list):
             original_count = len(history["runs"])
             trimmed = _trim_history(state_directory, history)
-            if original_count != len(trimmed["runs"]):
+            history_changed = original_count != len(trimmed["runs"])
+            for run in trimmed["runs"]:
+                if isinstance(run, dict) and _populate_duration(run):
+                    history_changed = True
+            if history_changed:
                 _write_json_replace(history_path, trimmed)
             result["runs"] = trimmed["runs"]
     except RuntimeError:
@@ -231,6 +333,12 @@ def status(manager_settings: Path) -> dict[str, Any]:
         result.update(_safe_configuration_summary(scripts_directory))
     else:
         result["scripts_directory"] = str(scripts_directory)
+    if not map_tiles_missing:
+        result.update(_safe_map_tiles_summary(map_tiles_directory, map_tiles_builder, map_tiles_config))
+    else:
+        result["map_tiles_directory"] = str(map_tiles_directory)
+        result["map_tiles_builder"] = str(map_tiles_builder)
+        result["map_tiles_settings_file"] = str(map_tiles_config)
     return result
 
 
@@ -309,9 +417,22 @@ def run_action(manager_settings: Path, action: str) -> int:
         raise RuntimeError(f"Unsupported source-backup action: {action}")
     settings, scripts_directory, state_directory = _manager_configuration(manager_settings)
     missing = [name for name in REQUIRED_FILES if not (scripts_directory / name).is_file()]
-    if missing:
+    map_tiles_directory, map_tiles_builder, map_tiles_config = _map_tiles_configuration(
+        settings,
+        manager_settings,
+    )
+    map_tiles_missing = _map_tiles_missing_files(map_tiles_builder, map_tiles_config)
+    run_clock = datetime.now().astimezone()
+    backup_weekday = str(settings.get("sourceBackupWeekday") or "SAT").upper()
+    weekly_workflow_due = (
+        action == "workflow" and run_clock.strftime("%a").upper() == backup_weekday
+    )
+    if action != "map_tiles" and missing:
         raise RuntimeError("Required source-backup files are missing: " + ", ".join(missing))
-    _hydrate_source_credentials(scripts_directory)
+    if (action in {"check", "map_tiles"} or weekly_workflow_due) and map_tiles_missing:
+        raise RuntimeError("Required PMTiles files are missing: " + ", ".join(map_tiles_missing))
+    if action != "map_tiles":
+        _hydrate_source_credentials(scripts_directory)
 
     state_directory.mkdir(parents=True, exist_ok=True)
     lock_path = state_directory / "run.lock"
@@ -326,8 +447,9 @@ def run_action(manager_settings: Path, action: str) -> int:
     os.write(lock_fd, str(os.getpid()).encode("ascii"))
     os.close(lock_fd)
 
-    started_at = _timestamp()
-    run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+    started_monotonic = time.perf_counter()
+    started_at = run_clock.isoformat(timespec="seconds")
+    run_id = run_clock.strftime("%Y%m%dT%H%M%S")
     log_directory = state_directory / "logs"
     log_directory.mkdir(parents=True, exist_ok=True)
     log_path = log_directory / f"source-backup-{run_id}-{action}.log"
@@ -356,7 +478,30 @@ def run_action(manager_settings: Path, action: str) -> int:
                     log_file,
                     scripts_directory,
                 )
-                details = "Configuration and registered source manifest are valid."
+                _run_logged(
+                    [
+                        python_executable,
+                        str(map_tiles_builder),
+                        "--config",
+                        str(map_tiles_config),
+                        "--check",
+                    ],
+                    log_file,
+                    map_tiles_directory,
+                )
+                details = "Source and PMTiles configuration are valid."
+            elif action == "map_tiles":
+                _run_logged(
+                    [
+                        python_executable,
+                        str(map_tiles_builder),
+                        "--config",
+                        str(map_tiles_config),
+                    ],
+                    log_file,
+                    map_tiles_directory,
+                )
+                details = "Portal PMTiles archives were generated successfully."
             elif action == "backup":
                 _run_logged(
                     [python_executable, str(scripts_directory / "backup_duckdb_files.py")],
@@ -400,9 +545,7 @@ def run_action(manager_settings: Path, action: str) -> int:
                 )
                 details = "Machine heartbeat notification was sent successfully."
             else:
-                backup_weekday = str(settings.get("sourceBackupWeekday") or "SAT").upper()
-                today = datetime.now().strftime("%a").upper()
-                backup_performed = today == backup_weekday
+                backup_performed = weekly_workflow_due
                 if backup_performed:
                     _run_logged(
                         [python_executable, str(scripts_directory / "backup_duckdb_files.py")],
@@ -426,10 +569,20 @@ def run_action(manager_settings: Path, action: str) -> int:
                         scripts_directory,
                     )
                     spatial_refresh_performed = True
+                    _run_logged(
+                        [
+                            python_executable,
+                            str(map_tiles_builder),
+                            "--config",
+                            str(map_tiles_config),
+                        ],
+                        log_file,
+                        map_tiles_directory,
+                    )
                 if spatial_refresh_performed:
                     details = (
                         "Backup, SQL Server source refresh, and Spatial Data Warehouse refresh "
-                        "completed successfully."
+                        "completed successfully. Portal PMTiles archives were then rebuilt and validated."
                     )
                 else:
                     details = (
@@ -453,6 +606,7 @@ def run_action(manager_settings: Path, action: str) -> int:
             pass
         state.update(status="failed", details=details, finished_at=_timestamp())
     finally:
+        state["duration_seconds"] = round(max(0.0, time.perf_counter() - started_monotonic), 3)
         _write_json_replace(state_directory / "status.json", state)
         _append_history(state_directory, state)
         lock_path.unlink(missing_ok=True)

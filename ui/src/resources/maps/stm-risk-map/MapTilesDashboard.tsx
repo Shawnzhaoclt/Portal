@@ -100,14 +100,7 @@ type DrawTool = "select" | "polygon" | "circle" | "rectangle";
 type DrawShape = Exclude<DrawTool, "select">;
 type BasemapId =
   | "cltex"
-  | "mecklenburg-aerial-2025"
-  | "usgs-topo"
-  | "usgs-imagery-topo"
-  | "nc-onemap-ortho-2010"
-  | "nc-onemap-ortho-2012-2015"
-  | "nc-onemap-ortho-2016-2019"
-  | "nc-onemap-ortho-2020-2023"
-  | "nc-onemap-ortho-2024-2027";
+  | "mecklenburg-aerial-2025";
 
 type BasemapOption = {
   id: BasemapId;
@@ -120,17 +113,6 @@ type BasemapOption = {
   tileSize?: number;
   maxzoom?: number;
   attribution?: string;
-};
-
-type ExternalOverlayOption = {
-  id: string;
-  name: string;
-  description: string;
-  group: string;
-  sourceId: string;
-  layerId: string;
-  mapServerLayerId: number;
-  color: string;
 };
 
 type LngLatPair = [number, number];
@@ -293,6 +275,13 @@ const DEFAULT_RISK_HISTOGRAM_LAYER_SELECTION: RiskLayerSelection = {
 };
 const TERRAIN_LOCAL_MIN_ZOOM = 10;
 const TERRAIN_BOUNDS_BUFFER_DEGREES = 0.04;
+const BUILDING_3D_LAYER_ID = "portal-runtime-buildings-3d";
+const BUILDING_3D_SOURCE_LAYER = "buildings_py";
+// Extruding the countywide building inventory below neighborhood scale can
+// overwhelm the WebView GPU. Keep broader 3D views terrain-only and introduce
+// the one-level footprints when individual buildings are useful.
+const BUILDING_3D_MIN_ZOOM = 15;
+const LEGACY_PMTILES_SOURCE_ID = "planning_project";
 const DUCKDB_GEOJSON_SOURCE_CONFIGS = [
   { sourceLayer: "culverts", datasetId: "culverts", sourceId: "duckdb-geojson-culverts", limit: 25_000 },
   { sourceLayer: "cw_inspections_all_pt", datasetId: "cw_inspections_all_pt", sourceId: "duckdb-geojson-cw-inspections-all-pt", limit: 25_000 },
@@ -305,9 +294,36 @@ const DUCKDB_GEOJSON_SOURCE_CONFIGS = [
   { sourceLayer: "itpipes_defects_top_risk_pt", datasetId: "itpipes_defects_top_risk_pt", sourceId: "duckdb-geojson-itpipes-defects-top-risk-pt", limit: 25_000 },
   { sourceLayer: "itpipes_defects_pt", datasetId: "itpipes_defects_pt", sourceId: "duckdb-geojson-itpipes-defects-pt", limit: 50_000 },
   { sourceLayer: "itpipes_defects_ln", datasetId: "itpipes_defects_ln", sourceId: "duckdb-geojson-itpipes-defects-ln", limit: 25_000 },
-  { sourceLayer: "stormstructure_pt", datasetId: "stormstructure_pt", sourceId: "duckdb-geojson-stormstructure-pt", limit: 50_000 },
-  { sourceLayer: "stormpipes_ln", datasetId: "stormpipes_ln", sourceId: "duckdb-geojson-stormpipes-ln", limit: 50_000 },
-  { sourceLayer: "stormdrainage_ln", datasetId: "stormdrainage_ln", sourceId: "duckdb-geojson-stormdrainage-ln", limit: 50_000 },
+  {
+    sourceLayer: "priority_pipes_proactive_inv_pv_cw_ln",
+    datasetId: "priority_pipes_proactive_inv_pv_cw_ln",
+    sourceId: "duckdb-geojson-priority-pipes-proactive-inv-pv-cw-ln",
+    limit: 25_000,
+  },
+  {
+    sourceLayer: "proactive_inv_pv_cw_ln",
+    datasetId: "proactive_inv_pv_cw_ln",
+    sourceId: "duckdb-geojson-proactive-inv-pv-cw-ln",
+    limit: 25_000,
+  },
+  {
+    sourceLayer: "rr_sc_cwonly_all_unassigned_allrisk_0101_pt",
+    datasetId: "rr_sc_cwonly_all_unassigned_allrisk_0101_pt",
+    sourceId: "duckdb-geojson-rr-sc-cwonly-all-unassigned-allrisk-0101-pt",
+    limit: 25_000,
+  },
+  {
+    sourceLayer: "rr_sc_cwonly_everything_allrisk_0101_pt",
+    datasetId: "rr_sc_cwonly_everything_allrisk_0101_pt",
+    sourceId: "duckdb-geojson-rr-sc-cwonly-everything-allrisk-0101-pt",
+    limit: 25_000,
+  },
+  {
+    sourceLayer: "top_deduplicated_wo_filtered_risk_defects_ns_pt",
+    datasetId: "top_deduplicated_wo_filtered_risk_defects_ns_pt",
+    sourceId: "duckdb-geojson-top-deduplicated-wo-filtered-risk-defects-ns-pt",
+    limit: 25_000,
+  },
 ] as const;
 const DUCKDB_GEOJSON_CONFIG_BY_SOURCE_LAYER: ReadonlyMap<string, (typeof DUCKDB_GEOJSON_SOURCE_CONFIGS)[number]> = new Map(
   DUCKDB_GEOJSON_SOURCE_CONFIGS.map((config) => [config.sourceLayer, config]),
@@ -355,24 +371,12 @@ const SEARCH_HIGHLIGHT_LAYER_IDS = [
   "asset-search-highlight-point",
 ] as const;
 const DEFAULT_OPEN_LAYER_GROUPS = new Set(["risk data", "critical facilities", "storm water inventory"]);
-const USGS_ATTRIBUTION = "USGS The National Map";
-const NC_ONEMAP_ATTRIBUTION = "NC OneMap / State of North Carolina";
-const NC_ONEMAP_IMAGERY_SERVICE_ROOT = clientSetting("externalServices", "maps", "ncOneMapImageryServiceRoot");
-const NC_ONEMAP_ACQUISITION_MAPSERVER = clientSetting("externalServices", "maps", "ncOneMapAcquisitionMapServer");
 const AERIAL_2025_EXPORT_URL = clientSetting("externalServices", "maps", "aerial2025ExportUrl");
-const USGS_TOPO_TILE_URL = clientSetting("externalServices", "maps", "usgsTopoTileUrl");
-const USGS_IMAGERY_TOPO_TILE_URL = clientSetting("externalServices", "maps", "usgsImageryTopoTileUrl");
 const GOOGLE_STREET_VIEW_URL_TEMPLATE = clientSetting("externalServices", "maps", "googleStreetViewUrlTemplate");
 const MAP_PAGE_QUERY_PARAM = "map";
 const THUMBNAIL_VIEW_QUERY_PARAM = "thumbnailView";
 const THUMBNAIL_VIEW_PADDING = 92;
 const THUMBNAIL_VIEW_BOUNDS_EXPANSION = 0.14;
-
-function ncOneMapImageServerTiles(serviceName: string): string[] {
-  return [
-    `${NC_ONEMAP_IMAGERY_SERVICE_ROOT}/${serviceName}/ImageServer/exportImage?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=jpgpng&transparent=false&f=image`,
-  ];
-}
 
 function selectedMapIdFromUrl(): string {
   if (typeof window === "undefined") {
@@ -443,121 +447,6 @@ const BASEMAP_OPTIONS: BasemapOption[] = [
     maxzoom: 20,
     attribution: "MeckCoGIS",
   },
-  {
-    id: "usgs-topo",
-    name: "USGS Topo",
-    description: "National topographic map",
-    preview: "linear-gradient(135deg, #f1ead8 0%, #d3e0bd 42%, #8ab4ca 43%, #f7f2e7 100%)",
-    sourceId: "basemap-usgs-topo",
-    layerId: "basemap-usgs-topo",
-    tiles: [
-      USGS_TOPO_TILE_URL,
-    ],
-    tileSize: 256,
-    maxzoom: 16,
-    attribution: USGS_ATTRIBUTION,
-  },
-  {
-    id: "usgs-imagery-topo",
-    name: "USGS Imagery + Topo",
-    description: "Imagery with topo reference",
-    preview: "linear-gradient(135deg, #26351f 0%, #738463 38%, #d9ddc4 39%, #587082 100%)",
-    sourceId: "basemap-usgs-imagery-topo",
-    layerId: "basemap-usgs-imagery-topo",
-    tiles: [
-      USGS_IMAGERY_TOPO_TILE_URL,
-    ],
-    tileSize: 256,
-    maxzoom: 16,
-    attribution: USGS_ATTRIBUTION,
-  },
-  {
-    id: "nc-onemap-ortho-2010",
-    name: "NC OneMap Ortho 2010",
-    description: "Statewide 6-inch orthoimagery",
-    preview: "linear-gradient(135deg, #31402f 0%, #8c946f 43%, #d1c2a0 44%, #60797b 100%)",
-    sourceId: "basemap-nc-onemap-ortho-2010",
-    layerId: "basemap-nc-onemap-ortho-2010",
-    tiles: ncOneMapImageServerTiles("Orthoimagery_2010"),
-    tileSize: 512,
-    maxzoom: 20,
-    attribution: NC_ONEMAP_ATTRIBUTION,
-  },
-  {
-    id: "nc-onemap-ortho-2012-2015",
-    name: "NC OneMap Ortho 2012-2015",
-    description: "NC orthoimagery collection cycle",
-    preview: "linear-gradient(135deg, #2f432e 0%, #75855d 41%, #cab98f 42%, #50696f 100%)",
-    sourceId: "basemap-nc-onemap-ortho-2012-2015",
-    layerId: "basemap-nc-onemap-ortho-2012-2015",
-    tiles: ncOneMapImageServerTiles("Orthoimagery_2012_2015"),
-    tileSize: 512,
-    maxzoom: 20,
-    attribution: NC_ONEMAP_ATTRIBUTION,
-  },
-  {
-    id: "nc-onemap-ortho-2016-2019",
-    name: "NC OneMap Ortho 2016-2019",
-    description: "NC orthoimagery collection cycle",
-    preview: "linear-gradient(135deg, #263924 0%, #697c54 40%, #bfae8a 41%, #405f68 100%)",
-    sourceId: "basemap-nc-onemap-ortho-2016-2019",
-    layerId: "basemap-nc-onemap-ortho-2016-2019",
-    tiles: ncOneMapImageServerTiles("Orthoimagery_2016_2019"),
-    tileSize: 512,
-    maxzoom: 20,
-    attribution: NC_ONEMAP_ATTRIBUTION,
-  },
-  {
-    id: "nc-onemap-ortho-2020-2023",
-    name: "NC OneMap Ortho 2020-2023",
-    description: "NC orthoimagery collection cycle",
-    preview: "linear-gradient(135deg, #23361f 0%, #6f8156 38%, #d3c29c 39%, #4c6970 100%)",
-    sourceId: "basemap-nc-onemap-ortho-2020-2023",
-    layerId: "basemap-nc-onemap-ortho-2020-2023",
-    tiles: ncOneMapImageServerTiles("Orthoimagery_2020_2023"),
-    tileSize: 512,
-    maxzoom: 20,
-    attribution: NC_ONEMAP_ATTRIBUTION,
-  },
-  {
-    id: "nc-onemap-ortho-2024-2027",
-    name: "NC OneMap Ortho 2024-2027",
-    description: "Current cycle; includes released 2025 imagery",
-    preview: "linear-gradient(135deg, #21351f 0%, #64784f 37%, #c6b68f 38%, #3d616a 100%)",
-    sourceId: "basemap-nc-onemap-ortho-2024-2027",
-    layerId: "basemap-nc-onemap-ortho-2024-2027",
-    tiles: ncOneMapImageServerTiles("Orthoimagery_20242027"),
-    tileSize: 512,
-    maxzoom: 20,
-    attribution: NC_ONEMAP_ATTRIBUTION,
-  },
-];
-
-const NC_ONEMAP_ACQUISITION_OVERLAYS: ExternalOverlayOption[] = [
-  {
-    id: "nc-onemap-flight-lines-2010",
-    name: "Flight Lines - 2010 Imagery",
-    description: "NC OneMap acquisition flight lines",
-    group: "NC OneMap Ortho Acquisition",
-    sourceId: "overlay-nc-onemap-flight-lines-2010",
-    layerId: "overlay-nc-onemap-flight-lines-2010",
-    mapServerLayerId: 2,
-    color: "#8f8f8f",
-  },
-  ...Array.from({ length: 14 }, (_, index) => {
-    const year = 2012 + index;
-    const layerId = 3 + index;
-    return {
-      id: `nc-onemap-ortho-seam-lines-${year}`,
-      name: `Ortho Seam Lines - ${year} Imagery`,
-      description: "NC OneMap imagery seam lines",
-      group: "NC OneMap Ortho Acquisition",
-      sourceId: `overlay-nc-onemap-ortho-seam-lines-${year}`,
-      layerId: `overlay-nc-onemap-ortho-seam-lines-${year}`,
-      mapServerLayerId: layerId,
-      color: year >= 2024 ? "#1376d5" : "#71d7ff",
-    };
-  }),
 ];
 
 type LayerTreeEntry = { type: "group"; node: LayerTreeNode } | { type: "layer"; layer: StyleLayer };
@@ -2230,15 +2119,12 @@ export default function App() {
         if (cancelled) {
           return;
         }
-        const view = viewForThumbnailCapture(viewFromManifest(manifest) || (await viewFromPmtiles(style)), manifest);
+        rewriteDuckDbGeoJsonInventoryLayers(style);
+        ensureBuildingExtrusionStyleLayer(style, map3dEnabledRef.current);
         if (cancelled) {
           return;
         }
-        if (await duckDbGeoJsonAvailable(view.bounds)) {
-          rewriteDuckDbGeoJsonInventoryLayers(style);
-        } else {
-          console.warn("DuckDB GeoJSON is unavailable; keeping PMTiles sources for operational layers.");
-        }
+        const view = viewForThumbnailCapture(viewFromManifest(manifest) || (await viewFromPmtiles(style)), manifest);
         if (cancelled) {
           return;
         }
@@ -2257,10 +2143,8 @@ export default function App() {
         activeStyleRef.current = style;
         setActiveStyle(style);
         setActiveView(view);
-        const externalOverlays = externalOverlayLayerRecords();
         const nextLayerVisibility = {
           ...Object.fromEntries(style.layers.map((layer) => [layer.id, layerDefaultVisible(layer as StyleLayer)])),
-          ...Object.fromEntries(externalOverlays.map((layer) => [layer.id, layerDefaultVisible(layer)])),
         };
         setLayerRecords(operationalLayersFromStyle(style).reverse());
         layerVisibilityRef.current = nextLayerVisibility;
@@ -2896,11 +2780,23 @@ export default function App() {
     } else {
       stopMiddleMouseRotateRef.current?.();
     }
+    if (!nextEnabled) {
+      applyBuildingExtrusionsToMap(mapRef.current, false);
+    }
     applyTerrainToMap(mapRef.current, activeStyleRef.current, nextEnabled);
     mapRef.current?.easeTo({
       pitch: nextEnabled ? 55 : 0,
       duration: 260,
     });
+    if (nextEnabled) {
+      // Let terrain initialize and the pitch transition complete before adding
+      // countywide building geometry to the render pass.
+      window.setTimeout(() => {
+        if (map3dEnabledRef.current) {
+          applyBuildingExtrusionsToMap(mapRef.current, true);
+        }
+      }, 320);
+    }
   };
 
   const changeMapViewMode = (mode: MapViewMode) => {
@@ -2909,6 +2805,7 @@ export default function App() {
       setMap3dEnabled(false);
       stopMiddleMouseRotateRef.current?.();
       applyTerrainToMap(mapRef.current, activeStyleRef.current, false);
+      applyBuildingExtrusionsToMap(mapRef.current, false);
       mapRef.current?.easeTo({ pitch: 0, duration: 260 });
     }
     setMapViewMode(mode);
@@ -4349,8 +4246,8 @@ function MapToolStrip({
         <MapToolButton active={mapViewMenuOpen} label="Select map view mode" onClick={onMapViewMenuToggle}>
           <KeplerSplitIcon className="h-[18px] w-[18px]" />
         </MapToolButton>
-        <MapToolButton active={map3dActive} label={map3dActive ? "Disable 3D Map" : "3D Map"} onClick={onMap3dToggle}>
-          <KeplerCubeIcon className="h-[18px] w-[18px]" />
+        <MapToolButton active={map3dActive} label={map3dActive ? "Switch to 2D" : "Switch to 3D"} onClick={onMap3dToggle}>
+          <span className="text-[11px] font-bold leading-none">{map3dActive ? "2D" : "3D"}</span>
         </MapToolButton>
         <MapToolButton active={drawActive} label="Draw on map" onClick={onDrawToggle}>
           <KeplerDrawIcon className="h-[18px] w-[18px]" />
@@ -4531,20 +4428,6 @@ function KeplerDrawIcon({ className = "" }: { className?: string }) {
       <circle cx="14.65" cy="11.45" r="0.95" fill="currentColor" />
       <circle cx="10.7" cy="14.2" r="0.95" fill="currentColor" />
       <circle cx="5.25" cy="12.85" r="0.95" fill="currentColor" />
-    </svg>
-  );
-}
-
-function KeplerCubeIcon({ className = "" }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 18 18" aria-hidden="true" fill="none">
-      <path
-        d="M9 2.75 14.2 5.7v6.55L9 15.25l-5.2-3V5.7L9 2.75Z"
-        stroke="currentColor"
-        strokeWidth="1.45"
-        strokeLinejoin="round"
-      />
-      <path d="M3.8 5.7 9 8.7l5.2-3M9 8.7v6.55" stroke="currentColor" strokeWidth="1.45" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -6087,19 +5970,124 @@ function applyTerrainToMap(map: MapLibreMap | null, style: MapStyle | null, enab
   }
   const terrain = terrainMetadataFromStyle(style);
   const terrainMap = map as MapLibreMap & {
+    getTerrain?: () => { source: string; exaggeration?: number } | null;
     setTerrain?: (terrain: { source: string; exaggeration?: number } | null) => void;
   };
   if (!terrainMap.setTerrain) {
     return;
   }
+  const activeTerrain = terrainMap.getTerrain?.() || null;
   if (!enabled || !terrain || !map.getSource(terrain.source) || !terrainAllowedForCurrentView(map, terrain)) {
-    terrainMap.setTerrain(null);
+    if (activeTerrain) {
+      terrainMap.setTerrain(null);
+    }
+    return;
+  }
+  if (
+    activeTerrain?.source === terrain.source
+    && Number(activeTerrain.exaggeration ?? 1) === terrain.exaggeration
+  ) {
     return;
   }
   terrainMap.setTerrain({
     source: terrain.source,
     exaggeration: terrain.exaggeration,
   });
+}
+
+function applyBuildingExtrusionsToMap(map: MapLibreMap | null, enabled: boolean): void {
+  if (!map) {
+    return;
+  }
+
+  const existingLayer = map.getLayer(BUILDING_3D_LAYER_ID);
+  if (existingLayer) {
+    const desiredVisibility = enabled ? "visible" : "none";
+    if (map.getLayoutProperty(BUILDING_3D_LAYER_ID, "visibility") !== desiredVisibility) {
+      map.setLayoutProperty(BUILDING_3D_LAYER_ID, "visibility", desiredVisibility);
+    }
+    return;
+  }
+  if (!enabled) {
+    return;
+  }
+
+  const style = map.getStyle() as MapStyle;
+  ensureBuildingExtrusionStyleLayer(style, true);
+  const extrusionLayer = (style.layers as StyleLayer[]).find((layer) => layer.id === BUILDING_3D_LAYER_ID);
+  if (!extrusionLayer) {
+    return;
+  }
+
+  const beforeLayerId = buildingExtrusionBeforeLayerId((map.getStyle().layers || []) as StyleLayer[]);
+  if (beforeLayerId) {
+    map.addLayer(extrusionLayer as never, beforeLayerId);
+  } else {
+    map.addLayer(extrusionLayer as never);
+  }
+}
+
+function ensureBuildingExtrusionStyleLayer(style: MapStyle, enabled: boolean): void {
+  const styleLayers = style.layers as StyleLayer[];
+  const existingLayer = styleLayers.find((layer) => layer.id === BUILDING_3D_LAYER_ID);
+  if (existingLayer) {
+    existingLayer.layout = {
+      ...(existingLayer.layout || {}),
+      visibility: enabled ? "visible" : "none",
+    };
+    return;
+  }
+
+  const buildingFootprintLayer = styleLayers.find((layer) => {
+    return String(layer["source-layer"] || layer.metadata?.tile_source_layer || "").toLowerCase()
+      === BUILDING_3D_SOURCE_LAYER;
+  });
+  const sourceId = String((buildingFootprintLayer as (StyleLayer & { source?: string }) | undefined)?.source || "");
+  if (!sourceId || !style.sources?.[sourceId]) {
+    return;
+  }
+
+  const extrusionLayer = {
+    id: BUILDING_3D_LAYER_ID,
+    type: "fill-extrusion",
+    source: sourceId,
+    "source-layer": BUILDING_3D_SOURCE_LAYER,
+    minzoom: BUILDING_3D_MIN_ZOOM,
+    layout: {
+      visibility: enabled ? "visible" : "none",
+    },
+    paint: {
+      "fill-extrusion-base": 0,
+      "fill-extrusion-height": 3,
+      "fill-extrusion-color": "#8da2b2",
+      "fill-extrusion-opacity": 0.78,
+      "fill-extrusion-vertical-gradient": false,
+    },
+    metadata: {
+      runtime_helper: true,
+      tile_source_layer: BUILDING_3D_SOURCE_LAYER,
+      description: "One-level building footprints extruded to an average height of 3 meters at zoom 15 and above.",
+    },
+  } as StyleLayer;
+
+  const beforeLayerId = buildingExtrusionBeforeLayerId(styleLayers);
+  const beforeLayerIndex = beforeLayerId ? styleLayers.findIndex((layer) => layer.id === beforeLayerId) : -1;
+  if (beforeLayerIndex >= 0) {
+    styleLayers.splice(beforeLayerIndex, 0, extrusionLayer);
+  } else {
+    styleLayers.push(extrusionLayer);
+  }
+}
+
+function buildingExtrusionBeforeLayerId(styleLayers: StyleLayer[]): string | undefined {
+  const obscuringLayerTypes = new Set(["background", "fill", "fill-extrusion", "hillshade", "raster"]);
+  let lastObscuringLayerIndex = -1;
+  styleLayers.forEach((layer, index) => {
+    if (layer.id !== BUILDING_3D_LAYER_ID && obscuringLayerTypes.has(layer.type)) {
+      lastObscuringLayerIndex = index;
+    }
+  });
+  return styleLayers[lastObscuringLayerIndex + 1]?.id;
 }
 
 function terrainMetadataFromStyle(
@@ -6174,7 +6162,6 @@ function applyBasemapSelectionToMap(map: MapLibreMap | null, basemapId: BasemapI
     return;
   }
   ensureSelectableBasemapLayers(map);
-  ensureExternalOverlayLayers(map);
   ((map.getStyle().layers || []) as StyleLayer[]).forEach((layer) => {
     const layerBasemapId = basemapIdForLayer(layer);
     if (!layerBasemapId || !map.getLayer(layer.id)) {
@@ -6225,70 +6212,6 @@ function ensureSelectableBasemapLayers(map: MapLibreMap): void {
       }
     }
   });
-}
-
-function ensureExternalOverlayLayers(map: MapLibreMap): void {
-  if (!map.isStyleLoaded()) {
-    return;
-  }
-  NC_ONEMAP_ACQUISITION_OVERLAYS.forEach((option) => {
-    if (!map.getSource(option.sourceId)) {
-      map.addSource(option.sourceId, {
-        type: "raster",
-        tiles: [
-          `${NC_ONEMAP_ACQUISITION_MAPSERVER}/export?bbox={bbox-epsg-3857}&bboxSR=3857&imageSR=3857&size=512,512&format=png32&transparent=true&layers=show:${option.mapServerLayerId}&f=image`,
-        ],
-        tileSize: 512,
-        maxzoom: 20,
-        attribution: NC_ONEMAP_ATTRIBUTION,
-      });
-    }
-    if (!map.getLayer(option.layerId)) {
-      map.addLayer({
-        id: option.layerId,
-        type: "raster",
-        source: option.sourceId,
-        layout: {
-          visibility: "none",
-        },
-        paint: {
-          "raster-opacity": 0.85,
-        },
-        metadata: {
-          external_overlay_service: true,
-          aprx_layer: `${option.group}\\${option.name}`,
-          parent_group: option.group,
-          tile_source_layer: option.name,
-          legend_color: option.color,
-          service_type: "arcgis_mapserver_export",
-          source_url: `${NC_ONEMAP_ACQUISITION_MAPSERVER}/${option.mapServerLayerId}`,
-        },
-      } as never);
-    }
-  });
-}
-
-function externalOverlayLayerRecords(): StyleLayer[] {
-  return NC_ONEMAP_ACQUISITION_OVERLAYS.map((option) => ({
-    id: option.layerId,
-    type: "raster",
-    source: option.sourceId,
-    layout: {
-      visibility: "none",
-    },
-    paint: {
-      "raster-opacity": 0.85,
-    },
-    metadata: {
-      external_overlay_service: true,
-      aprx_layer: `${option.group}\\${option.name}`,
-      parent_group: option.group,
-      tile_source_layer: option.name,
-      legend_color: option.color,
-      service_type: "arcgis_mapserver_export",
-      source_url: `${NC_ONEMAP_ACQUISITION_MAPSERVER}/${option.mapServerLayerId}`,
-    },
-  }) as StyleLayer);
 }
 
 function firstOperationalStyleLayerId(layers: StyleLayer[]): string | undefined {
@@ -6623,17 +6546,6 @@ function emptyDuckDbGeoJsonFeatureCollection(): DuckDbGeoJsonFeatureCollection {
   };
 }
 
-async function duckDbGeoJsonAvailable(bounds?: Bounds): Promise<boolean> {
-  const probeBounds = bounds || [-81.1, 35.0, -80.55, 35.55];
-  try {
-    await fetchDuckDbGeoJson(DUCKDB_GEOJSON_SOURCE_CONFIGS[0].datasetId, probeBounds, 1);
-    return true;
-  } catch (error) {
-    console.warn("DuckDB GeoJSON availability probe failed.", error);
-    return false;
-  }
-}
-
 function rewriteDuckDbGeoJsonInventoryLayers(style: MapStyle): void {
   style.sources ||= {};
   DUCKDB_GEOJSON_SOURCE_CONFIGS.forEach((config) => {
@@ -6647,7 +6559,7 @@ function rewriteDuckDbGeoJsonInventoryLayers(style: MapStyle): void {
   (style.layers as StyleLayer[]).forEach((layer) => {
     const sourceLayer = String(layer["source-layer"] || layer.metadata?.tile_source_layer || "");
     const config = DUCKDB_GEOJSON_CONFIG_BY_SOURCE_LAYER.get(sourceLayer);
-    if (!config || !isDuckDbGeoJsonReplacementLayer(layer)) {
+    if (!config) {
       return;
     }
     layer.metadata = {
@@ -6659,21 +6571,13 @@ function rewriteDuckDbGeoJsonInventoryLayers(style: MapStyle): void {
     (layer as StyleLayer & { source?: string }).source = config.sourceId;
     delete (layer as StyleLayer & { "source-layer"?: string })["source-layer"];
   });
-}
 
-function isDuckDbGeoJsonReplacementLayer(layer: StyleLayer): boolean {
-  const aprxLayer = String(layer.metadata?.aprx_layer || "");
-  return (
-    aprxLayer.startsWith("Storm Water Inventory\\Culverts") ||
-    aprxLayer.startsWith("Storm Water Inventory\\Storm Structures") ||
-    aprxLayer.startsWith("Storm Water Inventory\\Storm Pipes") ||
-    aprxLayer.startsWith("Storm Water Inventory\\Storm Channels") ||
-    aprxLayer.startsWith("Risk Data\\Cityworks Inspections - Unassigned") ||
-    aprxLayer.startsWith("Risk Data\\Cityworks Inspections - All") ||
-    aprxLayer.startsWith("Risk Data\\ITPipes - Top Risk Defects") ||
-    aprxLayer.startsWith("Risk Data\\ITPipes - All Defects - Point") ||
-    aprxLayer.startsWith("Risk Data\\ITPipes - All Defects - Continuous")
+  const legacySourceStillUsed = (style.layers as StyleLayer[]).some(
+    (layer) => (layer as StyleLayer & { source?: string }).source === LEGACY_PMTILES_SOURCE_ID,
   );
+  if (!legacySourceStillUsed) {
+    delete style.sources[LEGACY_PMTILES_SOURCE_ID];
+  }
 }
 
 function normalizeInitialVisibility(style: MapStyle, basemapVisible: boolean, labelsVisible: boolean): void {
@@ -6710,7 +6614,11 @@ function isLayerManagerHiddenLayer(layer: StyleLayer): boolean {
 }
 
 function isRuntimeHelperLayer(layer: StyleLayer): boolean {
-  return layer.id.startsWith(`${DRAW_SOURCE_ID}-`) || layer.id.startsWith(`${SEARCH_HIGHLIGHT_SOURCE_ID}-`);
+  return (
+    layer.metadata?.runtime_helper === true
+    || layer.id.startsWith(`${DRAW_SOURCE_ID}-`)
+    || layer.id.startsWith(`${SEARCH_HIGHLIGHT_SOURCE_ID}-`)
+  );
 }
 
 function isTemporalOverlayLayer(layer: StyleLayer): boolean {

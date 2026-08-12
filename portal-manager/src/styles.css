@@ -304,6 +304,13 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .source-schedule-help { flex-basis: 100%; color: #687f96; font-size: 11px; text-align: right; }
 .text-button { border: 0; background: transparent; color: #16548d; font-weight: 650; text-decoration: underline; }
 .source-backup-actions .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.status.compact-status.map-tiles-running-status { min-height: 72px; height: 72px; }
+.map-tiles-build-progress { display: grid; width: min(760px, 62vw); min-width: 360px; gap: 4px; }
+.map-tiles-build-progress > div { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.map-tiles-build-progress strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.map-tiles-build-progress span, .map-tiles-build-progress small { color: #5d7186; font-size: 11px; white-space: nowrap; }
+.map-tiles-build-progress progress { width: 100%; height: 9px; accent-color: #23679f; }
+.map-tiles-build-progress small { overflow: hidden; text-overflow: ellipsis; }
 .source-backup-schedules { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
 .source-backup-schedules .retention-controls { grid-template-columns: 105px 118px 118px minmax(0, 1fr); min-width: 0; margin-top: 0; }
 .source-backup-schedules .retention-schedule-action { align-self: end; position: relative; top: -4px; min-width: 0; gap: 6px; flex-wrap: nowrap; white-space: nowrap; }
@@ -320,6 +327,11 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .source-backup-tables .maintenance-table { min-height: 0; margin-top: 8px; }
 .source-backup-tables .table-scroll { min-height: 0; overflow: auto; }
 .source-backup-tables td { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.source-runs-table th:nth-child(1), .source-runs-table td:nth-child(1) { width: 24%; }
+.source-runs-table th:nth-child(2), .source-runs-table td:nth-child(2) { width: 13%; }
+.source-runs-table th:nth-child(3), .source-runs-table td:nth-child(3) { width: 13%; }
+.source-runs-table th:nth-child(4), .source-runs-table td:nth-child(4) { width: 15%; white-space: nowrap; }
+.source-runs-table th:last-child, .source-runs-table td:last-child { width: 35%; text-align: left; }
 .source-archives-table th:first-child, .source-archives-table td:first-child { width: 30%; }
 .source-archives-table th:nth-child(2), .source-archives-table td:nth-child(2) { width: 52%; text-align: left; }
 .source-archives-table th:last-child, .source-archives-table td:last-child { width: 18%; text-align: right; }
@@ -351,6 +363,8 @@ td[data-status="Failed"] { color: #a8211a; font-weight: 700; }
 .table-focused-workspace .activity-pagination { min-height: 46px; padding: 7px 10px; }
 
 @media (max-width: 1150px) {
+  .status.compact-status.map-tiles-running-status { height: auto; min-height: 90px; flex-wrap: wrap; }
+  .map-tiles-build-progress { width: 100%; min-width: 0; }
   .repository-bootstrap { grid-template-columns: 1fr; }
   .repository-location-panel { grid-template-columns: 1fr; }
   .repository-health-grid { grid-template-columns: 1fr; }

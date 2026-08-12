@@ -1,0 +1,642 @@
+{
+  "Level 19/Interstates:5/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 18/Interstates:3/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 12/Interstates:6/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 13/Interstates:2/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 14/Interstates:8/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 15/Interstates:4/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 16/Interstates:7/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 17/Interstates:1/Thoroughfares": {
+    "x": 0,
+    "y": 0,
+    "width": 58,
+    "height": 64,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 14/SC Thoroughfares:2/Interstate": {
+    "x": 58,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 13/SC Thoroughfares:3/Interstate": {
+    "x": 58,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 17/Interstates:1/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 16/Interstates:7/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 15/Interstates:4/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 14/Interstates:8/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 13/Interstates:2/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 12/Interstates:6/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 19/Interstates:5/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 18/Interstates:3/Default": {
+    "x": 114,
+    "y": 0,
+    "width": 56,
+    "height": 60,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 23/Blue Line Stations:2": {
+    "x": 0,
+    "y": 64,
+    "width": 56,
+    "height": 56,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 22/Blue Line Stations:6": {
+    "x": 0,
+    "y": 64,
+    "width": 56,
+    "height": 56,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 21/Blue Line Stations:5": {
+    "x": 0,
+    "y": 64,
+    "width": 56,
+    "height": 56,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 20/Blue Line Stations:3": {
+    "x": 0,
+    "y": 64,
+    "width": 56,
+    "height": 56,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 19/Blue Line Stations:1": {
+    "x": 56,
+    "y": 64,
+    "width": 54,
+    "height": 54,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 12/SC Thoroughfares:1/NC Road": {
+    "x": 110,
+    "y": 64,
+    "width": 44,
+    "height": 50,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 13/SC Thoroughfares:3/NC Road": {
+    "x": 110,
+    "y": 64,
+    "width": 44,
+    "height": 50,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 14/SC Thoroughfares:2/NC Road": {
+    "x": 110,
+    "y": 64,
+    "width": 44,
+    "height": 50,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 18/Blue Line Stations:4": {
+    "x": 0,
+    "y": 120,
+    "width": 50,
+    "height": 50,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 12/SC Thoroughfares:1/US Road": {
+    "x": 50,
+    "y": 120,
+    "width": 52,
+    "height": 48,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 14/SC Thoroughfares:2/US Road": {
+    "x": 50,
+    "y": 120,
+    "width": 52,
+    "height": 48,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 13/SC Thoroughfares:3/US Road": {
+    "x": 50,
+    "y": 120,
+    "width": 52,
+    "height": 48,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 17/Blue Line Stations:7": {
+    "x": 102,
+    "y": 120,
+    "width": 48,
+    "height": 48,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 16/Blue Line Stations:8": {
+    "x": 0,
+    "y": 170,
+    "width": 38,
+    "height": 38,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 23/Lynx Gold Line Stops:1/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 22/Lynx Gold Line Stops:8/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 21/Lynx Gold Line Stops:7/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 20/Lynx Gold Line Stops:6/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 19/Lynx Gold Line Stops:5/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 18/Lynx Gold Line Stops:3/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 17/Lynx Gold Line Stops:2/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 16/Lynx Gold Line Stops:4/Operating": {
+    "x": 38,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 23/Lynx Gold Line Stops:1/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 22/Lynx Gold Line Stops:8/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 21/Lynx Gold Line Stops:7/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 20/Lynx Gold Line Stops:6/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 19/Lynx Gold Line Stops:5/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 17/Lynx Gold Line Stops:2/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 16/Lynx Gold Line Stops:4/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 18/Lynx Gold Line Stops:3/Proposed": {
+    "x": 74,
+    "y": 170,
+    "width": 36,
+    "height": 36,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 22/Master Address:4": {
+    "x": 110,
+    "y": 170,
+    "width": 12,
+    "height": 12,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 21/Master Address:3": {
+    "x": 110,
+    "y": 170,
+    "width": 12,
+    "height": 12,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 20/Master Address:2": {
+    "x": 110,
+    "y": 170,
+    "width": 12,
+    "height": 12,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "Level 23/Master Address:1": {
+    "x": 110,
+    "y": 170,
+    "width": 12,
+    "height": 12,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "storm-water-easement-marker": {
+    "width": 40,
+    "height": 44,
+    "x": 186,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "cityworks-inspection-unassigned": {
+    "width": 48,
+    "height": 64,
+    "x": 234,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "cityworks-inspection-all": {
+    "width": 48,
+    "height": 64,
+    "x": 290,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "pending-structure-marker": {
+    "width": 32,
+    "height": 32,
+    "x": 346,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "storm-structure-marker": {
+    "width": 32,
+    "height": 32,
+    "x": 386,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-pending-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 426,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-active-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 474,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-assigned-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 522,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-ready-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 570,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-in-construction-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 618,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-complete-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 666,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "project-structure-closed-diamond": {
+    "width": 40,
+    "height": 40,
+    "x": 714,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-ai-star": {
+    "width": 32,
+    "height": 32,
+    "x": 762,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-a-star": {
+    "width": 32,
+    "height": 32,
+    "x": 802,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-b-star": {
+    "width": 32,
+    "height": 32,
+    "x": 842,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-c-star": {
+    "width": 32,
+    "height": 32,
+    "x": 882,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-t-star": {
+    "width": 32,
+    "height": 32,
+    "x": 922,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "open-service-request-u-star": {
+    "width": 32,
+    "height": 32,
+    "x": 962,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "dam-high-marker": {
+    "width": 40,
+    "height": 40,
+    "x": 1002,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "dam-intermediate-marker": {
+    "width": 40,
+    "height": 40,
+    "x": 1050,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "dam-low-marker": {
+    "width": 40,
+    "height": 40,
+    "x": 1098,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-top-risk-grade-5": {
+    "width": 48,
+    "height": 44,
+    "x": 1146,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-top-risk-grade-4": {
+    "width": 48,
+    "height": 44,
+    "x": 1202,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-top-risk-grade-le-3": {
+    "width": 48,
+    "height": 44,
+    "x": 1258,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-defect-point-grade-5": {
+    "width": 32,
+    "height": 28,
+    "x": 1314,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-defect-point-grade-4": {
+    "width": 32,
+    "height": 28,
+    "x": 1354,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "itpipes-defect-point-grade-le-3": {
+    "width": 32,
+    "height": 28,
+    "x": 1394,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  },
+  "risk-distribution-chart": {
+    "width": 36,
+    "height": 36,
+    "x": 1434,
+    "y": 8,
+    "pixelRatio": 2,
+    "sdf": false
+  }
+}

@@ -58,6 +58,8 @@ if (-not (Test-Path -LiteralPath $SystemDatabase -PathType Leaf)) {
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $outputPrefix = $OutputDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $existingSettingsPath = Join-Path $OutputDirectory "config\portal.settings.json"
+$settingsTemplatePath = Join-Path $projectRoot "desktop\config\desktop-config.template.json"
+$projectConfigSourcePath = Join-Path $projectRoot "desktop\config\project.toml"
 $settingsRecoveryPath = Join-Path ([System.IO.Path]::GetTempPath()) "Portal-Desktop.portal.settings.json"
 $existingSettings = if (Test-Path -LiteralPath $existingSettingsPath -PathType Leaf) {
     $settingsText = Get-Content -LiteralPath $existingSettingsPath -Raw
@@ -72,6 +74,9 @@ $existingSettings = if (Test-Path -LiteralPath $existingSettingsPath -PathType L
 
 if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
     throw "Cargo was not found at $cargo. Install the Rust MSVC toolchain before building."
+}
+if (-not (Test-Path -LiteralPath $projectConfigSourcePath -PathType Leaf)) {
+    throw "The packaged map project configuration was not found at $projectConfigSourcePath."
 }
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
     throw "pnpm is required to build the React UI."
@@ -145,6 +150,7 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
     --paths (Join-Path $projectRoot "python") `
     --collect-submodules portal `
     --add-data "$projectRoot\python\portal\app\config;portal\app\config" `
+    --add-data "$projectRoot\python\portal\app\resources\maps\stm_risk_map\assets;portal\app\resources\maps\stm_risk_map\assets" `
     --add-data "$systemSeed;portal\data" `
     --add-data "$projectRoot\python\portal\environment.yml;portal" `
     --add-data "$uiRoot\src\resources;portal\resource_metadata" `
@@ -196,12 +202,37 @@ Copy-Item -LiteralPath $pythonWorkerDirectory -Destination (Join-Path $runtimeOu
 Copy-Item -LiteralPath $portalUpdaterExecutable -Destination (Join-Path $runtimeOutput "PortalUpdater.exe") -Force
 $settingsOutput = Join-Path $configOutput "portal.settings.json"
 if ($null -ne $existingSettings) {
+    $existingSettingsObject = $existingSettings | ConvertFrom-Json
+    $templateSettingsObject = Get-Content -LiteralPath $settingsTemplatePath -Raw | ConvertFrom-Json
+    if ($null -eq $existingSettingsObject.maps) {
+        $existingSettingsObject | Add-Member -MemberType NoteProperty -Name maps -Value $templateSettingsObject.maps
+    } else {
+        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name duckdbGeoJsonLayers -Value $templateSettingsObject.maps.duckdbGeoJsonLayers -Force
+        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name terrainArchive -Value $templateSettingsObject.maps.terrainArchive -Force
+        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name projectConfigFile -Value $templateSettingsObject.maps.projectConfigFile -Force
+        $existingSettingsObject.maps.PSObject.Properties.Remove("configurationRoot")
+    }
+    if ($null -ne $existingSettingsObject.risk -and $null -ne $existingSettingsObject.risk.databases) {
+        $existingSettingsObject.risk.databases.PSObject.Properties.Remove("mapRisk")
+    }
+    if ($null -ne $existingSettingsObject.externalServices.maps) {
+        @(
+            "ncOneMapImageryServiceRoot",
+            "ncOneMapAcquisitionMapServer",
+            "usgsTopoTileUrl",
+            "usgsImageryTopoTileUrl"
+        ) | ForEach-Object {
+            $existingSettingsObject.externalServices.maps.PSObject.Properties.Remove($_)
+        }
+    }
+    $existingSettings = $existingSettingsObject | ConvertTo-Json -Depth 100
     $utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($settingsOutput, $existingSettings, $utf8WithoutBom)
     Remove-Item -LiteralPath $settingsRecoveryPath -Force -ErrorAction SilentlyContinue
 } else {
-    Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\config\desktop-config.template.json") -Destination $settingsOutput -Force
+    Copy-Item -LiteralPath $settingsTemplatePath -Destination $settingsOutput -Force
 }
+Copy-Item -LiteralPath $projectConfigSourcePath -Destination (Join-Path $configOutput "project.toml") -Force
 $packagedSystemDatabase = Join-Path $configOutput "system.db"
 Copy-Item -LiteralPath $SystemDatabase -Destination $packagedSystemDatabase -Force
 Set-ItemProperty -LiteralPath $packagedSystemDatabase -Name IsReadOnly -Value $true
@@ -213,9 +244,10 @@ Storm Water Asset Intelligence Portal Desktop $version
 
 Run Portal.exe from this local folder. No local service or installer is required.
 Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. Published SQLite
-source snapshots, read-only risk DuckDB files, PMTiles, map styles, and map
-configuration are loaded from the shared data root in config\portal.settings.json
-and are not included in this portable folder.
+source snapshots, current read-only risk DuckDB files, and PMTiles are loaded from the
+shared data root in config\portal.settings.json. The map project catalog is
+packaged as config\project.toml, while map styles and sprites are packaged with
+the map resource.
 
 Business snapshots, submissions, and conflict packages use the businessSync network
 root in config\portal.settings.json. Portal.exe never opens a writable SQLite

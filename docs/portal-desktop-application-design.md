@@ -100,13 +100,11 @@ publication contract is:
 G:\Strategic Planning\Planning\stm_risk_data\
   intermediate\
     amteam\amteam.duckdb
-  maptiles\
-    config\
-      project.toml
-    build\
-      staging\duckdb\stm_risk.duckdb
-      pmtiles\*.pmtiles
-      maplibre\                    # styles, manifests, sprites, and symbols
+    cityworks\cityworks.db
+    riskranking\riskranking.db
+    inventory\inventory.db
+  databases_local\tiles\*.pmtiles
+  maptiles\build\pmtiles\*.pmtiles   # retained legacy archive, when required
 ```
 
 `shared.dataRoot` defines the root once; dependent paths use the

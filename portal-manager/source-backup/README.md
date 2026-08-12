@@ -15,6 +15,12 @@ mirrors only. Notifications and the machine-online heartbeat use Outlook automat
 Each spatial layer in that dedicated mirror is physically written in `ST_Hilbert`
 order and receives a DuckDB R-Tree index on its geometry column.
 
+`Topo_ln` uses legacy Esri SDE binary geometry in SQL Server rather than SQL Server's
+native `geometry` type. Its ArcGIS Pro Python executable and `.sde` connection are
+therefore registered in `clone_spatial_data_warehouse_to_duckdb.json`. The configured
+helper exports that one layer directly to the same DuckDB workflow; no FileGDB is
+created or retained.
+
 Configuration is held in the two JSON files beside the scripts. SQL passwords must
 not be stored in source control. `clone_sqlserver_to_duckdb.json` references the
 current Windows user's `PORTAL_ITPIPES_SQL_PASSWORD` environment setting for the

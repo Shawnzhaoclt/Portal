@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from portal.app.core.desktop_config import configured_map_duckdb_geojson_layers
 from portal.runtime.transport import (
     FileResponse,
     LocalApplication,
@@ -30,6 +31,9 @@ from .config import ConfigError, ProjectConfig, load_config
 
 
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
+RESOURCE_MAPLIBRE_ROOT = Path(__file__).resolve().parent / "assets" / "maplibre"
+PORTAL_LAYER_SOURCE_ID = "portal_layers"
+LEGACY_LAYER_SOURCE_ID = "planning_project"
 
 ASSET_SEARCH_TARGETS = [
     {
@@ -38,6 +42,7 @@ ASSET_SEARCH_TARGETS = [
         "kind": "culvert",
         "primary_fields": ["FacilityID"],
         "field_mode": "facility",
+        "source": "configured_layer",
     },
     {
         "dataset_id": "stormstructure_pt",
@@ -45,6 +50,10 @@ ASSET_SEARCH_TARGETS = [
         "kind": "structure",
         "primary_fields": ["AssetID", "ITPIPE_ASSETID"],
         "field_mode": "asset",
+        "source": "inventory",
+        "table": "STORMSTRUCTURE_1_PT",
+        "geometry_column": "geometry",
+        "feature_id_column": "AssetID",
     },
     {
         "dataset_id": "stormpipes_ln",
@@ -52,6 +61,10 @@ ASSET_SEARCH_TARGETS = [
         "kind": "pipe",
         "primary_fields": ["AssetID", "ITPIPE_ASSETID", "US_ASSETID", "DS_ASSETID"],
         "field_mode": "asset",
+        "source": "inventory",
+        "table": "STORMPIPES_1_LN",
+        "geometry_column": "geometry",
+        "feature_id_column": "AssetID",
     },
     {
         "dataset_id": "stormdrainage_ln",
@@ -59,20 +72,12 @@ ASSET_SEARCH_TARGETS = [
         "kind": "drainage",
         "primary_fields": ["AssetID", "ITPIPE_ASSETID", "US_ASSETID", "DS_ASSETID"],
         "field_mode": "asset",
+        "source": "inventory",
+        "table": "STORMDRAINAGE_1_LN",
+        "geometry_column": "geometry",
+        "feature_id_column": "AssetID",
     },
 ]
-
-DUCKDB_HELPER_COLUMNS = {
-    "__feature_id",
-    "__dataset_id",
-    "__tile_layer",
-    "__geometry_type",
-    "__geometry_wkb",
-    "__minx",
-    "__miny",
-    "__maxx",
-    "__maxy",
-}
 
 INVENTORY_METRIC_TABLES = {
     "structures": "DBO.STORMSTRUCTURE_PT",
@@ -81,17 +86,6 @@ INVENTORY_METRIC_TABLES = {
     "city_maintained_pipes": "DBO.CITY_PIPES_LN",
 }
 
-DUCKDB_GEOJSON_DATASET_IDS = {
-    "culverts",
-    "cw_inspections_all_pt",
-    "itpipes_defects_ln",
-    "itpipes_defects_pt",
-    "itpipes_defects_top_risk_pt",
-    "stormstructure_pt",
-    "stormpipes_ln",
-    "stormdrainage_ln",
-    "ur_scfilter_cwonly_all_unassigned_allrisk_0101_pt",
-}
 DUCKDB_GEOJSON_FEATURE_LIMIT_MAX = 100_000
 RISK_TOP_LIST_LIMIT = 10
 RISK_SCORE_FIELDS = {
@@ -279,30 +273,168 @@ class BackendState:
 
     @property
     def maplibre_dir(self) -> Path:
-        return required_runtime_path("PORTAL_MAP_MAPLIBRE_ROOT", "MapLibre output root")
+        return RESOURCE_MAPLIBRE_ROOT
 
     @property
     def pmtiles_dir(self) -> Path:
         return required_runtime_path("PORTAL_MAP_PMTILES_ROOT", "PMTiles root")
 
     @property
+    def legacy_pmtiles_dir(self) -> Path:
+        return required_runtime_path("PORTAL_MAP_LEGACY_PMTILES_ROOT", "legacy PMTiles root")
+
+    @property
+    def portal_layers_archive(self) -> str:
+        return required_archive_name(
+            "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
+            "Portal layers PMTiles archive",
+        )
+
+    @property
+    def legacy_map_archive(self) -> str:
+        return required_archive_name(
+            "PORTAL_MAP_LEGACY_ARCHIVE",
+            "legacy map PMTiles archive",
+        )
+
+    @property
     def terrain_dir(self) -> Path:
         return required_runtime_path("PORTAL_MAP_TERRAIN_ROOT", "terrain root")
 
     @property
-    def reports_dir(self) -> Path:
-        return required_runtime_path("PORTAL_MAP_REPORTS_ROOT", "map reports root")
+    def terrain_archive(self) -> str:
+        configured = os.environ.get("PORTAL_MAP_TERRAIN_ARCHIVE", "").strip()
+        if not configured:
+            return ""
+        return required_archive_name("PORTAL_MAP_TERRAIN_ARCHIVE", "Terrain PMTiles archive")
 
     @property
-    def duckdb_path(self) -> Path:
-        return required_runtime_path("PORTAL_MAP_RISK_DUCKDB", "map risk DuckDB")
-
+    def reports_dir(self) -> Path:
+        return required_runtime_path("PORTAL_MAP_REPORTS_ROOT", "map reports root")
 
 def required_runtime_path(environment_name: str, label: str) -> Path:
     configured = os.environ.get(environment_name, "").strip()
     if not configured:
         raise HTTPException(status_code=503, detail=f"{label} is not configured in portal.settings.json.")
     return Path(configured)
+
+
+def required_runtime_value(environment_name: str, label: str) -> str:
+    configured = os.environ.get(environment_name, "").strip()
+    if not configured:
+        raise HTTPException(status_code=503, detail=f"{label} is not configured in portal.settings.json.")
+    return configured
+
+
+def required_archive_name(environment_name: str, label: str) -> str:
+    configured = required_runtime_value(environment_name, label)
+    if configured != Path(configured).name or Path(configured).suffix.lower() != ".pmtiles":
+        raise HTTPException(
+            status_code=500,
+            detail=f"{label} must be a PMTiles file name, not a file path.",
+        )
+    return configured
+
+
+def configured_pmtiles_path(
+    state: BackendState,
+    archive_name: str,
+    *,
+    required: bool = True,
+) -> Path:
+    archive = Path(archive_name).name
+    if archive != archive_name or Path(archive).suffix.lower() != ".pmtiles":
+        raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
+    registrations = [
+        (state.pmtiles_dir / archive, state.portal_layers_archive),
+        (state.legacy_pmtiles_dir / archive, state.legacy_map_archive),
+    ]
+    if state.terrain_archive:
+        registrations.append((state.pmtiles_dir / archive, state.terrain_archive))
+    registered = [path for path, registered_name in registrations if archive == registered_name]
+    if not registered:
+        raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
+    for path in registered:
+        if path.is_file():
+            return path
+    if required:
+        raise HTTPException(status_code=404, detail=f"PMTiles archive was not found: {registered[0]}")
+    return registered[0]
+
+
+def expected_portal_source_layers(state: BackendState) -> set[str]:
+    path = state.maplibre_dir / "portal-layer-source-ids.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Portal layer registry is invalid: {path}") from exc
+    if not isinstance(payload, list) or not all(isinstance(item, str) and item for item in payload):
+        raise HTTPException(status_code=500, detail=f"Portal layer registry is invalid: {path}")
+    return {item.lower() for item in payload}
+
+
+def portal_archive_source_layers(state: BackendState) -> set[str]:
+    archive = configured_pmtiles_path(state, state.portal_layers_archive)
+    manifest_path = archive.with_suffix(archive.suffix + ".manifest.json")
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Portal PMTiles manifest was not found: {manifest_path}",
+        ) from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Portal PMTiles manifest is invalid: {manifest_path}",
+        ) from exc
+    layers = payload.get("layers") if isinstance(payload, dict) else None
+    if not isinstance(layers, list):
+        raise HTTPException(status_code=500, detail=f"Portal PMTiles manifest has no layer list: {manifest_path}")
+    return {
+        str(item.get("id") or "").lower()
+        for item in layers
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+
+
+def route_resource_style(payload: dict[str, Any], state: BackendState) -> dict[str, Any]:
+    sources = payload.get("sources")
+    layers = payload.get("layers")
+    if not isinstance(sources, dict) or not isinstance(layers, list):
+        return payload
+
+    expected_layers = expected_portal_source_layers(state)
+    archive_layers = portal_archive_source_layers(state)
+    routed_source_layers = expected_layers & archive_layers
+    sources[PORTAL_LAYER_SOURCE_ID] = {
+        "type": "vector",
+        "url": f"pmtiles://{state.portal_layers_archive}",
+    }
+    legacy_source = sources.get(LEGACY_LAYER_SOURCE_ID)
+    if isinstance(legacy_source, dict):
+        legacy_source["url"] = f"pmtiles://{state.legacy_map_archive}"
+
+    routed_style_layers = 0
+    for layer in layers:
+        if not isinstance(layer, dict):
+            continue
+        source_layer = str(layer.get("source-layer") or "").lower()
+        if layer.get("source") == LEGACY_LAYER_SOURCE_ID and source_layer in routed_source_layers:
+            layer["source"] = PORTAL_LAYER_SOURCE_ID
+            routed_style_layers += 1
+
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+        payload["metadata"] = metadata
+    metadata["portal_pmtiles"] = {
+        "archive": state.portal_layers_archive,
+        "source_layer_count": len(routed_source_layers),
+        "style_layer_count": routed_style_layers,
+        "missing_source_layers": sorted(expected_layers - archive_layers),
+    }
+    return payload
 
 
 def create_app() -> LocalApplication:
@@ -316,13 +448,32 @@ def create_app() -> LocalApplication:
     def health() -> dict[str, Any]:
         state = get_state()
         manifest_path = state.maplibre_dir / "manifest.json"
+        portal_archive = configured_pmtiles_path(state, state.portal_layers_archive, required=False)
+        legacy_archive = configured_pmtiles_path(state, state.legacy_map_archive, required=False)
+        terrain_archive = (
+            configured_pmtiles_path(state, state.terrain_archive, required=False)
+            if state.terrain_archive
+            else None
+        )
+        expected_layers = expected_portal_source_layers(state)
+        archive_layers = portal_archive_source_layers(state) if portal_archive.is_file() else set()
         return {
             "ok": True,
             "project_root": str(state.project_root),
             "config": str(state.project_config.config_path),
             "manifest_exists": manifest_path.exists(),
             "maplibre_dir": str(state.maplibre_dir),
-            "pmtiles_dir": str(state.pmtiles_dir),
+            "pmtiles": {
+                "portal_layers": str(portal_archive),
+                "portal_layers_exists": portal_archive.is_file(),
+                "legacy_map": str(legacy_archive),
+                "legacy_map_exists": legacy_archive.is_file(),
+                "terrain": str(terrain_archive) if terrain_archive is not None else "",
+                "terrain_exists": terrain_archive.is_file() if terrain_archive is not None else False,
+                "expected_source_layers": len(expected_layers),
+                "published_source_layers": len(archive_layers),
+                "missing_source_layers": sorted(expected_layers - archive_layers),
+            },
             "terrain_dir": str(state.terrain_dir),
         }
 
@@ -485,15 +636,15 @@ def create_app() -> LocalApplication:
                     status_code=500,
                     detail=f"MapLibre JSON asset is invalid: {style_path}",
                 ) from exc
+            if path.name.lower() == "style.json" and isinstance(payload, dict):
+                payload = route_resource_style(payload, state)
             return no_cache_json(payload)
         return no_cache_file(path, media_type=media_type)
 
     @app.get("/api/pmtiles/{pmtiles_name:path}")
     def pmtiles_file(pmtiles_name: str, request: Request) -> Response:
         state = get_state()
-        path = safe_child_path(state.pmtiles_dir, pmtiles_name)
-        if path.suffix.lower() != ".pmtiles" or not path.exists():
-            raise HTTPException(status_code=404, detail=f"PMTiles file not found: {pmtiles_name}")
+        path = configured_pmtiles_path(state, pmtiles_name)
         range_header = request.headers.get("range")
         if range_header:
             start, end = parse_byte_range(range_header, path.stat().st_size)
@@ -522,9 +673,7 @@ def create_app() -> LocalApplication:
     @app.head("/api/pmtiles/{pmtiles_name:path}")
     def pmtiles_head(pmtiles_name: str) -> Response:
         state = get_state()
-        path = safe_child_path(state.pmtiles_dir, pmtiles_name)
-        if path.suffix.lower() != ".pmtiles" or not path.exists():
-            raise HTTPException(status_code=404, detail=f"PMTiles file not found: {pmtiles_name}")
+        path = configured_pmtiles_path(state, pmtiles_name)
         return Response(
             media_type="application/octet-stream",
             headers={
@@ -561,17 +710,9 @@ def create_app() -> LocalApplication:
         if not query:
             return {
                 "query": query,
-                "database_exists": state.duckdb_path.exists(),
+                "database_exists": all(path.is_file() for path in asset_search_database_paths()),
                 "results": [],
                 "returned": 0,
-            }
-        if not state.duckdb_path.exists():
-            return {
-                "query": query,
-                "database_exists": False,
-                "results": [],
-                "returned": 0,
-                "message": f"DuckDB database has not been built yet: {project_relative(state.duckdb_path, state.project_root)}",
             }
         results = query_asset_search(state, query, limit)
         return {
@@ -593,18 +734,17 @@ def create_app() -> LocalApplication:
     ) -> dict[str, Any]:
         state = get_state()
         normalized_dataset_id = dataset_id.strip().lower()
-        if normalized_dataset_id not in DUCKDB_GEOJSON_DATASET_IDS:
-            raise HTTPException(status_code=404, detail=f"DuckDB GeoJSON dataset is not configured: {dataset_id}")
+        layer = configured_duckdb_geojson_layer_or_404(normalized_dataset_id)
         bbox = valid_request_bbox(west, south, east, north)
-        if not state.duckdb_path.exists():
+        database = Path(str(layer["database"]))
+        if not database.is_file():
             return empty_geojson_response(
                 normalized_dataset_id,
                 database_exists=False,
-                message=f"DuckDB database has not been built yet: {project_relative(state.duckdb_path, state.project_root)}",
+                message=f"DuckDB database was not found: {database}",
             )
-        return query_duckdb_geojson_feature_collection(
-            state,
-            normalized_dataset_id,
+        return query_configured_duckdb_geojson_feature_collection(
+            layer,
             bbox,
             limit,
             parse_attribute_filter_query(filters),
@@ -621,19 +761,9 @@ def create_app() -> LocalApplication:
         north: float | None = Query(None, ge=-90, le=90),
         filters: str = Query("", max_length=ATTRIBUTE_FILTER_QUERY_MAX_LENGTH),
     ) -> JSONResponse:
-        state = get_state()
         bbox = valid_request_bbox(west, south, east, north)
         layer_configs = selected_risk_layer_configs(cityworks_layer, itpipes_layer)
-        if not state.duckdb_path.exists():
-            return no_cache_json({
-                "ok": False,
-                "risk": risk,
-                "risk_field": RISK_SCORE_FIELDS[risk],
-                "bbox": bbox,
-                "lists": [],
-                "message": f"DuckDB database has not been built yet: {project_relative(state.duckdb_path, state.project_root)}",
-            })
-        return no_cache_json(query_risk_top_lists(state, risk, bbox, layer_configs, parse_attribute_filter_query(filters)))
+        return no_cache_json(query_risk_top_lists(risk, bbox, layer_configs, parse_attribute_filter_query(filters)))
 
     @app.get("/api/risk/histograms")
     def risk_histograms(
@@ -646,19 +776,9 @@ def create_app() -> LocalApplication:
         north: float | None = Query(None, ge=-90, le=90),
         filters: str = Query("", max_length=ATTRIBUTE_FILTER_QUERY_MAX_LENGTH),
     ) -> JSONResponse:
-        state = get_state()
         bbox = valid_request_bbox(west, south, east, north)
         layer_configs = selected_risk_layer_configs(cityworks_layer, itpipes_layer)
-        if not state.duckdb_path.exists():
-            return no_cache_json({
-                "ok": False,
-                "risk": risk,
-                "risk_field": RISK_SCORE_FIELDS[risk],
-                "bbox": bbox,
-                "histograms": [],
-                "message": f"DuckDB database has not been built yet: {project_relative(state.duckdb_path, state.project_root)}",
-            })
-        return no_cache_json(query_risk_histograms(state, risk, bbox, layer_configs, parse_attribute_filter_query(filters)))
+        return no_cache_json(query_risk_histograms(risk, bbox, layer_configs, parse_attribute_filter_query(filters)))
 
     @app.get("/api/metrics/inventory")
     def inventory_metrics(
@@ -888,6 +1008,12 @@ def compact_terrain(state: BackendState) -> dict[str, Any]:
     tile_dir = resolve_project_path(str(terrain.get("tile_dir", "")), state.project_root)
     tilejson = resolve_project_path(str(terrain.get("tilejson", "")), state.project_root)
     pmtiles_output = resolve_project_path(str(terrain.get("pmtiles_output", "")), state.project_root)
+    configured_archive = state.terrain_archive
+    configured_pmtiles = (
+        configured_pmtiles_path(state, configured_archive, required=False)
+        if configured_archive
+        else pmtiles_output
+    )
     return {
         "enabled": bool(terrain.get("enabled", False)),
         "id": terrain_id,
@@ -897,8 +1023,9 @@ def compact_terrain(state: BackendState) -> dict[str, Any]:
         "tile_dir_exists": tile_dir.exists(),
         "tilejson": project_relative(tilejson, state.project_root),
         "tilejson_exists": tilejson.exists(),
-        "pmtiles_output": project_relative(pmtiles_output, state.project_root),
-        "pmtiles_exists": pmtiles_output.exists(),
+        "pmtiles_archive": configured_archive,
+        "pmtiles_output": project_relative(configured_pmtiles, state.project_root),
+        "pmtiles_exists": configured_pmtiles.exists(),
         "minimum_zoom": terrain.get("minimum_zoom", terrain.get("min_zoom", "")),
         "maximum_zoom": terrain.get("maximum_zoom", terrain.get("max_zoom", "")),
         "encoding": terrain.get("encoding", "mapbox"),
@@ -936,32 +1063,41 @@ def dataset_matches(dataset: dict[str, Any], query: str) -> bool:
 
 
 def query_asset_search(state: BackendState, query: str, limit: int) -> list[dict[str, Any]]:
-    try:
-        import duckdb
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="The bundled Python runtime must include duckdb.") from exc
-
     datasets_by_id = {
         str(dataset.get("id", "")).lower(): dataset
         for dataset in raw_datasets(state)
         if isinstance(dataset, dict)
     }
-    connection = duckdb.connect(str(state.duckdb_path), read_only=True)
+    connections: dict[Path, Any] = {}
     try:
         results: dict[str, dict[str, Any]] = {}
         for target in ASSET_SEARCH_TARGETS:
             dataset_id = str(target["dataset_id"])
             dataset = datasets_by_id.get(dataset_id.lower(), {})
-            table_name = duckdb_table_for_dataset(connection, dataset_id)
-            if not table_name:
+            layer = asset_search_layer(target)
+            database = Path(str(layer["database"]))
+            connection = connections.get(database)
+            if connection is None:
+                connection = open_inventory_duckdb(layer)
+                connections[database] = connection
+            table_name = str(layer["table"])
+            fields = duckdb_table_schema_fields(connection, table_name)
+            if not fields:
                 continue
-            fields = duckdb_fields_for_dataset(connection, dataset_id, table_name)
             search_fields = search_fields_for_asset_target(target, dataset, fields)
             if not search_fields:
                 continue
             per_field_limit = max(limit * 4, 20)
             for field in search_fields:
-                for row in search_asset_field(connection, table_name, target, field, fields, query, per_field_limit):
+                for row in search_spatial_asset_field(
+                    connection,
+                    layer,
+                    target,
+                    field,
+                    fields,
+                    query,
+                    per_field_limit,
+                ):
                     key = f"{row['dataset_id']}:{row['feature_id']}"
                     existing = results.get(key)
                     if existing is None or float(row["score"]) > float(existing["score"]):
@@ -976,7 +1112,31 @@ def query_asset_search(state: BackendState, query: str, limit: int) -> list[dict
         )
         return [finalize_asset_search_result(item) for item in ordered[:limit]]
     finally:
-        connection.close()
+        for connection in connections.values():
+            connection.close()
+
+
+def asset_search_layer(target: dict[str, Any]) -> dict[str, Any]:
+    source = str(target.get("source") or "").lower()
+    if source == "configured_layer":
+        return configured_duckdb_geojson_layer_or_404(str(target["dataset_id"]))
+    if source == "inventory":
+        return {
+            "id": str(target["dataset_id"]),
+            "database": required_runtime_path("PORTAL_INVENTORY_DUCKDB", "inventory DuckDB"),
+            "table": str(target["table"]),
+            "geometryColumn": str(target.get("geometry_column") or "geometry"),
+            "featureIdColumn": str(target.get("feature_id_column") or ""),
+            "sourceSrid": 2264,
+        }
+    raise HTTPException(
+        status_code=500,
+        detail=f"Asset search source is not configured for {target.get('dataset_id', 'unknown dataset')}.",
+    )
+
+
+def asset_search_database_paths() -> set[Path]:
+    return {Path(str(asset_search_layer(target)["database"])) for target in ASSET_SEARCH_TARGETS}
 
 
 def empty_geojson_response(
@@ -1001,57 +1161,83 @@ def empty_geojson_response(
     }
 
 
-def query_duckdb_geojson_feature_collection(
-    state: BackendState,
-    dataset_id: str,
+def configured_duckdb_geojson_layer_or_404(dataset_id: str) -> dict[str, Any]:
+    try:
+        layer = configured_map_duckdb_geojson_layers().get(dataset_id.lower())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if layer:
+        return layer
+    raise HTTPException(status_code=404, detail=f"DuckDB GeoJSON dataset is not configured: {dataset_id}")
+
+
+def query_configured_duckdb_geojson_feature_collection(
+    layer: dict[str, Any],
     bbox: list[float] | None,
     limit: int,
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    try:
-        import duckdb
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="The bundled Python runtime must include duckdb.") from exc
-
+    dataset_id = str(layer["id"])
+    table_name = str(layer["table"])
+    geometry_column = str(layer.get("geometryColumn") or "geometry")
+    feature_id_column = str(layer.get("featureIdColumn") or "")
+    source_srid = int(layer.get("sourceSrid") or 2264)
+    if source_srid != 2264:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DuckDB GeoJSON dataset {dataset_id} uses unsupported source SRID {source_srid}.",
+        )
     connection = None
     try:
-        connection = duckdb.connect(str(state.duckdb_path), read_only=True)
-        table_name = duckdb_table_for_dataset(connection, dataset_id)
-        if not table_name:
-            return empty_geojson_response(dataset_id, message=f"DuckDB table was not found for dataset: {dataset_id}")
-        fields = duckdb_fields_for_dataset(connection, dataset_id, table_name)
-        property_fields = fields[:120]
+        connection = open_inventory_duckdb(layer)
+        schema_fields = duckdb_table_schema_fields(connection, table_name)
+        fields_by_lower = {
+            str(item["source_field"]).lower(): item
+            for item in schema_fields
+        }
+        geometry_field = fields_by_lower.get(geometry_column.lower())
+        if not geometry_field:
+            raise RuntimeError(f"Geometry column {geometry_column!r} was not found in {table_name}.")
+        geometry_column = str(geometry_field["source_field"])
+        configured_properties = [str(item) for item in layer.get("properties", [])]
+        missing_properties = [
+            name for name in configured_properties if name.lower() not in fields_by_lower
+        ]
+        if missing_properties:
+            raise RuntimeError(
+                f"Configured properties were not found in {table_name}: {', '.join(missing_properties)}"
+            )
+        property_fields = [fields_by_lower[name.lower()] for name in configured_properties][:120]
         property_selects = [
             f"{quote_identifier(item['duckdb_column'])} AS {quote_identifier('__prop_' + str(index))}"
             for index, item in enumerate(property_fields)
         ]
-        where_parts = ["__geometry_wkb IS NOT NULL"]
-        params: list[Any] = []
-        if bbox:
-            west, south, east, north = bbox
-            where_parts.append("__maxx >= ? AND __minx <= ? AND __maxy >= ? AND __miny <= ?")
-            params.extend([west, east, south, north])
+        extent_wkt = bbox_to_stateplane_wkt(bbox) if bbox else None
+        where_clause, params = duckdb_spatial_where_clause(geometry_column, extent_wkt)
         filter_parts, filter_params = duckdb_attribute_filter_where_parts(
             attribute_filters,
             [dataset_id],
-            fields,
+            property_fields,
         )
-        where_parts.extend(filter_parts)
+        if filter_parts:
+            where_clause = " AND ".join([where_clause, *filter_parts])
         params.extend(filter_params)
+        actual_feature_id = fields_by_lower.get(feature_id_column.lower()) if feature_id_column else None
+        feature_id_expression = (
+            f"COALESCE(CAST({quote_identifier(str(actual_feature_id['source_field']))} AS VARCHAR), "
+            f"CAST(hash(ST_AsWKB({quote_identifier(geometry_column)})) AS VARCHAR))"
+            if actual_feature_id
+            else f"CAST(hash(ST_AsWKB({quote_identifier(geometry_column)})) AS VARCHAR)"
+        )
         sql = f"""
             SELECT
-                __feature_id,
-                __dataset_id,
-                __geometry_type,
-                __minx,
-                __miny,
-                __maxx,
-                __maxy,
-                __geometry_wkb
+                {feature_id_expression} AS __feature_id,
+                ST_GeometryType({quote_identifier(geometry_column)}) AS __geometry_type,
+                ST_AsWKB({quote_identifier(geometry_column)}) AS __geometry_wkb
                 {"," if property_selects else ""}
                 {", ".join(property_selects)}
             FROM {quote_identifier(table_name)}
-            WHERE {" AND ".join(where_parts)}
+            WHERE {where_clause}
             LIMIT ?
         """
         params.append(int(limit))
@@ -1067,7 +1253,7 @@ def query_duckdb_geojson_feature_collection(
     features = []
     for row in rows:
         values = dict(zip(names, row))
-        geometry = wkb_to_geojson(values.get("__geometry_wkb"))
+        geometry = stateplane_wkb_to_wgs84_geojson(values.get("__geometry_wkb"))
         if not geometry:
             continue
         properties = {
@@ -1075,9 +1261,9 @@ def query_duckdb_geojson_feature_collection(
             for key, value in values.items()
             if key in prop_aliases and value not in (None, "")
         }
-        feature_id = int(values.get("__feature_id") or 0)
+        feature_id = str(values.get("__feature_id") or "")
         properties["__feature_id"] = feature_id
-        properties["__dataset_id"] = values.get("__dataset_id") or dataset_id
+        properties["__dataset_id"] = dataset_id
         properties["__geometry_type"] = values.get("__geometry_type") or ""
         features.append(
             {
@@ -1093,8 +1279,9 @@ def query_duckdb_geojson_feature_collection(
         "features": features,
         "metadata": {
             "dataset_id": dataset_id,
-            "database": str(state.duckdb_path),
+            "database": str(layer["database"]),
             "table": table_name,
+            "source_srid": source_srid,
             "bbox": bbox,
             "returned": len(features),
             "limit": int(limit),
@@ -1118,30 +1305,132 @@ def selected_risk_layer_configs(cityworks_layer: str, itpipes_layer: str) -> lis
     return [cityworks_config, itpipes_config]
 
 
+def configured_risk_source_layer(dataset_id: str) -> dict[str, Any]:
+    try:
+        layer = configured_map_duckdb_geojson_layers().get(dataset_id.lower())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if not layer:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Risk dataset is not configured as a direct DuckDB source: {dataset_id}",
+        )
+    return layer
+
+
+def risk_source_schema(
+    connection: Any,
+    source_layer: dict[str, Any],
+) -> tuple[str, list[dict[str, str]], dict[str, dict[str, str]], str]:
+    table_name = str(source_layer["table"])
+    fields = duckdb_table_schema_fields(connection, table_name)
+    if not fields:
+        raise RuntimeError(f"Configured risk table was not found: {table_name}")
+    fields_by_normalized = {
+        normalize_token(field["source_field"]): field
+        for field in fields
+    }
+    geometry_name = str(source_layer.get("geometryColumn") or "geometry")
+    geometry_field = fields_by_normalized.get(normalize_token(geometry_name))
+    if not geometry_field:
+        raise RuntimeError(f"Geometry column {geometry_name!r} was not found in {table_name}")
+    geometry_column = str(geometry_field["duckdb_column"])
+    property_fields = [
+        field
+        for field in fields
+        if normalize_token(field["source_field"]) != normalize_token(geometry_column)
+    ]
+    return table_name, property_fields, fields_by_normalized, geometry_column
+
+
+def risk_feature_id_expression(
+    fields_by_normalized: dict[str, dict[str, str]],
+    source_layer: dict[str, Any],
+    geometry_column: str,
+) -> str:
+    geometry_sql = quote_identifier(geometry_column)
+    feature_id_name = str(source_layer.get("featureIdColumn") or "")
+    feature_id_field = fields_by_normalized.get(normalize_token(feature_id_name))
+    fallback = f"CAST(hash(ST_AsWKB({geometry_sql})) % 9007199254740991 AS BIGINT)"
+    if not feature_id_field:
+        return fallback
+    return (
+        f"COALESCE(TRY_CAST({quote_identifier(feature_id_field['duckdb_column'])} AS BIGINT), {fallback})"
+    )
+
+
+def risk_property_fields(
+    layer_config: dict[str, Any],
+    risk_field: str,
+    fields: list[dict[str, str]],
+    fields_by_normalized: dict[str, dict[str, str]],
+) -> list[dict[str, str]]:
+    selected: list[dict[str, str]] = []
+    requested_names = [*layer_config.get("display_fields", []), risk_field]
+    for field_name in requested_names:
+        field = fields_by_normalized.get(normalize_token(str(field_name)))
+        if field and field not in selected:
+            selected.append(field)
+    for field in fields:
+        if field not in selected and len(selected) < 40:
+            selected.append(field)
+    return selected[:40]
+
+
+def risk_source_where_clause(
+    layer_config: dict[str, Any],
+    source_layer: dict[str, Any],
+    geometry_column: str,
+    fields: list[dict[str, str]],
+    bbox: list[float] | None,
+    attribute_filters: dict[str, list[dict[str, Any]]] | None,
+) -> tuple[str, list[Any]]:
+    extent_wkt = bbox_to_stateplane_wkt(bbox) if bbox else None
+    where_clause, params = duckdb_spatial_where_clause(geometry_column, extent_wkt)
+    filter_parts, filter_params = duckdb_attribute_filter_where_parts(
+        attribute_filters,
+        risk_filter_target_keys(layer_config),
+        fields,
+    )
+    if filter_parts:
+        where_clause = " AND ".join([where_clause, *filter_parts])
+        params.extend(filter_params)
+    return where_clause, params
+
+
 def query_risk_top_lists(
-    state: BackendState,
     risk: str,
     bbox: list[float] | None,
     layer_configs: list[dict[str, Any]],
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    try:
-        import duckdb
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="The bundled Python runtime must include duckdb.") from exc
-
     risk_field = RISK_SCORE_FIELDS[risk]
-    connection = None
-    try:
-        connection = duckdb.connect(str(state.duckdb_path), read_only=True)
-        lists = [
-            query_risk_top_list_layer(connection, config, risk_field, bbox, attribute_filters)
-            for config in layer_configs
-        ]
-    except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and schema issues through the API
-        raise HTTPException(status_code=503, detail=f"Could not read risk top list from DuckDB: {exc}") from exc
-    finally:
-        if connection is not None:
+    lists: list[dict[str, Any]] = []
+    for config in layer_configs:
+        source_layer = configured_risk_source_layer(str(config["dataset_id"]))
+        connection = open_configured_duckdb(source_layer, "Risk source DuckDB")
+        try:
+            lists.append(
+                query_risk_top_list_layer(
+                    connection,
+                    config,
+                    risk_field,
+                    bbox,
+                    attribute_filters,
+                    source_layer=source_layer,
+                )
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface source schema/query issues through the API
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Could not read risk top list from {source_layer['database']}"
+                    f"::{source_layer['table']}: {exc}"
+                ),
+            ) from exc
+        finally:
             connection.close()
 
     return {
@@ -1155,29 +1444,38 @@ def query_risk_top_lists(
 
 
 def query_risk_histograms(
-    state: BackendState,
     risk: str,
     bbox: list[float] | None,
     layer_configs: list[dict[str, Any]],
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    try:
-        import duckdb
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="The bundled Python runtime must include duckdb.") from exc
-
     risk_field = RISK_SCORE_FIELDS[risk]
-    connection = None
-    try:
-        connection = duckdb.connect(str(state.duckdb_path), read_only=True)
-        histograms = [
-            query_risk_histogram_layer(connection, config, risk_field, bbox, attribute_filters)
-            for config in layer_configs
-        ]
-    except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and schema issues through the API
-        raise HTTPException(status_code=503, detail=f"Could not read risk histograms from DuckDB: {exc}") from exc
-    finally:
-        if connection is not None:
+    histograms: list[dict[str, Any]] = []
+    for config in layer_configs:
+        source_layer = configured_risk_source_layer(str(config["dataset_id"]))
+        connection = open_configured_duckdb(source_layer, "Risk source DuckDB")
+        try:
+            histograms.append(
+                query_risk_histogram_layer(
+                    connection,
+                    config,
+                    risk_field,
+                    bbox,
+                    attribute_filters,
+                    source_layer=source_layer,
+                )
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001 - surface source schema/query issues through the API
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Could not read risk histogram from {source_layer['database']}"
+                    f"::{source_layer['table']}: {exc}"
+                ),
+            ) from exc
+        finally:
             connection.close()
 
     return {
@@ -1196,33 +1494,27 @@ def query_risk_histogram_layer(
     risk_field: str,
     bbox: list[float] | None,
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    source_layer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dataset_id = str(layer_config["dataset_id"])
-    table_name = duckdb_table_for_dataset(connection, dataset_id)
+    source_layer = source_layer or configured_risk_source_layer(dataset_id)
+    table_name, fields, fields_by_normalized, geometry_column = risk_source_schema(connection, source_layer)
     empty_bins = risk_histogram_bins_from_counts([0] * len(RISK_HISTOGRAM_BINS))
-    if not table_name:
-        return risk_histogram_response(layer_config, risk_field, empty_bins, 0, 0)
-
-    fields = duckdb_fields_for_dataset(connection, dataset_id, table_name)
-    fields_by_normalized = {normalize_token(field["source_field"]): field for field in fields}
     risk_column = field_column_for_source_field(fields_by_normalized, risk_field)
     if not risk_column:
         return risk_histogram_response(layer_config, risk_field, empty_bins, 0, 0)
 
     risk_expression = f"TRY_CAST({quote_identifier(risk_column)} AS DOUBLE)"
-    where_parts = ["__geometry_wkb IS NOT NULL", f"{risk_expression} IS NOT NULL"]
-    params: list[Any] = []
-    if bbox:
-        west, south, east, north = bbox
-        where_parts.append("__maxx >= ? AND __minx <= ? AND __maxy >= ? AND __miny <= ?")
-        params.extend([west, east, south, north])
-    filter_parts, filter_params = duckdb_attribute_filter_where_parts(
-        attribute_filters,
-        risk_filter_target_keys(layer_config),
+    where_clause, params = risk_source_where_clause(
+        layer_config,
+        source_layer,
+        geometry_column,
         fields,
+        bbox,
+        attribute_filters,
     )
-    where_parts.extend(filter_parts)
-    params.extend(filter_params)
+    where_clause = f"{where_clause} AND {risk_expression} IS NOT NULL"
 
     bin_selects = []
     for index, (start, end) in enumerate(RISK_HISTOGRAM_BINS):
@@ -1234,7 +1526,7 @@ def query_risk_histogram_layer(
         WITH filtered AS (
             SELECT {risk_expression} AS risk_score
             FROM {quote_identifier(table_name)}
-            WHERE {" AND ".join(where_parts)}
+            WHERE {where_clause}
         )
         SELECT
             COUNT(*) AS total,
@@ -1295,66 +1587,50 @@ def query_risk_top_list_layer(
     risk_field: str,
     bbox: list[float] | None,
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    source_layer: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     dataset_id = str(layer_config["dataset_id"])
-    table_name = duckdb_table_for_dataset(connection, dataset_id)
-    if not table_name:
-        return risk_top_list_response(layer_config, risk_field, [])
-
-    fields = duckdb_fields_for_dataset(connection, dataset_id, table_name)
-    fields_by_normalized = {normalize_token(field["source_field"]): field for field in fields}
+    source_layer = source_layer or configured_risk_source_layer(dataset_id)
+    table_name, fields, fields_by_normalized, geometry_column = risk_source_schema(connection, source_layer)
     risk_column = field_column_for_source_field(fields_by_normalized, risk_field)
     if not risk_column:
         return risk_top_list_response(layer_config, risk_field, [])
     grade_column = field_column_for_source_field(fields_by_normalized, "Grade")
 
-    selected_fields: list[dict[str, str]] = []
-    for field_name in list(layer_config.get("display_fields", [])):
-        field = fields_by_normalized.get(normalize_token(str(field_name)))
-        if field and field not in selected_fields:
-            selected_fields.append(field)
-    for field in fields[:40]:
-        if field not in selected_fields and len(selected_fields) < 40:
-            selected_fields.append(field)
+    selected_fields = risk_property_fields(layer_config, risk_field, fields, fields_by_normalized)
 
     property_selects = [
         f"{quote_identifier(item['duckdb_column'])} AS {quote_identifier('__prop_' + str(index))}"
         for index, item in enumerate(selected_fields)
     ]
     risk_expression = f"TRY_CAST({quote_identifier(risk_column)} AS DOUBLE)"
-    where_parts = ["__geometry_wkb IS NOT NULL", f"{risk_expression} IS NOT NULL"]
-    params: list[Any] = []
-    if bbox:
-        west, south, east, north = bbox
-        where_parts.append("__maxx >= ? AND __minx <= ? AND __maxy >= ? AND __miny <= ?")
-        params.extend([west, east, south, north])
-    filter_parts, filter_params = duckdb_attribute_filter_where_parts(
-        attribute_filters,
-        risk_filter_target_keys(layer_config),
+    where_clause, params = risk_source_where_clause(
+        layer_config,
+        source_layer,
+        geometry_column,
         fields,
+        bbox,
+        attribute_filters,
     )
-    where_parts.extend(filter_parts)
-    params.extend(filter_params)
+    where_clause = f"{where_clause} AND {risk_expression} IS NOT NULL"
     grade_filter = layer_config.get("grade_filter")
     if grade_filter is not None and grade_column:
-        where_parts.append(f"TRY_CAST({quote_identifier(grade_column)} AS DOUBLE) = ?")
+        where_clause = " AND ".join(
+            [where_clause, f"TRY_CAST({quote_identifier(grade_column)} AS DOUBLE) = ?"]
+        )
         params.append(float(grade_filter))
 
     sql = f"""
         SELECT
-            __feature_id,
-            __dataset_id,
-            __geometry_type,
-            __minx,
-            __miny,
-            __maxx,
-            __maxy,
-            __geometry_wkb,
+            {risk_feature_id_expression(fields_by_normalized, source_layer, geometry_column)} AS __feature_id,
+            ST_GeometryType({quote_identifier(geometry_column)}) AS __geometry_type,
+            ST_AsWKB({quote_identifier(geometry_column)}) AS __geometry_wkb,
             {risk_expression} AS __risk_score
             {"," if property_selects else ""}
             {", ".join(property_selects)}
         FROM {quote_identifier(table_name)}
-        WHERE {" AND ".join(where_parts)}
+        WHERE {where_clause}
         ORDER BY __risk_score DESC NULLS LAST
         LIMIT {RISK_TOP_LIST_LIMIT}
     """
@@ -1370,15 +1646,8 @@ def query_risk_top_list_layer(
             if key in prop_aliases and value not in (None, "")
         }
         feature_id = int(values.get("__feature_id") or 0)
-        geometry = wkb_to_geojson(values.get("__geometry_wkb"))
-        bbox_values = valid_bbox(
-            [
-                values.get("__minx"),
-                values.get("__miny"),
-                values.get("__maxx"),
-                values.get("__maxy"),
-            ]
-        )
+        geometry = stateplane_wkb_to_wgs84_geojson(values.get("__geometry_wkb"))
+        bbox_values = geojson_geometry_bbox(geometry) if geometry else None
         items.append(
             {
                 "rank": index + 1,
@@ -1869,21 +2138,26 @@ def attribute_filter_fields_for_inventory_layer(layer_id: str) -> dict[str, Any]
 
 
 def attribute_filter_fields_for_dataset(state: BackendState, dataset_id: str) -> dict[str, Any]:
-    if state.duckdb_path.exists():
+    try:
+        configured_layer = configured_map_duckdb_geojson_layers().get(dataset_id.lower())
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    if configured_layer:
+        connection = open_inventory_duckdb(configured_layer)
         try:
-            import duckdb
-        except ImportError as exc:
-            raise HTTPException(status_code=500, detail="The bundled Python runtime must include duckdb.") from exc
-        connection = duckdb.connect(str(state.duckdb_path), read_only=True)
-        try:
-            table_name = duckdb_table_for_dataset(connection, dataset_id)
-            if table_name:
-                fields = duckdb_fields_for_dataset(connection, dataset_id, table_name)
-                return {
-                    "ok": True,
-                    "target_id": dataset_id,
-                    "fields": filterable_field_metadata(fields),
-                }
+            table_name = str(configured_layer["table"])
+            schema_fields = duckdb_table_schema_fields(connection, table_name)
+            fields = [
+                field
+                for field in schema_fields
+                if normalize_token(field["source_field"])
+                != normalize_token(str(configured_layer.get("geometryColumn") or "geometry"))
+            ]
+            return {
+                "ok": True,
+                "target_id": dataset_id,
+                "fields": filterable_field_metadata(fields),
+            }
         finally:
             connection.close()
 
@@ -1961,7 +2235,7 @@ def attribute_filter_field_type(name: str, column: str, data_type: str) -> str:
     return ""
 
 
-def open_inventory_duckdb(layer: dict[str, Any]) -> Any:
+def open_configured_duckdb(layer: dict[str, Any], label: str = "Configured DuckDB") -> Any:
     try:
         import duckdb
     except ImportError as exc:
@@ -1969,13 +2243,17 @@ def open_inventory_duckdb(layer: dict[str, Any]) -> Any:
 
     path = Path(str(layer["database"]))
     if not path.exists():
-        raise HTTPException(status_code=503, detail=f"Inventory DuckDB file was not found: {path}")
+        raise HTTPException(status_code=503, detail=f"{label} file was not found: {path}")
     try:
         connection = duckdb.connect(str(path), read_only=True)
         load_duckdb_spatial_extension(connection)
         return connection
     except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and extension errors through API
-        raise HTTPException(status_code=503, detail=f"Could not open inventory DuckDB {path}: {exc}") from exc
+        raise HTTPException(status_code=503, detail=f"Could not open {label} {path}: {exc}") from exc
+
+
+def open_inventory_duckdb(layer: dict[str, Any]) -> Any:
+    return open_configured_duckdb(layer, "Inventory DuckDB")
 
 
 def load_duckdb_spatial_extension(connection: Any) -> None:
@@ -2153,80 +2431,6 @@ def inventory_metric(
     }
 
 
-def duckdb_table_for_dataset(connection: Any, dataset_id: str) -> str:
-    rows = connection.execute(
-        """
-        SELECT table_name
-        FROM _datasets
-        WHERE lower(dataset_id) = lower(?)
-        LIMIT 1
-        """,
-        [dataset_id],
-    ).fetchall()
-    candidates = [str(rows[0][0])] if rows else [dataset_id]
-    for candidate in candidates:
-        exists = connection.execute(
-            """
-            SELECT table_name
-            FROM information_schema.tables
-            WHERE lower(table_name) = lower(?)
-            LIMIT 1
-            """,
-            [candidate],
-        ).fetchone()
-        if exists:
-            return str(exists[0])
-    return ""
-
-
-def duckdb_fields_for_dataset(connection: Any, dataset_id: str, table_name: str) -> list[dict[str, str]]:
-    columns = connection.execute(
-        """
-        SELECT column_name, data_type
-        FROM information_schema.columns
-        WHERE lower(table_name) = lower(?)
-        ORDER BY ordinal_position
-        """,
-        [table_name],
-    ).fetchall()
-    columns_by_name = {str(name).lower(): str(data_type) for name, data_type in columns}
-    rows = connection.execute(
-        """
-        SELECT source_field, duckdb_column
-        FROM _fields
-        WHERE lower(dataset_id) = lower(?)
-        ORDER BY ordinal
-        """,
-        [dataset_id],
-    ).fetchall()
-    fields: list[dict[str, str]] = []
-    used: set[str] = set()
-    for source_field, duckdb_column in rows:
-        column = str(duckdb_column)
-        if column.lower() not in columns_by_name or column.lower() in DUCKDB_HELPER_COLUMNS:
-            continue
-        fields.append(
-            {
-                "source_field": str(source_field),
-                "duckdb_column": column,
-                "data_type": columns_by_name.get(column.lower(), ""),
-            }
-        )
-        used.add(column.lower())
-    for column, data_type in columns:
-        column_name = str(column)
-        if column_name.lower() in used or column_name.lower() in DUCKDB_HELPER_COLUMNS:
-            continue
-        fields.append(
-            {
-                "source_field": column_name,
-                "duckdb_column": column_name,
-                "data_type": str(data_type),
-            }
-        )
-    return fields
-
-
 def search_fields_for_asset_target(
     target: dict[str, Any],
     dataset: dict[str, Any],
@@ -2258,6 +2462,153 @@ def search_fields_for_asset_target(
             selected.append(field)
 
     return selected
+
+
+def search_spatial_asset_field(
+    connection: Any,
+    layer: dict[str, Any],
+    target: dict[str, Any],
+    field: dict[str, str],
+    all_fields: list[dict[str, str]],
+    query: str,
+    limit: int,
+) -> list[dict[str, Any]]:
+    table_name = str(layer["table"])
+    fields_by_normalized = {
+        normalize_token(item["source_field"]): item
+        for item in all_fields
+    }
+    geometry_field = fields_by_normalized.get(normalize_token(str(layer.get("geometryColumn") or "geometry")))
+    if not geometry_field:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Geometry column was not found for asset search table {table_name}.",
+        )
+    geometry_column = quote_identifier(geometry_field["duckdb_column"])
+    feature_id_field = fields_by_normalized.get(
+        normalize_token(str(layer.get("featureIdColumn") or ""))
+    )
+    feature_id_sql = (
+        f"COALESCE(TRY_CAST({quote_identifier(feature_id_field['duckdb_column'])} AS BIGINT), "
+        f"CAST(hash(ST_AsWKB({geometry_column})) % 9007199254740991 AS BIGINT))"
+        if feature_id_field
+        else f"CAST(hash(ST_AsWKB({geometry_column})) % 9007199254740991 AS BIGINT)"
+    )
+
+    column = quote_identifier(field["duckdb_column"])
+    value_sql = f"CAST({column} AS VARCHAR)"
+    lower_sql = f"lower({value_sql})"
+    normalized_sql = f"regexp_replace({lower_sql}, '[^a-z0-9]+', '', 'g')"
+    escaped_query = escape_like(query.lower())
+    normalized_query = normalize_token(query)
+    contains_pattern = f"%{escaped_query}%"
+    prefix_pattern = f"{escaped_query}%"
+    normalized_contains = f"%{normalized_query}%"
+    normalized_prefix = f"{normalized_query}%"
+    fuzzy_enabled = len(normalized_query) >= 3
+    fuzzy_threshold = 0.84 if len(normalized_query) >= 5 else 0.9
+    score_sql = f"""
+        CASE
+            WHEN {lower_sql} = lower(?) THEN 100.0
+            WHEN {normalized_sql} = ? THEN 98.0
+            WHEN {lower_sql} LIKE lower(?) ESCAPE '\\' THEN 92.0
+            WHEN {normalized_sql} LIKE ? THEN 88.0
+            WHEN {lower_sql} LIKE lower(?) ESCAPE '\\' THEN 76.0
+            ELSE jaro_winkler_similarity({lower_sql}, lower(?)) * 72.0
+        END
+    """
+    match_parts = [
+        f"{lower_sql} LIKE lower(?) ESCAPE '\\'",
+        f"{normalized_sql} LIKE ?",
+    ]
+    params: list[Any] = [
+        query,
+        normalized_query,
+        prefix_pattern,
+        normalized_prefix,
+        contains_pattern,
+        query,
+        contains_pattern,
+        normalized_contains,
+    ]
+    if fuzzy_enabled:
+        match_parts.append(f"jaro_winkler_similarity({lower_sql}, lower(?)) >= ?")
+        params.extend([query, fuzzy_threshold])
+    where_sql = f"{column} IS NOT NULL AND {geometry_column} IS NOT NULL AND ({' OR '.join(match_parts)})"
+
+    configured_properties = [str(item) for item in layer.get("properties", [])]
+    if configured_properties:
+        property_fields = [
+            fields_by_normalized[normalize_token(name)]
+            for name in configured_properties
+            if normalize_token(name) in fields_by_normalized
+        ][:80]
+    else:
+        property_fields = search_fields_for_asset_target(target, {}, all_fields)
+        for name in ("PIPE_ID", "NODE_ID", "CHAN_ID", "Location"):
+            item = fields_by_normalized.get(normalize_token(name))
+            if item and item not in property_fields:
+                property_fields.append(item)
+        property_fields = property_fields[:80]
+    property_selects = [
+        f"{quote_identifier(item['duckdb_column'])} AS {quote_identifier('__prop_' + str(index))}"
+        for index, item in enumerate(property_fields)
+    ]
+    sql = f"""
+        SELECT
+            {feature_id_sql} AS __feature_id,
+            ST_GeometryType({geometry_column}) AS __geometry_type,
+            ST_AsWKB({geometry_column}) AS __geometry_wkb,
+            {value_sql} AS __match_value,
+            {score_sql} AS __score
+            {"," if property_selects else ""}
+            {", ".join(property_selects)}
+        FROM {quote_identifier(table_name)}
+        WHERE {where_sql}
+        ORDER BY __score DESC
+        LIMIT ?
+    """
+    params.append(limit)
+    rows = connection.execute(sql, params).fetchall()
+    names = [item[0] for item in connection.description]
+    results: list[dict[str, Any]] = []
+    prop_aliases = {f"__prop_{index}": item for index, item in enumerate(property_fields)}
+    for row in rows:
+        values = dict(zip(names, row))
+        properties = {
+            prop_aliases[key]["source_field"]: jsonable_value(value)
+            for key, value in values.items()
+            if key in prop_aliases and value not in (None, "")
+        }
+        geometry = stateplane_wkb_to_wgs84_geojson(values.get("__geometry_wkb"))
+        if not geometry:
+            continue
+        dataset_id = str(target["dataset_id"])
+        match_value = "" if values.get("__match_value") is None else str(values.get("__match_value"))
+        display_value = primary_display_value(target, properties) or match_value
+        target_label = str(target.get("label", dataset_id))
+        feature_id = int(values.get("__feature_id") or 0)
+        results.append(
+            {
+                "id": f"{dataset_id}:{feature_id}:{normalize_token(field['source_field'])}",
+                "feature_id": feature_id,
+                "dataset_id": dataset_id,
+                "table_name": table_name,
+                "layer_name": target_label,
+                "kind": target.get("kind", dataset_id),
+                "label": f"{target_label} {display_value}".strip(),
+                "subtitle": f"{field['source_field']}: {match_value}",
+                "match_field": field["source_field"],
+                "match_value": match_value,
+                "score": float(values.get("__score") or 0),
+                "target_order": ASSET_SEARCH_TARGETS.index(target),
+                "geometry_type": values.get("__geometry_type") or "",
+                "geometry": geometry,
+                "bbox": geojson_geometry_bbox(geometry),
+                "properties": properties,
+            }
+        )
+    return results
 
 
 def search_asset_field(
@@ -2586,6 +2937,32 @@ def valid_bbox(values: list[Any]) -> list[float] | None:
     if not all(value == value and value not in {float("inf"), float("-inf")} for value in bbox):
         return None
     return bbox
+
+
+def geojson_geometry_bbox(geometry: dict[str, Any]) -> list[float] | None:
+    points: list[tuple[float, float]] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "GeometryCollection":
+                collect(value.get("geometries"))
+            else:
+                collect(value.get("coordinates"))
+            return
+        if not isinstance(value, (list, tuple)):
+            return
+        if len(value) >= 2 and all(isinstance(item, (int, float)) for item in value[:2]):
+            points.append((float(value[0]), float(value[1])))
+            return
+        for item in value:
+            collect(item)
+
+    collect(geometry)
+    if not points:
+        return None
+    xs = [point[0] for point in points]
+    ys = [point[1] for point in points]
+    return valid_bbox([min(xs), min(ys), max(xs), max(ys)])
 
 
 def jsonable_value(value: Any) -> Any:

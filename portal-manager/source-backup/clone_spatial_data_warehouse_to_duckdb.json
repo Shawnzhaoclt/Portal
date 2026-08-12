@@ -2,6 +2,21 @@
   "output_root": "G:\\Strategic Planning\\Planning\\stm_risk_data\\databases_local",
   "odbc_driver": "ODBC Driver 17 for SQL Server",
   "create_filegdb": false,
+  "arcgis": {
+    "pythonExecutable": "C:\\Program Files\\ArcGIS\\Pro\\bin\\Python\\envs\\arcgispro-py3\\python.exe",
+    "temporaryDirectory": "${LOCALAPPDATA}\\PortalManager\\source-backup",
+    "connections": {
+      "spatial_data_warehouse": "${LOCALAPPDATA}\\ESRI\\Index\\Connections\\virt-sdw-01.sde"
+    },
+    "layers": [
+      {
+        "name": "Topo_ln",
+        "dataset": "SDW.DBO.TOPO_LN",
+        "fields": ["OBJECTID", "Elev", "Interval", "GlobalID"],
+        "geometryColumn": "Shape"
+      }
+    ]
+  },
   "databases": {
     "spatial_data_warehouse": {
       "server": "virt-sdw-01",

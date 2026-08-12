@@ -13,7 +13,6 @@
     "risk":  {
                  "databases":  {
                                    "assetRisk":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/amteam/amteam.duckdb",
-                                   "mapRisk":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/staging/duckdb/stm_risk.duckdb",
                                    "inventory":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/inventory/inventory.db",
                                    "cityPipes":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb"
                                },
@@ -52,12 +51,115 @@
                        "itpipesObservationTable":  "MLO"
                    },
     "maps":  {
-                 "runtimeRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles",
-                 "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
-                 "configurationRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/config",
-                 "maplibreRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/maplibre",
+                 "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/tiles",
+                 "legacyPmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
+                 "portalLayersArchive":  "portal_layers.pmtiles",
+                 "legacyMapArchive":  "planning_project.pmtiles",
+                 "projectConfigFile":  "${PORTAL_APP_ROOT}/config/project.toml",
                  "terrainRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/terrain",
+                 "terrainArchive":  "mecklenburg_terrain.pmtiles",
                  "reportsRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
+                 "duckdbGeoJsonLayers":  [
+                                                  {
+                                                      "id":  "culverts",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                                                      "table":  "Culverts_evw",
+                                                      "geometryColumn":  "Shape",
+                                                      "featureIdColumn":  "OBJECTID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["CityMaint", "FacilityID"]
+                                                  },
+                                                  {
+                                                      "id":  "cw_inspections_all_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/cityworks/cityworks.db",
+                                                      "table":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "INSPECTIONID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["CLOG_RISK", "COND_RISK", "FLOOD_RISK", "INSPECTIONID", "INVESTIGATIONID", "INVESTIGATIONID_LIST", "ITPIPE_ASSETID", "Inspection_Date", "RISK"]
+                                                  },
+                                                  {
+                                                      "id":  "itpipes_defects_ln",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "DEFECTS_MOST_RECENT_NS_LN",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "MLO_ID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["Code", "DS_ASSETID", "ITPIPE_ASSETID", "MLI_ID", "MLO_ID", "ML_ID", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "itpipes_defects_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "DEFECTS_MOST_RECENT_NS_PT",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "MLO_ID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["Code", "DS_ASSETID", "Grade", "ITPIPE_ASSETID", "MLI_ID", "MLO_ID", "ML_ID", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "itpipes_defects_top_risk_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "DEFECTS_MOST_RECENT_TOP_RISK_NS_PT",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "MLO_ID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["Code", "DS_ASSETID", "Grade", "ITPIPE_ASSETID", "MLI_ID", "MLO_ID", "ML_ID", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "priority_pipes_proactive_inv_pv_cw_ln",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/proactive/proactive.duckdb",
+                                                      "table":  "PRIORITY_PIPES_PROACTIVE_INV_PV_CW_LN",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "ITPIPE_ASSETID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["CW_WORKORDERID", "CW_WOTEMPLATENAME", "DS_ASSETID", "ITPIPE_ASSETID", "PRO_PIPE_STATUS", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "proactive_inv_pv_cw_ln",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/proactive/proactive.duckdb",
+                                                      "table":  "PROACTIVE_INV_PV_CW_LN",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "ITPIPE_ASSETID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["CW_WORKORDERID", "CW_WOTEMPLATENAME", "DS_ASSETID", "ITPIPE_ASSETID", "PRO_PIPE_STATUS", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "rr_sc_cwonly_all_unassigned_allrisk_0101_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "t_0101_RR_SC_CWOnly_All_Unassigned_AllRisk",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "INSPECTIONID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["INSPECTIONID", "INVESTIGATIONID", "INVESTIGATIONID_LIST", "INVTEMPLATENAME", "ITPIPE_ASSETID", "WORKORDERID"]
+                                                  },
+                                                  {
+                                                      "id":  "rr_sc_cwonly_everything_allrisk_0101_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "t_0101_RR_SC_CWOnly_Everything_AllRisk",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "INSPECTIONID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["INSPECTIONID", "INVESTIGATIONID", "INVESTIGATIONID_LIST", "INVTEMPLATENAME", "ITPIPE_ASSETID", "WORKORDERID"]
+                                                  },
+                                                  {
+                                                      "id":  "top_deduplicated_wo_filtered_risk_defects_ns_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "TOP_DEDUPLICATED_WO_FILTERED_RISK_DEFECTS_NS",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "MLO_ID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["Code", "DS_ASSETID", "Grade", "ITPIPE_ASSETID", "MLI_ID", "MLO_ID", "ML_ID", "US_ASSETID"]
+                                                  },
+                                                  {
+                                                      "id":  "ur_scfilter_cwonly_all_unassigned_allrisk_0101_pt",
+                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "table":  "t_0101_UR_SCFilter_CWOnly_All_Unassigned_AllRisk",
+                                                      "geometryColumn":  "geometry",
+                                                      "featureIdColumn":  "INSPECTIONID",
+                                                      "sourceSrid":  2264,
+                                                      "properties":  ["CLOG_RISK", "COND_RISK", "FLOOD_RISK", "HH_ALT", "INSPECTIONID", "INVESTIGATIONID", "INVESTIGATIONID_LIST", "ITPIPE_ASSETID", "Max_Defect_Score", "RISK"]
+                                                  }
+                                              ],
                  "readOnly":  true
              },
     "business":  {
@@ -116,10 +218,6 @@
                                           "aerial2025ExportUrl":  "https://meckaerial.mecklenburgcountync.gov/server/rest/services/aerial2025/MapServer/export?bbox={bbox-epsg-3857}\u0026bboxSR=3857\u0026imageSR=3857\u0026size=512,512\u0026format=png32\u0026transparent=false\u0026f=image",
                                           "cltexVectorBasemapStyleUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/resources/styles/root.json",
                                           "cltexVectorTileUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/tile/{z}/{y}/{x}.pbf",
-                                          "ncOneMapImageryServiceRoot":  "https://services.nconemap.gov/secure/rest/services/Imagery",
-                                          "ncOneMapAcquisitionMapServer":  "https://services.nconemap.gov/secure/rest/services/NC1Map_Ortho_Acquisition_Related/MapServer",
-                                          "usgsTopoTileUrl":  "https://basemap.nationalmap.gov/arcgis/rest/services/USGSTopo/MapServer/tile/{z}/{y}/{x}",
-                                          "usgsImageryTopoTileUrl":  "https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryTopo/MapServer/tile/{z}/{y}/{x}",
                                           "glyphsUrl":  "https://tiles.arcgis.com/tiles/9Nl857LBlQVyzq54/arcgis/rest/services/CLTEX_Basemap/VectorTileServer/resources/fonts/{fontstack}/{range}.pbf",
                                           "googleStreetViewUrlTemplate":  "https://www.google.com/maps/@?api=1\u0026map_action=pano\u0026viewpoint={lat},{lng}"
                                       }

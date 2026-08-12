@@ -25,6 +25,7 @@ import {
   History,
   LayoutDashboard,
   ListChecks,
+  Map as MapIcon,
   PackageCheck,
   Pencil,
   Play,
@@ -367,6 +368,7 @@ type SourceBackupRun = {
   details: string;
   started_at: string;
   finished_at: string;
+  duration_seconds?: number;
   log_path: string;
 };
 
@@ -377,9 +379,39 @@ type SourceBackupArchive = {
   modified_at: string;
 };
 
+type MapTilesProgress = {
+  status: string;
+  engine?: "tippecanoe" | "gdal" | "python";
+  phase?: string;
+  phasePercent?: number | null;
+  message?: string;
+  startedAt: string;
+  updatedAt: string;
+  output: string;
+  workerCount: number;
+  threadsPerWorker: number;
+  tippecanoeThreads?: string;
+  tippecanoeGroupWorkers?: number;
+  gdalThreads?: string;
+  totalLayers: number;
+  completedLayers: number;
+  completedLayerIds: string[];
+  activeLayers: Array<{ index: number; id: string }>;
+  error?: string;
+};
+
 type SourceBackupStatus = {
   available: boolean;
   missing_files: string[];
+  map_tiles_available: boolean;
+  map_tiles_missing_files: string[];
+  map_tiles_directory?: string;
+  map_tiles_builder?: string;
+  map_tiles_settings_file?: string;
+  map_tiles_progress_file?: string;
+  map_tiles_progress?: MapTilesProgress;
+  map_tiles_tileset_count?: number;
+  map_tiles_output_count?: number;
   scripts_directory: string;
   manager_settings_file: string;
   backup_settings_file?: string;
@@ -493,8 +525,8 @@ const today = todayIsoDate();
 
 const navigation: NavigationItem[] = [
   { id: "overview", label: "Overview", icon: LayoutDashboard },
-  { id: "source-data", label: "Source Data", icon: Database },
-  { id: "source-backup", label: "Source Backup", icon: DatabaseBackup },
+  { id: "source-backup", label: "Mirrors & Backups", icon: DatabaseBackup },
+  { id: "source-data", label: "Serving Data", icon: Database },
   { id: "repository", label: "Repository", icon: GitBranch },
   { id: "releases", label: "Releases", icon: PackageCheck },
   { id: "schema", label: "Schema", icon: FileCog },
@@ -508,8 +540,8 @@ const navigation: NavigationItem[] = [
 
 const pageDescriptions: Record<PageId, string> = {
   overview: "Monitor source synchronization and open workstation maintenance tools.",
-  "source-data": "Schedule and monitor resource-ready serving-table rebuilds for Portal.",
-  "source-backup": "Rebuild SQL Server source mirrors and maintain retained source-data archives.",
+  "source-backup": "Rebuild source mirrors, retain archives, and publish map tiles.",
+  "source-data": "Rebuild and publish Portal-ready serving tables.",
   repository: "Inspect and validate the shared business-data repository.",
   releases: "Publish approved portable Portal updates to the shared release location.",
   schema: "Validate and publish approved shared business-data schema snapshots.",
@@ -540,6 +572,17 @@ function formatBytes(value?: number) {
     unit += 1;
   }
   return `${size >= 10 || unit === 0 ? size.toFixed(0) : size.toFixed(1)} ${units[unit]}`;
+}
+
+function formatDuration(value?: number) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return "-";
+  if (value < 60) return `${value < 10 ? value.toFixed(1) : Math.round(value)} sec`;
+  const totalSeconds = Math.round(value);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours) return `${hours} hr ${minutes} min`;
+  return `${minutes} min ${seconds} sec`;
 }
 
 function fileName(path?: string) {
@@ -1587,7 +1630,7 @@ function SourceBackupWorkspace({
 }: {
   status: SourceBackupStatus | null;
   busy: string | null;
-  execute: (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat") => void;
+  execute: (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat" | "map_tiles") => void;
   updateSchedule: (schedule: "workflow" | "heartbeat", enabled: boolean) => void;
   saveSchedule: (schedule: { workflowTime: string; backupWeekday: string; heartbeatDay: string; heartbeatTime: string }) => void;
   openPath: (path: string) => void;
@@ -1599,6 +1642,12 @@ function SourceBackupWorkspace({
   const [archivePageSize, setArchivePageSize] = useState(10);
   const [archivePage, setArchivePage] = useState(1);
   const running = status?.state?.status === "running";
+  const mapTilesProgress = status?.map_tiles_progress;
+  const mapTilesRunning = running && (
+    status?.state?.action === "map_tiles"
+    || mapTilesProgress?.status === "building"
+    || mapTilesProgress?.status === "finalizing"
+  );
   const latestStatus = !status?.available
     ? "unavailable"
     : status?.refresh_ready === false
@@ -1615,11 +1664,32 @@ function SourceBackupWorkspace({
   const unavailableReason = status?.missing_files?.length
     ? `Missing: ${status.missing_files.join(", ")}`
     : "The in-project source-backup scripts are not available.";
-  const statusMessage = !status?.available
+  const ordinaryStatusMessage = !status?.available
     ? unavailableReason
     : status?.credential_issues?.length
       ? status.credential_issues.join("; ")
       : status?.state?.details || "The maintained source-backup workflow is ready.";
+  const statusMessage = mapTilesRunning && mapTilesProgress?.totalLayers
+    ? mapTilesProgress.phase === "staging"
+      ? `Preparing map data: ${mapTilesProgress.completedLayers} of ${mapTilesProgress.totalLayers} layers completed.`
+      : mapTilesProgress.phase === "encoding"
+        ? `${mapTilesProgress.engine === "tippecanoe" ? "Tippecanoe" : "GDAL"} is encoding ${mapTilesProgress.totalLayers} layers into PMTiles.`
+        : mapTilesProgress.phase === "merging"
+          ? `Merging tile groups into one PMTiles archive.`
+          : mapTilesProgress.phase === "validating" || mapTilesProgress.status === "finalizing"
+          ? `All ${mapTilesProgress.totalLayers} layers are complete. Validating the archive.`
+          : `Building map tiles: ${mapTilesProgress.completedLayers} of ${mapTilesProgress.totalLayers} layers completed.`
+    : ordinaryStatusMessage;
+  const mapTilesEncoding = mapTilesProgress?.phase === "encoding" || mapTilesProgress?.phase === "merging";
+  const mapTilesProgressMaximum = mapTilesEncoding ? 100 : mapTilesProgress?.totalLayers || 1;
+  const mapTilesProgressValue = mapTilesEncoding
+    ? mapTilesProgress?.phasePercent ?? 0
+    : mapTilesProgress?.completedLayers || 0;
+  const mapTilesEngineLabel = mapTilesProgress?.engine === "tippecanoe"
+    ? `Tippecanoe ${mapTilesProgress.tippecanoeGroupWorkers || 1} group workers / ${mapTilesProgress.tippecanoeThreads || "configured"} threads`
+    : mapTilesProgress?.engine === "gdal"
+      ? `GDAL ${mapTilesProgress.gdalThreads || "configured"} threads`
+      : `${mapTilesProgress?.workerCount || 1} Python workers`;
   const actionLabel = (action: string) => action.replaceAll("_", " ");
   const weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
   useEffect(() => {
@@ -1639,12 +1709,19 @@ function SourceBackupWorkspace({
         <button className="quiet-button" disabled={busy !== null || running || !status?.available} onClick={() => execute("check")}><CheckCircle2 size={17} />Check configuration</button>
         <button className="quiet-button" disabled={busy !== null || running || !status?.available} onClick={() => execute("backup")}><ArchiveRestore size={17} />Backup now</button>
         <button className="quiet-button" disabled={busy !== null || running || !status?.refresh_ready} onClick={() => execute("refresh")}><Database size={17} />Refresh mirrors</button>
+        <button className="quiet-button" disabled={busy !== null || running || !status?.map_tiles_available} onClick={() => execute("map_tiles")} title={status?.map_tiles_missing_files?.join("\n") || "Build registered PMTiles archives from local DuckDB mirrors"}><MapIcon size={17} />{busy === "map_tiles" ? "Building tiles" : "Build map tiles"}</button>
         <button className="primary-button" disabled={busy !== null || running || !status?.refresh_ready} onClick={() => execute("workflow")}><Play size={17} />Run workflow</button>
         <button className="primary-button" disabled={busy !== null || scheduleBusy} onClick={() => saveSchedule({ workflowTime, backupWeekday, heartbeatDay, heartbeatTime })}>{scheduleBusy ? "Saving..." : "Save configuration"}</button>
       </div></div>
-      <section className={`${latestStatus === "failed" || latestStatus === "unavailable" || latestStatus === "configuration required" ? "status stopped" : "status running"} compact-status`}>
+      <section className={`${latestStatus === "failed" || latestStatus === "unavailable" || latestStatus === "configuration required" ? "status stopped" : "status running"} compact-status${mapTilesRunning && mapTilesProgress?.totalLayers ? " map-tiles-running-status" : ""}`}>
         <div><p className="eyebrow">SOURCE MIRROR AND ARCHIVE WORKFLOW</p><h2>{latestStatus.toUpperCase()}</h2></div>
-        <p>{statusMessage}</p>
+        {mapTilesRunning && mapTilesProgress?.totalLayers ? (
+          <aside className="map-tiles-build-progress">
+            <div><strong>{statusMessage}</strong><span>{mapTilesEngineLabel}</span></div>
+            <progress max={mapTilesProgressMaximum} value={mapTilesProgressValue} />
+            <small>{mapTilesProgress.activeLayers?.length ? `Active: ${mapTilesProgress.activeLayers.map((layer) => layer.id).join(", ")}` : mapTilesProgress.message || "Finalizing archive"}</small>
+          </aside>
+        ) : <p>{statusMessage}</p>}
       </section>
       <section className="metrics maintenance-metrics">
         <div><span>DATABASE MIRRORS</span><strong>{status?.database_count ?? "-"}</strong></div>
@@ -1661,7 +1738,7 @@ function SourceBackupWorkspace({
             <button className="quiet-button" disabled={busy !== null} onClick={() => updateSchedule("workflow", true)}><CalendarClock size={17} />{status?.workflow_schedule?.registered ? "Update task" : "Enable"}</button>
             {status?.workflow_schedule?.registered && <button className="danger-button" disabled={busy !== null} onClick={() => updateSchedule("workflow", false)}>Disable</button>}
           </div>
-          <p className="nightly-note">The clean SQL Server mirror rebuild runs daily. The retained archive and separate Spatial Data Warehouse mirror refresh run on the selected archive day.</p>
+          <p className="nightly-note">The clean SQL Server mirror rebuild runs daily. The retained archive, Spatial Data Warehouse refresh, and PMTiles rebuild run on the selected archive day.</p>
         </article>
         <article className="retention-controls scheduled-task-controls">
           <div className="retention-readout"><span>Heartbeat</span><strong>{status?.heartbeat_schedule?.state || "Checking"}</strong></div>
@@ -1677,9 +1754,9 @@ function SourceBackupWorkspace({
       <section className="source-backup-tables">
         <section className="maintenance-table">
           <div className="table-toolbar"><div><p className="eyebrow">RECENT RUNS</p><h2>{status?.runs?.length ?? 0} recorded tasks</h2></div>{status?.log_directory && <button className="quiet-button" onClick={() => openPath(status.log_directory)}><FolderOpen size={17} />Open logs</button>}</div>
-          <div className="table-scroll"><table><thead><tr><th>Started</th><th>Action</th><th>Status</th><th>Details</th></tr></thead><tbody>
-            {(status?.runs ?? []).map((run) => <tr key={run.run_id}><td>{formatTimestamp(run.started_at)}</td><td>{actionLabel(run.action)}</td><td data-status={run.status}>{run.status}</td><td title={run.log_path}>{run.details}</td></tr>)}
-            {!status?.runs?.length && <tr><td colSpan={4} className="empty compact-empty">No source-backup tasks have been recorded.</td></tr>}
+          <div className="table-scroll"><table className="source-runs-table"><thead><tr><th>Started</th><th>Action</th><th>Status</th><th>Duration</th><th>Details</th></tr></thead><tbody>
+            {(status?.runs ?? []).map((run) => <tr key={run.run_id}><td>{formatTimestamp(run.started_at)}</td><td>{actionLabel(run.action)}</td><td data-status={run.status}>{run.status}</td><td>{formatDuration(run.duration_seconds)}</td><td title={`${run.details}\n${run.log_path}`}>{run.details}</td></tr>)}
+            {!status?.runs?.length && <tr><td colSpan={5} className="empty compact-empty">No source-backup tasks have been recorded.</td></tr>}
           </tbody></table></div>
         </section>
         <section className="maintenance-table">
@@ -2096,12 +2173,12 @@ export function App() {
     return response;
   }, []);
 
-  const executeSourceBackup = async (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat") => {
+  const executeSourceBackup = async (action: "check" | "workflow" | "refresh" | "backup" | "heartbeat" | "map_tiles") => {
     const confirmations: Partial<Record<typeof action, { message: string; title: string; confirmLabel: string }>> = {
       workflow: {
         title: "Run source-backup workflow",
         confirmLabel: "Run workflow",
-        message: "Run the maintained source workflow now? The configured DuckDB mirrors will be rebuilt. If today is the weekly backup day, the current files will be archived first.",
+        message: "Run the maintained source workflow now? The configured DuckDB mirrors will be rebuilt. On the weekly archive day, the current files are archived first, then the SDW mirror and validated PMTiles archive are rebuilt.",
       },
       refresh: {
         title: "Refresh source mirrors",
@@ -2118,12 +2195,17 @@ export function App() {
         confirmLabel: "Send test",
         message: "Send a machine-online heartbeat email to the configured recipients now?",
       },
+      map_tiles: {
+        title: "Build Portal map tiles",
+        confirmLabel: "Build map tiles",
+        message: "Generate every enabled PMTiles archive from the registered local DuckDB mirrors? Existing archives will be replaced only after each new archive passes validation.",
+      },
     };
     const confirmation = confirmations[action];
     if (confirmation && !(await appConfirm(confirmation.message, {
       title: confirmation.title,
       confirmLabel: confirmation.confirmLabel,
-      kind: action === "refresh" || action === "workflow" ? "warning" : "default",
+      kind: action === "refresh" || action === "workflow" || action === "map_tiles" ? "warning" : "default",
     }))) return;
     setSourceBackupBusy(action);
     try {

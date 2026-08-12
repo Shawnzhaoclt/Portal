@@ -2364,7 +2364,7 @@ fn source_backup_status() -> Result<Value, String> {
 fn run_source_backup(action: String) -> Result<Value, String> {
     if !matches!(
         action.as_str(),
-        "check" | "workflow" | "refresh" | "backup" | "heartbeat"
+        "check" | "workflow" | "refresh" | "backup" | "heartbeat" | "map_tiles"
     ) {
         return Err(format!("Unsupported source-backup action: {action}"));
     }

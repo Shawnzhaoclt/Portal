@@ -91,18 +91,17 @@ view with the same dynamic 15-second shutdown countdown when the maintenance win
 begins, including after the workstation resumes or regains focus, and exits only after
 the countdown completes.
 
-The portable folder intentionally excludes DuckDB, PMTiles, map styles, sprites, and
-map configuration. Those immutable inputs are read from the `shared.dataRoot` path in
-`config\portal.settings.json`. The default shared layout is:
+The portable folder intentionally excludes DuckDB and PMTiles. Map styles and sprites
+are packaged with the map resource, and the map project catalog is copied to the
+portable `config\project.toml` file. The default shared layout is:
 
 ```text
 G:\Strategic Planning\Planning\stm_risk_data\
   intermediate\amteam\amteam.duckdb
-  maptiles\
-    config\project.toml
-    build\staging\duckdb\stm_risk.duckdb
-    build\pmtiles\*.pmtiles
-    build\maplibre\
+  intermediate\cityworks\cityworks.db
+  intermediate\riskranking\riskranking.db
+  intermediate\inventory\inventory.db
+  databases_local\tiles\*.pmtiles
 ```
 
 Reference data is published by the workstation data-build process. A UNC path can

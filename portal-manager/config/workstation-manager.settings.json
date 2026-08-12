@@ -9,6 +9,8 @@
   "sourceBackupPythonExecutable": "${USERPROFILE}/AppData/Local/miniconda3/envs/stm_env/python.exe",
   "sourceBackupDirectory": "../source-backup",
   "sourceBackupRunner": "../coordinator/source_backup_runner.py",
+  "mapTilesDirectory": "../map-tiles",
+  "mapTilesSettingsFile": "pmtiles.settings.json",
   "sourceBackupDailyTime": "00:01",
   "sourceBackupWeekday": "SAT",
   "sourceBackupHeartbeatDay": "SUN",

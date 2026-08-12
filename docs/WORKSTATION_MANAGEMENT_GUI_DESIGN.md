@@ -48,16 +48,21 @@ portal-manager/
   config/workstation-manager.settings.json
   src/                         React UI
   src-tauri/                   Rust/Tauri host
-  scripts/build-portable.ps1
+  map-tiles/                   Portal-owned DuckDB-to-PMTiles builder and registry
+  scripts/build_portable.py
 ```
 
 `PortalManager.exe` is the portable interactive entry point. It is a
 Tauri executable with a React UI and Rust native host, without a local web server.
 The portable folder includes a `config` directory and the required
-`portal-manager/sync`, `portal-manager/source-backup`, and coordinator Python/scheduler
+`portal-manager/sync`, `portal-manager/source-backup`, `portal-manager/map-tiles`, and coordinator Python/scheduler
 files. Source-backup scripts are maintained in this repository and copied into the
 portable Manager package; production operation does not depend on
-`C:\Users\105692\scripts\backup_scripts`. Existing non-GUI launchers may remain for
+`C:\Users\105692\scripts\backup_scripts`. PMTiles orchestration is also maintained
+inside Portal. The primary encoder is a self-contained Tippecanoe runtime packaged
+with Portal Manager. GDAL is the native fallback and the Portal-owned Python
+encoder is the final diagnostic fallback. It does not call `stm_risk_models` or
+another project at runtime. Existing non-GUI launchers may remain for
 Task Scheduler, but operators normally use the workstation manager.
 
 ## 3. Navigation
@@ -67,12 +72,12 @@ work area:
 
 1. **Overview** - workstation health, running jobs, current releases, latest backup,
    latest snapshot, and recent failures.
-2. **Source Data** - scheduled serving-table rebuilds, run now, input checks,
-   published SQLite versions, and source logs.
-3. **Source Backup** - clean SQL Server-to-DuckDB mirror rebuilds, weekly source-data
+2. **Mirrors & Backups** - clean SQL Server-to-DuckDB mirror rebuilds, weekly source-data
    archives, retained archive inventory, Outlook notifications, machine heartbeat,
-   Task Scheduler registration, and diagnostic logs. The recent-run history is capped
-   at the 10 most recent source-backup tasks, including their managed log files.
+   Task Scheduler registration, registered DuckDB-to-PMTiles generation, and diagnostic logs. The recent-run history is capped
+   at the 10 most recent source-backup tasks and shows the computing duration for each run while retaining its managed log file.
+3. **Serving Data** - scheduled serving-table rebuilds, run now, input checks,
+   published SQLite versions, and source logs.
 4. **Repository** - initialize or inspect the shared protocol root, membership release,
    active epoch, writers, locks, and repository health.
 5. **Schema** - catalog validation, release build/test/publish, database status, plan,
@@ -91,7 +96,7 @@ work area:
 Pages are task-focused. A long-running command does not block navigation or freeze the
 window.
 
-The Source Data implementation follows
+The Serving Data implementation follows
 [`PORTAL_SOURCE_DATA_SYNC_DESIGN.md`](PORTAL_SOURCE_DATA_SYNC_DESIGN.md). It publishes
 resource-ready business tables from scoped source-side extracts; it does not maintain
 a general Cityworks or ITPipes mirror. Every run rebuilds the required serving tables
@@ -105,17 +110,18 @@ command from a settings file.
 
 | Area | Task ID | Required behavior |
 | --- | --- | --- |
-| Source Data | `source.schedule.start` | Start the single-instance daytime scheduler |
-| Source Data | `source.schedule.stop` | Confirm and stop only the registered scheduler |
-| Source Data | `source.run` | Run one publication immediately |
-| Source Data | `source.check` | Validate selected source connectivity and tables |
-| Source Data | `source.version.open` | Open the active or selected immutable publication |
-| Source Backup | `source-backup.check` | Validate maintained scripts and non-secret configuration |
-| Source Backup | `source-backup.workflow` | Run the daily mirror rebuild and the weekly archive when due; on the configured weekly day, rebuild the separate 68-layer Spatial Data Warehouse DuckDB mirror after the archive, with ST_Hilbert ordering and DuckDB R-Tree indexes for spatial layers |
-| Source Backup | `source-backup.refresh` | Cleanly rebuild the standard SQL Server DuckDB mirrors and the separate 68-layer Spatial Data Warehouse mirror, without FileGDB generation or creating an archive |
-| Source Backup | `source-backup.backup` | Create the retained DuckDB and supporting-directory archive immediately |
-| Source Backup | `source-backup.heartbeat` | Send the configured workstation heartbeat test |
-| Source Backup | `source-backup.schedule` | Register, update, or remove only the two approved Windows scheduled tasks: `StormWater Portal Source Backup Workflow` and `StormWater Portal Machine Heartbeat` |
+| Serving Data | `source.schedule.start` | Start the single-instance daytime scheduler |
+| Serving Data | `source.schedule.stop` | Confirm and stop only the registered scheduler |
+| Serving Data | `source.run` | Run one publication immediately |
+| Serving Data | `source.check` | Validate selected source connectivity and tables |
+| Serving Data | `source.version.open` | Open the active or selected immutable publication |
+| Mirrors & Backups | `source-backup.check` | Validate maintained scripts and non-secret configuration |
+| Mirrors & Backups | `source-backup.workflow` | Run the daily mirror rebuild and the weekly archive when due; on the configured weekly day, rebuild the separate 68-layer Spatial Data Warehouse DuckDB mirror after the archive, with ST_Hilbert ordering and DuckDB R-Tree indexes for spatial layers, then build, validate, and atomically publish the registered PMTiles archive |
+| Mirrors & Backups | `source-backup.refresh` | Cleanly rebuild the standard SQL Server DuckDB mirrors and the separate 68-layer Spatial Data Warehouse mirror, without FileGDB generation or creating an archive |
+| Mirrors & Backups | `source-backup.backup` | Create the retained DuckDB and supporting-directory archive immediately |
+| Mirrors & Backups | `source-backup.map-tiles` | Read registered authoritative DuckDB spatial tables directly, stage selected fields locally, build with packaged Tippecanoe, validate each archive, and publish it atomically with a manifest |
+| Mirrors & Backups | `source-backup.heartbeat` | Send the configured workstation heartbeat test |
+| Mirrors & Backups | `source-backup.schedule` | Register, update, or remove only the two approved Windows scheduled tasks: `StormWater Portal Source Backup Workflow` and `StormWater Portal Machine Heartbeat` |
 | Repository | `repository.status` | Read-only health and current-pointer inspection |
 | Repository | `repository.bootstrap` | Initialize an empty root after a typed confirmation |
 | Repository | `repository.validate` | Verify pointers, hashes, membership, and layout |
@@ -215,12 +221,42 @@ The manager reads paths from the existing Portal and source-sync settings. It do
 embed drive letters, server names, passwords, or database paths.
 
 `config/workstation-manager.settings.json` is authoritative for the in-project
-source-backup directory, approved Python runtime, daily workflow time, weekly archive
+source-backup and map-tiles directories, approved Python runtime, daily workflow time, weekly archive
 day, heartbeat schedule, and fixed Task Scheduler names. The two source-backup JSON
 files define mirror sources, archive inputs, output locations, retention, and
 notification recipients. SQL-authenticated source passwords are resolved from named
 environment variables and are never committed to the repository, returned by status
 commands, passed on command lines, or written to ordinary logs.
+
+`portal-manager/map-tiles/pmtiles.settings.json` is the authoritative map-tile
+registry. It declares only approved DuckDB files, spatial tables, exposed fields,
+zoom ranges, tilesets, and output paths. `Build map tiles` remains an explicit manual
+operation. Ordinary mirror refreshes and non-weekly daily workflows do not start the
+potentially long tile build; the configured weekly workflow starts it only after the
+Spatial Data Warehouse mirror has been rebuilt successfully.
+The current PMTiles registry contains only the 67 approved Spatial Data Warehouse
+layers in `databases_local/tiles/portal_layers.pmtiles`. Eleven Planning Project
+layers remain direct DuckDB sources and are never encoded into PMTiles. Their
+database, table, geometry, feature-ID, and exposed-field mappings are maintained in
+`maps.duckdbGeoJsonLayers` in `portal.settings.json`. The ITPipes display layers use
+the risk-ranking `DEFECTS_MOST_RECENT_*` tables so they preserve the legacy
+most-recent-inspection semantics. The stable `culverts` layer reads `Culverts_evw`
+from the configured Cityworks spatial mirror. No shared-data database path is
+embedded in application or builder code.
+MapLibre style JSON, sprite assets, and the expected source-layer registry belong to
+the Storm Water Asset Risk Map resource and are bundled with Portal Desktop. The
+shared tiles directory contains only the configured PMTiles archive and its build
+manifest; archive locations and file names come from configuration.
+The authoritative DuckDB remains on its configured shared path and is opened
+read-only; it is not copied to local SSD. A bounded process pool transforms each
+layer and stages only approved fields in disposable local FlatGeobuf files.
+Tippecanoe encodes independent zoom-compatible groups concurrently while dividing
+the configured CPU allowance across the processes, and `tile-join` combines the
+groups into the consolidated archive. The Manager
+validates the PMTiles header, expected layer IDs, and exact field allowlists before
+atomic publication. GDAL and then the Portal-owned Python encoder provide controlled
+fallbacks only when an engine is unavailable. The Manager UI reports staging,
+encoding, merging, validation, and publication progress.
 
 The Settings page presents fields by logical group, validates them, and writes through a
 temporary file plus atomic replacement. It provides:

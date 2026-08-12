@@ -33,6 +33,7 @@ def main() -> int:
     release_executable = PROJECT_ROOT / "src-tauri" / "target" / "release" / "portal-workstation-manager.exe"
     coordinator_source = PORTAL_ROOT / "python" / "portal"
     portal_settings_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "portal.settings.json"
+    portal_project_config_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "project.toml"
     portal_system_database_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "system.db"
     portal_python_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "runtime" / "portal-python"
     sync_settings_source = PROJECT_ROOT / "sync" / "sync.settings.json"
@@ -43,6 +44,8 @@ def main() -> int:
         raise FileNotFoundError(f"Coordinator package was not found: {coordinator_source}")
     if not portal_settings_source.is_file():
         raise FileNotFoundError(f"Portal settings were not found: {portal_settings_source}")
+    if not portal_project_config_source.is_file():
+        raise FileNotFoundError(f"Portal project configuration was not found: {portal_project_config_source}")
     if not portal_system_database_source.is_file():
         raise FileNotFoundError(f"Portal system database was not found: {portal_system_database_source}")
     if not (portal_python_source / "portal-python.exe").is_file():
@@ -81,11 +84,14 @@ def main() -> int:
     portable_settings["portalSettingsFile"] = "portal.settings.json"
     portable_settings["portalReleaseSettingsFile"] = "../../../../dist/Portal-Desktop/config/portal.settings.json"
     portable_settings["portalPythonWorker"] = "../runtime/portal-python/portal-python.exe"
+    portable_settings["mapTilesDirectory"] = "../map-tiles"
+    portable_settings["mapTilesSettingsFile"] = "pmtiles.settings.json"
     (config_directory / "workstation-manager.settings.json").write_text(
         json.dumps(portable_settings, indent=2) + "\n",
         encoding="utf-8",
     )
     copy_required(portal_settings_source, config_directory / "portal.settings.json")
+    copy_required(portal_project_config_source, config_directory / "project.toml")
     manager_system_database = config_directory / "system.db"
     if not manager_system_database.is_file():
         copy_required(portal_system_database_source, manager_system_database)
@@ -154,6 +160,34 @@ def main() -> int:
         ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.log"),
     )
 
+    map_tiles_directory = output_directory / "map-tiles"
+    shutil.copytree(
+        PROJECT_ROOT / "map-tiles",
+        map_tiles_directory,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.log", "test_*.py"),
+    )
+    tippecanoe_directory = map_tiles_directory / "vendor" / "tippecanoe"
+    for runtime_name in (
+        "tippecanoe.exe",
+        "tile-join.exe",
+        "msys-2.0.dll",
+        "msys-gcc_s-seh-1.dll",
+        "msys-sqlite3-0.dll",
+        "msys-stdc++-6.dll",
+        "msys-z.dll",
+        "LICENSE-TIPPECANOE.md",
+        "LICENSE-MSYS2-RUNTIME-GPL.txt",
+        "LICENSE-MSYS2-RUNTIME-NOTICE.txt",
+        "LICENSE-GCC-RUNTIME-EXCEPTION.txt",
+        "LICENSE-SQLITE.txt",
+        "LICENSE-ZLIB.txt",
+    ):
+        if not (tippecanoe_directory / runtime_name).is_file():
+            raise FileNotFoundError(
+                f"The packaged Tippecanoe runtime is incomplete: {runtime_name}"
+            )
+
     for obsolete_name in (
         "start_sync.bat",
         "stop_sync.bat",
@@ -169,7 +203,7 @@ def main() -> int:
         "==========================\n\n"
         "Start the application by double-clicking:\n\n"
         "  PortalManager.exe\n\n"
-        "The config, coordinator, source-backup, and sync directories must remain beside the executable.\n"
+        "The config, coordinator, map-tiles, source-backup, and sync directories must remain beside the executable.\n"
         "config\\system.db is the authoritative Manager administration database.\n",
         encoding="utf-8",
     )

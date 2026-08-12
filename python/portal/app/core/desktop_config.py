@@ -22,6 +22,19 @@ _AIF_SOURCE_ENVIRONMENT_KEYS = frozenset(
     }
 )
 
+_MAP_SOURCE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PORTAL_MAP_PMTILES_ROOT",
+        "PORTAL_MAP_LEGACY_PMTILES_ROOT",
+        "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
+        "PORTAL_MAP_LEGACY_ARCHIVE",
+        "PORTAL_MAP_CONFIG_FILE",
+        "PORTAL_MAP_TERRAIN_ROOT",
+        "PORTAL_MAP_TERRAIN_ARCHIVE",
+        "PORTAL_MAP_REPORTS_ROOT",
+    }
+)
+
 
 def desktop_config_path() -> Path:
     configured = os.getenv("PORTAL_CONFIG_FILE", "").strip()
@@ -80,13 +93,52 @@ def _value(config: dict[str, Any], *keys: str) -> str:
     return str(current or "").strip()
 
 
+def configured_map_duckdb_geojson_layers() -> dict[str, dict[str, Any]]:
+    config = load_desktop_config()
+    maps = config.get("maps")
+    raw_layers = maps.get("duckdbGeoJsonLayers") if isinstance(maps, dict) else None
+    if not isinstance(raw_layers, list):
+        raise RuntimeError("maps.duckdbGeoJsonLayers must be a list in portal.settings.json.")
+
+    configured: dict[str, dict[str, Any]] = {}
+    for index, raw_layer in enumerate(raw_layers):
+        if not isinstance(raw_layer, dict):
+            raise RuntimeError(f"maps.duckdbGeoJsonLayers[{index}] must be an object.")
+        layer = dict(raw_layer)
+        layer_id = str(layer.get("id") or "").strip().lower()
+        database = str(layer.get("database") or "").strip()
+        table = str(layer.get("table") or "").strip()
+        if not layer_id or not database or not table:
+            raise RuntimeError(
+                f"maps.duckdbGeoJsonLayers[{index}] must define id, database, and table."
+            )
+        if layer_id in configured:
+            raise RuntimeError(f"Duplicate DuckDB GeoJSON layer id: {layer_id}")
+        properties = layer.get("properties", [])
+        if not isinstance(properties, list) or not all(
+            isinstance(item, str) and item.strip() for item in properties
+        ):
+            raise RuntimeError(f"DuckDB GeoJSON layer {layer_id} has invalid properties.")
+        layer["id"] = layer_id
+        layer["database"] = database
+        layer["table"] = table
+        layer["geometryColumn"] = str(layer.get("geometryColumn") or "geometry").strip()
+        layer["featureIdColumn"] = str(layer.get("featureIdColumn") or "").strip()
+        layer["properties"] = [str(item).strip() for item in properties]
+        try:
+            layer["sourceSrid"] = int(layer.get("sourceSrid") or 2264)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(f"DuckDB GeoJSON layer {layer_id} has an invalid sourceSrid.") from exc
+        configured[layer_id] = layer
+    return configured
+
+
 def configure_environment() -> dict[str, Any]:
     config = load_desktop_config()
     mappings = {
         "PORTAL_SYSTEM_DB": _value(config, "system", "database"),
         "PORTAL_BUSINESS_DB": _value(config, "business", "database"),
         "PORTAL_AMTEAM_DUCKDB": _value(config, "risk", "databases", "assetRisk"),
-        "PORTAL_MAP_RISK_DUCKDB": _value(config, "risk", "databases", "mapRisk"),
         "PORTAL_INVENTORY_DUCKDB": _value(config, "risk", "databases", "inventory"),
         "PORTAL_CITY_PIPES_DUCKDB": _value(config, "risk", "databases", "cityPipes"),
         "PORTAL_SOURCES_MANIFEST": _value(config, "dataSources", "portalSources", "manifest"),
@@ -102,11 +154,13 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_AIF_ITPIPES_OBSERVATION_TABLE": _value(config, "aifSources", "itpipesObservationTable"),
         "PORTAL_GIS_FACILITY_DUCKDB": _value(config, "dataSources", "gisFacility", "database"),
         "PORTAL_SDW_DUCKDB": _value(config, "dataSources", "spatialDataWarehouse", "database"),
-        "PORTAL_MAP_TILES_RUNTIME_ROOT": _value(config, "maps", "runtimeRoot"),
         "PORTAL_MAP_PMTILES_ROOT": _value(config, "maps", "pmtilesRoot"),
-        "PORTAL_MAP_CONFIG_ROOT": _value(config, "maps", "configurationRoot"),
-        "PORTAL_MAP_MAPLIBRE_ROOT": _value(config, "maps", "maplibreRoot"),
+        "PORTAL_MAP_LEGACY_PMTILES_ROOT": _value(config, "maps", "legacyPmtilesRoot"),
+        "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE": _value(config, "maps", "portalLayersArchive"),
+        "PORTAL_MAP_LEGACY_ARCHIVE": _value(config, "maps", "legacyMapArchive"),
+        "PORTAL_MAP_CONFIG_FILE": _value(config, "maps", "projectConfigFile"),
         "PORTAL_MAP_TERRAIN_ROOT": _value(config, "maps", "terrainRoot"),
+        "PORTAL_MAP_TERRAIN_ARCHIVE": _value(config, "maps", "terrainArchive"),
         "PORTAL_MAP_REPORTS_ROOT": _value(config, "maps", "reportsRoot"),
         "PORTAL_BUSINESS_BACKUP_ROOT": _value(config, "business", "backupRoot"),
         "PORTAL_BUSINESS_INBOX_ROOT": _value(config, "business", "inboxRoot"),
@@ -131,22 +185,31 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_TEMP_ROOT": _value(config, "application", "tempRoot"),
     }
     for name, value in mappings.items():
-        if name in _AIF_SOURCE_ENVIRONMENT_KEYS:
+        if name in _AIF_SOURCE_ENVIRONMENT_KEYS or name in _MAP_SOURCE_ENVIRONMENT_KEYS:
             # The packaged, Manager-owned Portal settings are authoritative for
-            # AIF source routing. Do not allow a stale .env or machine variable
-            # to redirect one table to a different database.
+            # AIF and map source routing. Do not allow a stale .env or machine
+            # variable to redirect an authoritative configured source.
             if value:
                 os.environ[name] = value
             else:
                 os.environ.pop(name, None)
         elif value:
             os.environ.setdefault(name, value)
-    map_configuration_root = mappings["PORTAL_MAP_CONFIG_ROOT"]
-    if map_configuration_root:
-        os.environ.setdefault(
-            "PORTAL_MAP_TILES_CONFIG",
-            str(Path(map_configuration_root) / "project.toml"),
-        )
+    map_configuration_file = mappings["PORTAL_MAP_CONFIG_FILE"]
+    if map_configuration_file and "${" not in map_configuration_file:
+        config_path = Path(map_configuration_file)
+        if not config_path.is_absolute():
+            config_path = desktop_config_path().parent / config_path
+        os.environ["PORTAL_MAP_TILES_CONFIG"] = str(config_path.resolve())
+    else:
+        # The portable configuration owns project.toml beside portal.settings.json.
+        # This fallback also keeps direct worker invocations usable when the host
+        # has not exported PORTAL_APP_ROOT yet.
+        local_project_config = desktop_config_path().parent / "project.toml"
+        if local_project_config.is_file():
+            os.environ["PORTAL_MAP_TILES_CONFIG"] = str(local_project_config.resolve())
+        else:
+            os.environ.pop("PORTAL_MAP_TILES_CONFIG", None)
     # Compatibility for management modules while the desktop identity migration is completed.
     if mappings["PORTAL_SYSTEM_DB"]:
         os.environ.setdefault("PORTAL_MANAGEMENT_DB", mappings["PORTAL_SYSTEM_DB"])
@@ -155,13 +218,16 @@ def configure_environment() -> dict[str, Any]:
 
 def configured_paths() -> dict[str, str]:
     config = load_desktop_config()
+    map_configuration_file = os.getenv(
+        "PORTAL_MAP_TILES_CONFIG",
+        _value(config, "maps", "projectConfigFile"),
+    )
     return {
         "config": str(desktop_config_path()),
         "shared_data_root": os.getenv("PORTAL_SHARED_DATA_ROOT", _value(config, "shared", "dataRoot")),
         "system_database": os.getenv("PORTAL_SYSTEM_DB", _value(config, "system", "database")),
         "business_database": os.getenv("PORTAL_BUSINESS_DB", _value(config, "business", "database")),
         "asset_risk_database": os.getenv("PORTAL_AMTEAM_DUCKDB", _value(config, "risk", "databases", "assetRisk")),
-        "map_risk_database": os.getenv("PORTAL_MAP_RISK_DUCKDB", _value(config, "risk", "databases", "mapRisk")),
         "inventory_database": os.getenv("PORTAL_INVENTORY_DUCKDB", _value(config, "risk", "databases", "inventory")),
         "city_pipes_database": os.getenv("PORTAL_CITY_PIPES_DUCKDB", _value(config, "risk", "databases", "cityPipes")),
         "portal_sources_manifest": os.getenv("PORTAL_SOURCES_MANIFEST", _value(config, "dataSources", "portalSources", "manifest")),
@@ -169,11 +235,23 @@ def configured_paths() -> dict[str, str]:
         "itpipes_merged_database": os.getenv("PORTAL_ITPIPES_MERGED_DUCKDB", _value(config, "dataSources", "itpipesMerged", "database")),
         "gis_facility_database": os.getenv("PORTAL_GIS_FACILITY_DUCKDB", _value(config, "dataSources", "gisFacility", "database")),
         "spatial_data_warehouse": os.getenv("PORTAL_SDW_DUCKDB", _value(config, "dataSources", "spatialDataWarehouse", "database")),
-        "map_runtime_root": os.getenv("PORTAL_MAP_TILES_RUNTIME_ROOT", _value(config, "maps", "runtimeRoot")),
         "pmtiles_root": os.getenv("PORTAL_MAP_PMTILES_ROOT", _value(config, "maps", "pmtilesRoot")),
-        "map_configuration_root": os.getenv("PORTAL_MAP_CONFIG_ROOT", _value(config, "maps", "configurationRoot")),
-        "maplibre_root": os.getenv("PORTAL_MAP_MAPLIBRE_ROOT", _value(config, "maps", "maplibreRoot")),
+        "legacy_pmtiles_root": os.getenv(
+            "PORTAL_MAP_LEGACY_PMTILES_ROOT",
+            _value(config, "maps", "legacyPmtilesRoot"),
+        ),
+        "portal_layers_archive": os.getenv(
+            "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
+            _value(config, "maps", "portalLayersArchive"),
+        ),
+        "legacy_map_archive": os.getenv(
+            "PORTAL_MAP_LEGACY_ARCHIVE",
+            _value(config, "maps", "legacyMapArchive"),
+        ),
+        "map_configuration_file": map_configuration_file,
+        "map_configuration_root": str(Path(map_configuration_file).parent) if map_configuration_file else "",
         "terrain_root": os.getenv("PORTAL_MAP_TERRAIN_ROOT", _value(config, "maps", "terrainRoot")),
+        "terrain_archive": os.getenv("PORTAL_MAP_TERRAIN_ARCHIVE", _value(config, "maps", "terrainArchive")),
         "map_reports_root": os.getenv("PORTAL_MAP_REPORTS_ROOT", _value(config, "maps", "reportsRoot")),
         "business_backup_root": os.getenv("PORTAL_BUSINESS_BACKUP_ROOT", _value(config, "business", "backupRoot")),
         "business_inbox_root": os.getenv("PORTAL_BUSINESS_INBOX_ROOT", _value(config, "business", "inboxRoot")),
