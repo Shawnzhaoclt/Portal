@@ -24,7 +24,6 @@ from portal.runtime.transport import (
     Query,
     Request,
     Response,
-    StreamingResponse,
 )
 
 from .config import ConfigError, ProjectConfig, load_config
@@ -32,7 +31,6 @@ from .config import ConfigError, ProjectConfig, load_config
 
 EASTERN_TIMEZONE = ZoneInfo("America/New_York")
 RESOURCE_MAPLIBRE_ROOT = Path(__file__).resolve().parent / "assets" / "maplibre"
-PORTAL_LAYER_SOURCE_ID = "portal_layers"
 LEGACY_LAYER_SOURCE_ID = "planning_project"
 
 ASSET_SEARCH_TARGETS = [
@@ -260,6 +258,7 @@ INVENTORY_DUCKDB_LAYERS = {
 INVENTORY_TOTAL_CACHE_SECONDS = 300
 _inventory_total_cache: dict[str, Any] = {"timestamp": 0.0, "metrics": {}}
 _table_columns_cache: dict[str, list[str]] = {}
+_duckdb_schema_cache: dict[str, list[dict[str, str]]] = {}
 
 
 @dataclass(frozen=True)
@@ -284,11 +283,32 @@ class BackendState:
         return required_runtime_path("PORTAL_MAP_LEGACY_PMTILES_ROOT", "legacy PMTiles root")
 
     @property
-    def portal_layers_archive(self) -> str:
-        return required_archive_name(
-            "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
-            "Portal layers PMTiles archive",
-        )
+    def portal_layer_archives(self) -> dict[str, str]:
+        raw = os.environ.get("PORTAL_MAP_THEMATIC_ARCHIVES_JSON", "").strip()
+        if not raw:
+            return {}
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail="maps.portalLayerArchives is invalid in portal.settings.json.",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(
+                status_code=500,
+                detail="maps.portalLayerArchives must be an object in portal.settings.json.",
+            )
+        archives: dict[str, str] = {}
+        for archive_id, archive_name in payload.items():
+            key = str(archive_id).strip().lower()
+            name = str(archive_name).strip()
+            if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+                raise HTTPException(status_code=500, detail=f"Invalid thematic archive id: {archive_id}")
+            if name != Path(name).name or Path(name).suffix.lower() != ".pmtiles":
+                raise HTTPException(status_code=500, detail=f"Invalid thematic PMTiles archive: {name}")
+            archives[key] = name
+        return archives
 
     @property
     def legacy_map_archive(self) -> str:
@@ -345,12 +365,13 @@ def configured_pmtiles_path(
     archive = Path(archive_name).name
     if archive != archive_name or Path(archive).suffix.lower() != ".pmtiles":
         raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
-    registrations = [
-        (state.pmtiles_dir / archive, state.portal_layers_archive),
-        (state.legacy_pmtiles_dir / archive, state.legacy_map_archive),
-    ]
+    registrations = [(state.legacy_pmtiles_dir / archive, state.legacy_map_archive)]
+    registrations.extend(
+        (state.pmtiles_dir / archive, registered_name)
+        for registered_name in state.portal_layer_archives.values()
+    )
     if state.terrain_archive:
-        registrations.append((state.pmtiles_dir / archive, state.terrain_archive))
+        registrations.append((state.terrain_dir / archive, state.terrain_archive))
     registered = [path for path, registered_name in registrations if archive == registered_name]
     if not registered:
         raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
@@ -373,8 +394,40 @@ def expected_portal_source_layers(state: BackendState) -> set[str]:
     return {item.lower() for item in payload}
 
 
-def portal_archive_source_layers(state: BackendState) -> set[str]:
-    archive = configured_pmtiles_path(state, state.portal_layers_archive)
+def expected_portal_archive_layers(state: BackendState) -> dict[str, set[str]]:
+    path = state.maplibre_dir / "portal-layer-archives.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=500, detail=f"Portal archive registry is invalid: {path}") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail=f"Portal archive registry is invalid: {path}")
+    result: dict[str, set[str]] = {}
+    seen: set[str] = set()
+    for archive_id, raw_layers in payload.items():
+        key = str(archive_id).strip().lower()
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", key) or not isinstance(raw_layers, list):
+            raise HTTPException(status_code=500, detail=f"Portal archive registry is invalid: {path}")
+        layers = {
+            str(layer).strip().lower()
+            for layer in raw_layers
+            if isinstance(layer, str) and str(layer).strip()
+        }
+        if len(layers) != len(raw_layers) or seen & layers:
+            raise HTTPException(status_code=500, detail=f"Portal archive registry has duplicate layers: {path}")
+        result[key] = layers
+        seen.update(layers)
+    expected = expected_portal_source_layers(state)
+    if seen != expected:
+        raise HTTPException(
+            status_code=500,
+            detail="Portal thematic archive registry does not match the approved source-layer registry.",
+        )
+    return result
+
+
+def portal_archive_source_layers(state: BackendState, archive_name: str) -> set[str]:
+    archive = configured_pmtiles_path(state, archive_name)
     manifest_path = archive.with_suffix(archive.suffix + ".manifest.json")
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
@@ -398,6 +451,37 @@ def portal_archive_source_layers(state: BackendState) -> set[str]:
     }
 
 
+def active_thematic_portal_archives(
+    state: BackendState,
+) -> tuple[dict[str, tuple[str, set[str]]], str]:
+    configured = state.portal_layer_archives
+    expected = expected_portal_archive_layers(state)
+    if set(configured) != set(expected):
+        return {}, "The thematic archive configuration is incomplete."
+    active: dict[str, tuple[str, set[str]]] = {}
+    for archive_id, expected_layers in expected.items():
+        archive_name = configured[archive_id]
+        archive_path = configured_pmtiles_path(state, archive_name, required=False)
+        if not archive_path.is_file():
+            return {}, f"The thematic archive {archive_name} has not been published."
+        try:
+            published_layers = portal_archive_source_layers(state, archive_name)
+        except HTTPException as exc:
+            return {}, str(exc.detail)
+        if published_layers != expected_layers:
+            missing = sorted(expected_layers - published_layers)
+            unexpected = sorted(published_layers - expected_layers)
+            details = []
+            if missing:
+                details.append(f"missing: {', '.join(missing)}")
+            if unexpected:
+                details.append(f"unexpected: {', '.join(unexpected)}")
+            suffix = f" ({'; '.join(details)})" if details else ""
+            return {}, f"The thematic archive {archive_name} failed its exact source-layer inventory check{suffix}."
+        active[archive_id] = (archive_name, expected_layers)
+    return active, ""
+
+
 def route_resource_style(payload: dict[str, Any], state: BackendState) -> dict[str, Any]:
     sources = payload.get("sources")
     layers = payload.get("layers")
@@ -405,23 +489,53 @@ def route_resource_style(payload: dict[str, Any], state: BackendState) -> dict[s
         return payload
 
     expected_layers = expected_portal_source_layers(state)
-    archive_layers = portal_archive_source_layers(state)
-    routed_source_layers = expected_layers & archive_layers
-    sources[PORTAL_LAYER_SOURCE_ID] = {
-        "type": "vector",
-        "url": f"pmtiles://{state.portal_layers_archive}",
-    }
+    thematic_archives, thematic_error = active_thematic_portal_archives(state)
+    if not thematic_archives:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Portal thematic PMTiles publication is unavailable: {thematic_error}",
+        )
+    source_for_layer: dict[str, str] = {}
+    archive_metadata: list[dict[str, Any]] = []
+    for archive_id, (archive_name, archive_layers) in thematic_archives.items():
+        source_id = f"portal_layers_{archive_id}"
+        sources[source_id] = {
+            "type": "vector",
+            "url": versioned_pmtiles_url(state, archive_name),
+        }
+        source_for_layer.update({layer: source_id for layer in archive_layers})
+        archive_metadata.append(
+            {"id": archive_id, "archive": archive_name, "source_layer_count": len(archive_layers)}
+        )
+    missing_source_layers = expected_layers - set(source_for_layer)
     legacy_source = sources.get(LEGACY_LAYER_SOURCE_ID)
     if isinstance(legacy_source, dict):
-        legacy_source["url"] = f"pmtiles://{state.legacy_map_archive}"
+        legacy_source["url"] = versioned_pmtiles_url(state, state.legacy_map_archive)
+
+    registered_archives = {
+        state.legacy_map_archive,
+        state.terrain_archive,
+        *state.portal_layer_archives.values(),
+    } - {""}
+    for source in sources.values():
+        if not isinstance(source, dict):
+            continue
+        source_url = str(source.get("url") or "")
+        if not source_url.startswith("pmtiles://"):
+            continue
+        archive_reference = source_url.removeprefix("pmtiles://").split("?", 1)[0]
+        archive_name = Path(archive_reference).name
+        if archive_name in registered_archives:
+            source["url"] = versioned_pmtiles_url(state, archive_name)
 
     routed_style_layers = 0
     for layer in layers:
         if not isinstance(layer, dict):
             continue
         source_layer = str(layer.get("source-layer") or "").lower()
-        if layer.get("source") == LEGACY_LAYER_SOURCE_ID and source_layer in routed_source_layers:
-            layer["source"] = PORTAL_LAYER_SOURCE_ID
+        routed_source = source_for_layer.get(source_layer)
+        if layer.get("source") == LEGACY_LAYER_SOURCE_ID and routed_source:
+            layer["source"] = routed_source
             routed_style_layers += 1
 
     metadata = payload.get("metadata")
@@ -429,12 +543,22 @@ def route_resource_style(payload: dict[str, Any], state: BackendState) -> dict[s
         metadata = {}
         payload["metadata"] = metadata
     metadata["portal_pmtiles"] = {
-        "archive": state.portal_layers_archive,
-        "source_layer_count": len(routed_source_layers),
+        "mode": "thematic",
+        "archives": archive_metadata,
+        "source_layer_count": len(source_for_layer),
         "style_layer_count": routed_style_layers,
-        "missing_source_layers": sorted(expected_layers - archive_layers),
+        "missing_source_layers": sorted(missing_source_layers),
     }
     return payload
+
+
+def versioned_pmtiles_url(state: BackendState, archive_name: str) -> str:
+    path = configured_pmtiles_path(state, archive_name, required=False)
+    if not path.is_file():
+        return f"pmtiles://{archive_name}"
+    stat = path.stat()
+    version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+    return f"pmtiles://{archive_name}?v={version}"
 
 
 def create_app() -> LocalApplication:
@@ -448,7 +572,6 @@ def create_app() -> LocalApplication:
     def health() -> dict[str, Any]:
         state = get_state()
         manifest_path = state.maplibre_dir / "manifest.json"
-        portal_archive = configured_pmtiles_path(state, state.portal_layers_archive, required=False)
         legacy_archive = configured_pmtiles_path(state, state.legacy_map_archive, required=False)
         terrain_archive = (
             configured_pmtiles_path(state, state.terrain_archive, required=False)
@@ -456,7 +579,39 @@ def create_app() -> LocalApplication:
             else None
         )
         expected_layers = expected_portal_source_layers(state)
-        archive_layers = portal_archive_source_layers(state) if portal_archive.is_file() else set()
+        expected_archive_layers = expected_portal_archive_layers(state)
+        configured_archives = state.portal_layer_archives
+        archive_status: list[dict[str, Any]] = []
+        published_layers: set[str] = set()
+        for archive_id, expected in expected_archive_layers.items():
+            archive_name = configured_archives.get(archive_id, "")
+            archive_path = state.pmtiles_dir / archive_name if archive_name else None
+            actual: set[str] = set()
+            validation_error = ""
+            if archive_path is None:
+                validation_error = "Archive is not configured."
+            elif not archive_path.is_file():
+                validation_error = "Archive has not been published."
+            else:
+                try:
+                    actual = portal_archive_source_layers(state, archive_name)
+                except HTTPException as exc:
+                    validation_error = str(exc.detail)
+            published_layers.update(actual)
+            archive_status.append(
+                {
+                    "id": archive_id,
+                    "archive": archive_name,
+                    "path": str(archive_path) if archive_path is not None else "",
+                    "exists": bool(archive_path and archive_path.is_file()),
+                    "expected_source_layers": len(expected),
+                    "published_source_layers": len(actual),
+                    "missing_source_layers": sorted(expected - actual),
+                    "unexpected_source_layers": sorted(actual - expected),
+                    "validation_error": validation_error,
+                }
+            )
+        thematic_archives, thematic_error = active_thematic_portal_archives(state)
         return {
             "ok": True,
             "project_root": str(state.project_root),
@@ -464,15 +619,17 @@ def create_app() -> LocalApplication:
             "manifest_exists": manifest_path.exists(),
             "maplibre_dir": str(state.maplibre_dir),
             "pmtiles": {
-                "portal_layers": str(portal_archive),
-                "portal_layers_exists": portal_archive.is_file(),
+                "mode": "thematic",
+                "thematic_ready": bool(thematic_archives),
+                "thematic_validation_error": thematic_error,
+                "archives": archive_status,
                 "legacy_map": str(legacy_archive),
                 "legacy_map_exists": legacy_archive.is_file(),
                 "terrain": str(terrain_archive) if terrain_archive is not None else "",
                 "terrain_exists": terrain_archive.is_file() if terrain_archive is not None else False,
                 "expected_source_layers": len(expected_layers),
-                "published_source_layers": len(archive_layers),
-                "missing_source_layers": sorted(expected_layers - archive_layers),
+                "published_source_layers": len(published_layers),
+                "missing_source_layers": sorted(expected_layers - published_layers),
             },
             "terrain_dir": str(state.terrain_dir),
         }
@@ -645,28 +802,18 @@ def create_app() -> LocalApplication:
     def pmtiles_file(pmtiles_name: str, request: Request) -> Response:
         state = get_state()
         path = configured_pmtiles_path(state, pmtiles_name)
-        range_header = request.headers.get("range")
-        if range_header:
-            start, end = parse_byte_range(range_header, path.stat().st_size)
-            content_length = end - start + 1
-            return StreamingResponse(
-                iter_file_range(path, start, end),
-                status_code=206,
-                media_type="application/octet-stream",
-                headers={
-                    "Accept-Ranges": "bytes",
-                    "Content-Range": f"bytes {start}-{end}/{path.stat().st_size}",
-                    "Content-Length": str(content_length),
-                    "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length",
-                },
-            )
+        stat = path.stat()
+        etag = f'W/"{stat.st_size:x}-{stat.st_mtime_ns:x}"'
+        cache_control = "public, max-age=31536000, immutable" if request.query.get("v") else "no-cache"
         return FileResponse(
             path,
             media_type="application/octet-stream",
             filename=path.name,
             headers={
                 "Accept-Ranges": "bytes",
-                "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length",
+                "Cache-Control": cache_control,
+                "ETag": etag,
+                "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length, ETag",
             },
         )
 
@@ -674,12 +821,14 @@ def create_app() -> LocalApplication:
     def pmtiles_head(pmtiles_name: str) -> Response:
         state = get_state()
         path = configured_pmtiles_path(state, pmtiles_name)
+        stat = path.stat()
         return Response(
             media_type="application/octet-stream",
             headers={
                 "Accept-Ranges": "bytes",
-                "Content-Length": str(path.stat().st_size),
-                "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length",
+                "Content-Length": str(stat.st_size),
+                "ETag": f'W/"{stat.st_size:x}-{stat.st_mtime_ns:x}"',
+                "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length, ETag",
             },
         )
 
@@ -726,6 +875,7 @@ def create_app() -> LocalApplication:
     def duckdb_geojson(
         dataset_id: str,
         limit: int = Query(25_000, ge=1, le=DUCKDB_GEOJSON_FEATURE_LIMIT_MAX),
+        zoom: float | None = Query(None, ge=0, le=24),
         west: float | None = Query(None, ge=-180, le=180),
         south: float | None = Query(None, ge=-90, le=90),
         east: float | None = Query(None, ge=-180, le=180),
@@ -748,7 +898,50 @@ def create_app() -> LocalApplication:
             bbox,
             limit,
             parse_attribute_filter_query(filters),
+            zoom=zoom,
         )
+
+    @app.post("/api/duckdb/geojson-batch")
+    def duckdb_geojson_batch(payload: dict[str, Any]) -> dict[str, Any]:
+        raw_bbox = payload.get("bbox")
+        if not isinstance(raw_bbox, list) or len(raw_bbox) != 4:
+            raise HTTPException(status_code=400, detail="DuckDB GeoJSON batch requires bbox with four coordinates.")
+        try:
+            bbox = valid_request_bbox(*(float(value) for value in raw_bbox))
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail="DuckDB GeoJSON batch bbox is invalid.") from exc
+        raw_requests = payload.get("requests")
+        if not isinstance(raw_requests, list) or not raw_requests:
+            raise HTTPException(status_code=400, detail="DuckDB GeoJSON batch requires at least one dataset request.")
+        if len(raw_requests) > 32:
+            raise HTTPException(status_code=400, detail="DuckDB GeoJSON batch accepts at most 32 dataset requests.")
+        raw_zoom = payload.get("zoom")
+        zoom = float(raw_zoom) if isinstance(raw_zoom, (int, float)) else None
+        requests: list[dict[str, Any]] = []
+        for raw_request in raw_requests:
+            if not isinstance(raw_request, dict):
+                continue
+            dataset_id = str(raw_request.get("dataset_id") or "").strip().lower()
+            if not dataset_id:
+                continue
+            try:
+                limit = max(1, min(DUCKDB_GEOJSON_FEATURE_LIMIT_MAX, int(raw_request.get("limit") or 25_000)))
+            except (TypeError, ValueError):
+                limit = 25_000
+            raw_filters = raw_request.get("filters")
+            serialized_filters = json.dumps(raw_filters, separators=(",", ":")) if isinstance(raw_filters, dict) else ""
+            if len(serialized_filters) > ATTRIBUTE_FILTER_QUERY_MAX_LENGTH:
+                raise HTTPException(status_code=400, detail=f"Attribute filters are too large for {dataset_id}.")
+            requests.append(
+                {
+                    "dataset_id": dataset_id,
+                    "limit": limit,
+                    "filters": parse_attribute_filter_query(serialized_filters),
+                }
+            )
+        if not requests:
+            raise HTTPException(status_code=400, detail="DuckDB GeoJSON batch has no valid dataset requests.")
+        return query_configured_duckdb_geojson_batch(requests, bbox, zoom)
 
     @app.get("/api/risk/top-list")
     def risk_top_list(
@@ -869,43 +1062,6 @@ def get_state() -> BackendState:
     with config_path.open("rb") as handle:
         raw_config = tomllib.load(handle)
     return BackendState(project_config=project_config, raw_config=raw_config)
-
-
-def parse_byte_range(range_header: str, file_size: int) -> tuple[int, int]:
-    raw = range_header.strip()
-    if not raw.lower().startswith("bytes="):
-        raise HTTPException(status_code=416, detail="Unsupported Range header.", headers={"Content-Range": f"bytes */{file_size}"})
-    range_spec = raw.split("=", 1)[1].split(",", 1)[0].strip()
-    if "-" not in range_spec:
-        raise HTTPException(status_code=416, detail="Invalid Range header.", headers={"Content-Range": f"bytes */{file_size}"})
-    start_raw, end_raw = [part.strip() for part in range_spec.split("-", 1)]
-    try:
-        if start_raw == "":
-            suffix_length = int(end_raw)
-            if suffix_length <= 0:
-                raise ValueError
-            start = max(file_size - suffix_length, 0)
-            end = file_size - 1
-        else:
-            start = int(start_raw)
-            end = int(end_raw) if end_raw else file_size - 1
-    except ValueError as exc:
-        raise HTTPException(status_code=416, detail="Invalid Range header.", headers={"Content-Range": f"bytes */{file_size}"}) from exc
-    if start < 0 or end < start or start >= file_size:
-        raise HTTPException(status_code=416, detail="Requested range not satisfiable.", headers={"Content-Range": f"bytes */{file_size}"})
-    return start, min(end, file_size - 1)
-
-
-def iter_file_range(path: Path, start: int, end: int, chunk_size: int = 1024 * 1024):
-    with path.open("rb") as handle:
-        handle.seek(start)
-        remaining = end - start + 1
-        while remaining > 0:
-            chunk = handle.read(min(chunk_size, remaining))
-            if not chunk:
-                break
-            remaining -= len(chunk)
-            yield chunk
 
 
 def raw_maps(state: BackendState) -> list[dict[str, Any]]:
@@ -1176,6 +1332,107 @@ def query_configured_duckdb_geojson_feature_collection(
     bbox: list[float] | None,
     limit: int,
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    zoom: float | None = None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    connection_started = time.perf_counter()
+    connection = open_inventory_duckdb(layer)
+    connection_ms = (time.perf_counter() - connection_started) * 1000
+    try:
+        result = query_configured_duckdb_geojson_with_connection(
+            connection,
+            layer,
+            bbox,
+            limit,
+            attribute_filters,
+            zoom=zoom,
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and schema issues through the API
+        dataset_id = str(layer["id"])
+        raise HTTPException(status_code=503, detail=f"Could not read DuckDB GeoJSON for {dataset_id}: {exc}") from exc
+    finally:
+        connection.close()
+    result.setdefault("metadata", {})["connection_ms"] = round(connection_ms, 2)
+    result["metadata"]["total_ms"] = round((time.perf_counter() - started) * 1000, 2)
+    return result
+
+
+def query_configured_duckdb_geojson_batch(
+    requests: list[dict[str, Any]],
+    bbox: list[float] | None,
+    zoom: float | None,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    grouped: dict[str, list[tuple[dict[str, Any], dict[str, Any]]]] = {}
+    results: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    for request in requests:
+        dataset_id = str(request["dataset_id"])
+        try:
+            layer = configured_duckdb_geojson_layer_or_404(dataset_id)
+        except HTTPException as exc:
+            errors[dataset_id] = str(exc.detail)
+            continue
+        database = Path(str(layer["database"]))
+        if not database.is_file():
+            errors[dataset_id] = f"DuckDB database was not found: {database.name}"
+            continue
+        grouped.setdefault(str(database), []).append((request, layer))
+
+    database_timings: dict[str, float] = {}
+    for database_key, group in grouped.items():
+        connection_started = time.perf_counter()
+        connection = None
+        try:
+            connection = open_inventory_duckdb(group[0][1])
+            database_timings[Path(database_key).name] = round(
+                (time.perf_counter() - connection_started) * 1000,
+                2,
+            )
+            for request, layer in group:
+                dataset_id = str(request["dataset_id"])
+                try:
+                    results[dataset_id] = query_configured_duckdb_geojson_with_connection(
+                        connection,
+                        layer,
+                        bbox,
+                        int(request["limit"]),
+                        request.get("filters"),
+                        zoom=zoom,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad layer must not discard the other batch results
+                    errors[dataset_id] = str(exc)
+        except Exception as exc:  # noqa: BLE001 - report one database failure for each requested dataset
+            for request, _layer in group:
+                errors[str(request["dataset_id"])] = str(exc)
+        finally:
+            if connection is not None:
+                connection.close()
+
+    return {
+        "results": results,
+        "errors": errors,
+        "metadata": {
+            "requested": len(requests),
+            "returned": len(results),
+            "database_count": len(grouped),
+            "database_open_ms": database_timings,
+            "total_ms": round((time.perf_counter() - started) * 1000, 2),
+        },
+    }
+
+
+def query_configured_duckdb_geojson_with_connection(
+    connection: Any,
+    layer: dict[str, Any],
+    bbox: list[float] | None,
+    limit: int,
+    attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
+    *,
+    zoom: float | None = None,
 ) -> dict[str, Any]:
     dataset_id = str(layer["id"])
     table_name = str(layer["table"])
@@ -1187,10 +1444,9 @@ def query_configured_duckdb_geojson_feature_collection(
             status_code=500,
             detail=f"DuckDB GeoJSON dataset {dataset_id} uses unsupported source SRID {source_srid}.",
         )
-    connection = None
+    schema_started = time.perf_counter()
     try:
-        connection = open_inventory_duckdb(layer)
-        schema_fields = duckdb_table_schema_fields(connection, table_name)
+        schema_fields = duckdb_table_schema_fields(connection, table_name, Path(str(layer["database"])))
         fields_by_lower = {
             str(item["source_field"]).lower(): item
             for item in schema_fields
@@ -1212,8 +1468,14 @@ def query_configured_duckdb_geojson_feature_collection(
             f"{quote_identifier(item['duckdb_column'])} AS {quote_identifier('__prop_' + str(index))}"
             for index, item in enumerate(property_fields)
         ]
+        schema_ms = (time.perf_counter() - schema_started) * 1000
         extent_wkt = bbox_to_stateplane_wkt(bbox) if bbox else None
-        where_clause, params = duckdb_spatial_where_clause(geometry_column, extent_wkt)
+        prefer_spatial_index = direct_layer_prefers_spatial_index(layer, bbox, zoom)
+        where_clause, params = duckdb_spatial_where_clause(
+            geometry_column,
+            extent_wkt,
+            prefer_spatial_index=prefer_spatial_index,
+        )
         filter_parts, filter_params = duckdb_attribute_filter_where_parts(
             attribute_filters,
             [dataset_id],
@@ -1233,27 +1495,36 @@ def query_configured_duckdb_geojson_feature_collection(
             SELECT
                 {feature_id_expression} AS __feature_id,
                 ST_GeometryType({quote_identifier(geometry_column)}) AS __geometry_type,
-                ST_AsWKB({quote_identifier(geometry_column)}) AS __geometry_wkb
+                ST_AsGeoJSON(
+                    ST_Transform(
+                        {quote_identifier(geometry_column)},
+                        'EPSG:2264',
+                        'EPSG:4326',
+                        always_xy := true
+                    )
+                ) AS __geometry_json
                 {"," if property_selects else ""}
                 {", ".join(property_selects)}
             FROM {quote_identifier(table_name)}
             WHERE {where_clause}
             LIMIT ?
         """
-        params.append(int(limit))
+        params.append(int(limit) + 1)
+        query_started = time.perf_counter()
         rows = connection.execute(sql, params).fetchall()
+        query_ms = (time.perf_counter() - query_started) * 1000
         names = [item[0] for item in connection.description]
-    except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and schema issues through the API
-        raise HTTPException(status_code=503, detail=f"Could not read DuckDB GeoJSON for {dataset_id}: {exc}") from exc
-    finally:
-        if connection is not None:
-            connection.close()
+    except Exception as exc:  # noqa: BLE001 - add dataset context to DuckDB errors
+        raise RuntimeError(f"Could not query {dataset_id}: {exc}") from exc
 
+    truncated = len(rows) > int(limit)
+    rows = rows[: int(limit)]
+    serialization_started = time.perf_counter()
     prop_aliases = {f"__prop_{index}": field for index, field in enumerate(property_fields)}
     features = []
     for row in rows:
         values = dict(zip(names, row))
-        geometry = stateplane_wkb_to_wgs84_geojson(values.get("__geometry_wkb"))
+        geometry = parse_geometry_json(values.get("__geometry_json"))
         if not geometry:
             continue
         properties = {
@@ -1273,22 +1544,42 @@ def query_configured_duckdb_geojson_feature_collection(
                 "properties": properties,
             }
         )
+    serialization_ms = (time.perf_counter() - serialization_started) * 1000
 
     return {
         "type": "FeatureCollection",
         "features": features,
         "metadata": {
             "dataset_id": dataset_id,
-            "database": str(layer["database"]),
+            "database": Path(str(layer["database"])).name,
             "table": table_name,
             "source_srid": source_srid,
             "bbox": bbox,
             "returned": len(features),
             "limit": int(limit),
-            "truncated": len(features) >= int(limit),
+            "truncated": truncated,
             "property_count": len(property_fields),
+            "spatial_plan": "rtree_eligible" if prefer_spatial_index else "sequential_preferred",
+            "schema_ms": round(schema_ms, 2),
+            "query_ms": round(query_ms, 2),
+            "serialization_ms": round(serialization_ms, 2),
         },
     }
+
+
+def direct_layer_prefers_spatial_index(
+    layer: dict[str, Any],
+    bbox: list[float] | None,
+    zoom: float | None,
+) -> bool:
+    if not bbox:
+        return False
+    minimum_zoom = float(layer.get("spatialIndexMinZoom") or 13)
+    if zoom is not None:
+        return zoom >= minimum_zoom
+    west, south, east, north = bbox
+    maximum_span = float(layer.get("spatialIndexMaxExtentDegrees") or 0.08)
+    return max(east - west, north - south) <= maximum_span
 
 
 def selected_risk_layer_configs(cityworks_layer: str, itpipes_layer: str) -> list[dict[str, Any]]:
@@ -1828,7 +2119,11 @@ def duckdb_attribute_filter_where_parts(
             str(field.get("duckdb_column", "")),
             str(field.get("data_type", "")),
         )
-        text_expression = f"CAST({column} AS VARCHAR)"
+        data_type = str(field.get("data_type", ""))
+        native_numeric = is_native_duckdb_numeric_type(data_type)
+        native_temporal = is_native_duckdb_temporal_type(data_type)
+        native_text = is_native_duckdb_text_type(data_type)
+        text_expression = column if native_text else f"CAST({column} AS VARCHAR)"
         lower_expression = f"lower({text_expression})"
 
         if operator == "eq":
@@ -1837,10 +2132,14 @@ def duckdb_attribute_filter_where_parts(
                     numeric_value = float(value)
                 except ValueError:
                     continue
-                parts.append(f"TRY_CAST({column} AS DOUBLE) = ?")
+                parts.append(f"{column} = ?" if native_numeric else f"TRY_CAST({column} AS DOUBLE) = ?")
                 params.append(numeric_value)
             elif field_type == "date":
-                parts.append(f"TRY_CAST({column} AS DATE) = TRY_CAST(? AS DATE)")
+                parts.append(
+                    f"{column} = TRY_CAST(? AS {duckdb_temporal_comparison_type(data_type)})"
+                    if native_temporal
+                    else f"TRY_CAST({column} AS DATE) = TRY_CAST(? AS DATE)"
+                )
                 params.append(value)
             else:
                 parts.append(f"{text_expression} = ?")
@@ -1851,10 +2150,15 @@ def duckdb_attribute_filter_where_parts(
                     numeric_value = float(value)
                 except ValueError:
                     continue
-                parts.append(f"({column} IS NULL OR TRY_CAST({column} AS DOUBLE) <> ?)")
+                numeric_expression = column if native_numeric else f"TRY_CAST({column} AS DOUBLE)"
+                parts.append(f"({column} IS NULL OR {numeric_expression} <> ?)")
                 params.append(numeric_value)
             elif field_type == "date":
-                parts.append(f"({column} IS NULL OR TRY_CAST({column} AS DATE) <> TRY_CAST(? AS DATE))")
+                date_expression = column if native_temporal else f"TRY_CAST({column} AS DATE)"
+                parts.append(
+                    f"({column} IS NULL OR {date_expression} <> "
+                    f"TRY_CAST(? AS {duckdb_temporal_comparison_type(data_type)}))"
+                )
                 params.append(value)
             else:
                 parts.append(f"({column} IS NULL OR {text_expression} <> ?)")
@@ -1872,21 +2176,30 @@ def duckdb_attribute_filter_where_parts(
         elif operator in {"gt", "gte", "lt", "lte"}:
             comparator = {"gt": ">", "gte": ">=", "lt": "<", "lte": "<="}[operator]
             if field_type == "date":
-                parts.append(f"TRY_CAST({column} AS TIMESTAMP) {comparator} TRY_CAST(? AS TIMESTAMP)")
+                date_expression = column if native_temporal else f"TRY_CAST({column} AS TIMESTAMP)"
+                parts.append(
+                    f"{date_expression} {comparator} "
+                    f"TRY_CAST(? AS {duckdb_temporal_comparison_type(data_type)})"
+                )
                 params.append(value)
             elif field_type == "number":
                 try:
                     numeric_value = float(value)
                 except ValueError:
                     continue
-                parts.append(f"TRY_CAST({column} AS DOUBLE) {comparator} ?")
+                numeric_expression = column if native_numeric else f"TRY_CAST({column} AS DOUBLE)"
+                parts.append(f"{numeric_expression} {comparator} ?")
                 params.append(numeric_value)
             else:
                 continue
         elif operator == "is_null":
-            parts.append(f"({column} IS NULL OR {text_expression} = '')")
+            parts.append(f"({column} IS NULL OR {text_expression} = '')" if field_type == "text" else f"{column} IS NULL")
         elif operator == "is_not_null":
-            parts.append(f"({column} IS NOT NULL AND {text_expression} <> '')")
+            parts.append(
+                f"({column} IS NOT NULL AND {text_expression} <> '')"
+                if field_type == "text"
+                else f"{column} IS NOT NULL"
+            )
 
     return parts, params
 
@@ -2235,6 +2548,44 @@ def attribute_filter_field_type(name: str, column: str, data_type: str) -> str:
     return ""
 
 
+def is_native_duckdb_numeric_type(data_type: str) -> bool:
+    normalized = data_type.strip().upper()
+    return any(
+        token in normalized
+        for token in (
+            "TINYINT",
+            "SMALLINT",
+            "INTEGER",
+            "BIGINT",
+            "HUGEINT",
+            "UTINYINT",
+            "USMALLINT",
+            "UINTEGER",
+            "UBIGINT",
+            "FLOAT",
+            "DOUBLE",
+            "DECIMAL",
+            "NUMERIC",
+            "REAL",
+        )
+    )
+
+
+def is_native_duckdb_temporal_type(data_type: str) -> bool:
+    normalized = data_type.strip().upper()
+    return normalized.startswith("DATE") or normalized.startswith("TIME") or normalized.startswith("TIMESTAMP")
+
+
+def is_native_duckdb_text_type(data_type: str) -> bool:
+    normalized = data_type.strip().upper()
+    return any(token in normalized for token in ("VARCHAR", "CHAR", "TEXT", "STRING", "UUID"))
+
+
+def duckdb_temporal_comparison_type(data_type: str) -> str:
+    normalized = data_type.strip().upper()
+    return "DATE" if normalized.startswith("DATE") else "TIMESTAMP"
+
+
 def open_configured_duckdb(layer: dict[str, Any], label: str = "Configured DuckDB") -> Any:
     try:
         import duckdb
@@ -2264,9 +2615,26 @@ def load_duckdb_spatial_extension(connection: Any) -> None:
         connection.execute("LOAD spatial")
 
 
-def duckdb_table_columns(connection: Any, table_name: str) -> list[str]:
-    cache_key = f"duckdb:{getattr(connection, 'database_name', '')}:{table_name}".lower()
-    if cache_key in _table_columns_cache:
+def duckdb_database_signature(database_path: Path) -> str:
+    path = database_path.resolve(strict=False)
+    try:
+        stat = path.stat()
+    except OSError:
+        return f"{path}:missing"
+    return f"{path}:{stat.st_size}:{stat.st_mtime_ns}"
+
+
+def duckdb_table_columns(
+    connection: Any,
+    table_name: str,
+    database_path: Path | None = None,
+) -> list[str]:
+    cache_key = (
+        f"duckdb-columns:{duckdb_database_signature(database_path)}:{table_name}".lower()
+        if database_path is not None
+        else ""
+    )
+    if cache_key and cache_key in _table_columns_cache:
         return _table_columns_cache[cache_key]
     rows = connection.execute(
         """
@@ -2278,11 +2646,25 @@ def duckdb_table_columns(connection: Any, table_name: str) -> list[str]:
         [table_name],
     ).fetchall()
     columns = [str(row[0]) for row in rows]
-    _table_columns_cache[cache_key] = columns
+    if cache_key:
+        if len(_table_columns_cache) >= 512:
+            _table_columns_cache.clear()
+        _table_columns_cache[cache_key] = columns
     return columns
 
 
-def duckdb_table_schema_fields(connection: Any, table_name: str) -> list[dict[str, str]]:
+def duckdb_table_schema_fields(
+    connection: Any,
+    table_name: str,
+    database_path: Path | None = None,
+) -> list[dict[str, str]]:
+    cache_key = (
+        f"duckdb-schema:{duckdb_database_signature(database_path)}:{table_name}".lower()
+        if database_path is not None
+        else ""
+    )
+    if cache_key and cache_key in _duckdb_schema_cache:
+        return _duckdb_schema_cache[cache_key]
     rows = connection.execute(
         """
         SELECT column_name, data_type
@@ -2292,7 +2674,7 @@ def duckdb_table_schema_fields(connection: Any, table_name: str) -> list[dict[st
         """,
         [table_name],
     ).fetchall()
-    return [
+    fields = [
         {
             "source_field": str(column_name),
             "duckdb_column": str(column_name),
@@ -2300,18 +2682,32 @@ def duckdb_table_schema_fields(connection: Any, table_name: str) -> list[dict[st
         }
         for column_name, data_type in rows
     ]
+    if cache_key:
+        if len(_duckdb_schema_cache) >= 512:
+            _duckdb_schema_cache.clear()
+        _duckdb_schema_cache[cache_key] = fields
+    return fields
 
 
-def duckdb_spatial_where_clause(geometry_column: str, extent_wkt: str | None) -> tuple[str, list[Any]]:
+def duckdb_spatial_where_clause(
+    geometry_column: str,
+    extent_wkt: str | None,
+    *,
+    prefer_spatial_index: bool = False,
+) -> tuple[str, list[Any]]:
     geometry = quote_identifier(geometry_column)
     if not extent_wkt:
         return f"{geometry} IS NOT NULL", []
-    return f"{geometry} IS NOT NULL AND ST_Intersects({geometry}, ST_GeomFromText(?))", [extent_wkt]
+    intersects = f"ST_Intersects({geometry}, ST_GeomFromText(?))"
+    if prefer_spatial_index:
+        return intersects, [extent_wkt]
+    return f"{geometry} IS NOT NULL AND {intersects}", [extent_wkt]
 
 
 def duckdb_length_miles_expression(connection: Any, layer: dict[str, Any]) -> str:
     table_name = str(layer["table"])
-    columns = duckdb_table_columns(connection, table_name)
+    database_path = Path(str(layer["database"])) if layer.get("database") else None
+    columns = duckdb_table_columns(connection, table_name, database_path)
     by_lower = {column.lower(): column for column in columns}
     configured_columns = [str(column) for column in layer.get("length_columns", [])]
     length_columns = [by_lower[column.lower()] for column in configured_columns if column.lower() in by_lower]

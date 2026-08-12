@@ -18,7 +18,7 @@ from concurrent.futures import (
     as_completed,
     wait,
 )
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import gzip
 import heapq
@@ -91,6 +91,9 @@ class Layer:
     minimum_zoom: int
     maximum_zoom: int
     enabled: bool
+    publication_bounds: tuple[float, float, float, float] = (-180.0, -85.05112878, 180.0, 85.05112878)
+    feature_id_strategy: str = "generated_hash"
+    feature_hash_columns: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +118,7 @@ class Tileset:
     tippecanoe_group_workers: int
     gdal_executable: str
     gdal_threads: str
+    publication_bounds: tuple[float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,8 @@ class LayerBuildResult:
     feature_count: int
     tile_count: int
     bounds: tuple[float, float, float, float]
+    source_feature_count: int
+    excluded_feature_count: int
 
 
 class GdalUnavailableError(RuntimeError):
@@ -318,7 +324,17 @@ def _resolve_layer(
 
     configured_id = str(override.get("featureIdColumn") or "").strip()
     feature_id: str | None = None
-    candidates = [configured_id] if configured_id else ["OBJECTID", "objectid", "__feature_id"]
+    candidates = (
+        [configured_id]
+        if configured_id
+        else [
+            "OBJECTID",
+            *sorted(name for name, _data_type in columns if name.upper().startswith("OBJECTID_")),
+            "FID",
+            "OID",
+            "__feature_id",
+        ]
+    )
     for candidate in candidates:
         if not candidate:
             continue
@@ -326,8 +342,28 @@ def _resolve_layer(
         if actual and _property_metadata_type(actual[1]) == "Number" and _type_base(actual[1]) not in {
             "FLOAT", "DOUBLE", "REAL", "DECIMAL"
         }:
-            feature_id = actual[0]
-            break
+            total_count, populated_count, distinct_count, minimum_value = connection.execute(
+                f"SELECT count(*), count({_quote_identifier(actual[0])}), "
+                f"count(DISTINCT {_quote_identifier(actual[0])}), min({_quote_identifier(actual[0])}) "
+                f"FROM {_qualified_table(schema, table)}"
+            ).fetchone()
+            if (
+                int(total_count) == int(populated_count) == int(distinct_count)
+                and (minimum_value is None or int(minimum_value) >= 0)
+            ):
+                feature_id = actual[0]
+                break
+            if configured_id:
+                raise RuntimeError(
+                    f"Configured internal feature ID {configured_id} is not non-null and unique in {schema}.{table}."
+                )
+    if configured_id and not feature_id:
+        raise RuntimeError(
+            f"Configured internal feature ID {configured_id} was not found as an integer column in {schema}.{table}."
+        )
+    feature_hash_columns = tuple(
+        sorted(name for name, data_type in columns if _type_base(data_type) != "GEOMETRY")
+    )
     estimated = _estimated_size(connection, schema, table)
     minimum_zoom = int(override.get("minimumZoom", source.get("minimumZoom", _default_minimum_zoom(estimated))))
     maximum_zoom = int(override.get("maximumZoom", source.get("maximumZoom", defaults.get("maximumZoom", 16))))
@@ -347,6 +383,8 @@ def _resolve_layer(
         minimum_zoom=minimum_zoom,
         maximum_zoom=maximum_zoom,
         enabled=bool(override.get("enabled", True)),
+        feature_id_strategy=f"source:{feature_id}" if feature_id else "generated_hash",
+        feature_hash_columns=feature_hash_columns,
     )
 
 
@@ -539,6 +577,19 @@ def load_tilesets(config_path: Path, selected: set[str] | None = None) -> tuple[
             raise RuntimeError(
                 f"Tileset {tileset_id} contains duplicate layer IDs: {', '.join(duplicate_layers)}"
             )
+        raw_publication_bounds = raw.get(
+            "publicationBounds",
+            defaults.get("publicationBounds", [-180.0, -85.05112878, 180.0, 85.05112878]),
+        )
+        if not isinstance(raw_publication_bounds, list) or len(raw_publication_bounds) != 4:
+            raise RuntimeError(f"publicationBounds must contain west, south, east, north for {tileset_id}.")
+        publication_bounds = tuple(float(value) for value in raw_publication_bounds)
+        if not (
+            -180 <= publication_bounds[0] < publication_bounds[2] <= 180
+            and -85.05112878 <= publication_bounds[1] < publication_bounds[3] <= 85.05112878
+        ):
+            raise RuntimeError(f"publicationBounds is invalid for tileset {tileset_id}.")
+        layers = [replace(layer, publication_bounds=publication_bounds) for layer in layers]
         tilesets.append(
             Tileset(
                 tileset_id=tileset_id,
@@ -561,6 +612,7 @@ def load_tilesets(config_path: Path, selected: set[str] | None = None) -> tuple[
                 tippecanoe_group_workers=tippecanoe_group_workers,
                 gdal_executable=gdal_executable,
                 gdal_threads=gdal_threads,
+                publication_bounds=publication_bounds,
             )
         )
     if not tilesets:
@@ -574,29 +626,85 @@ def _mercator_to_lon_lat(x: float, y: float) -> tuple[float, float]:
     return max(-180.0, min(180.0, longitude)), max(-85.05112878, min(85.05112878, latitude))
 
 
+def _lon_lat_to_mercator(longitude: float, latitude: float) -> tuple[float, float]:
+    x = longitude / 180.0 * WORLD_HALF_METERS
+    clipped_latitude = max(-85.05112878, min(85.05112878, latitude))
+    y = 6_378_137.0 * math.log(math.tan(math.pi / 4 + math.radians(clipped_latitude) / 2))
+    return x, y
+
+
+def _mercator_bounds_to_lon_lat(
+    bounds: tuple[float, float, float, float],
+) -> list[float]:
+    west, south = _mercator_to_lon_lat(bounds[0], bounds[1])
+    east, north = _mercator_to_lon_lat(bounds[2], bounds[3])
+    return [west, south, east, north]
+
+
+def _validate_layer_publication_bounds(
+    tileset: Tileset,
+    results: Iterable[LayerBuildResult],
+) -> None:
+    allowed_west, allowed_south, allowed_east, allowed_north = tileset.publication_bounds
+    rejected: list[str] = []
+    for result in results:
+        west, south, east, north = _mercator_bounds_to_lon_lat(result.bounds)
+        if west < allowed_west or south < allowed_south or east > allowed_east or north > allowed_north:
+            rejected.append(
+                f"{result.layer_id} [{west:.5f}, {south:.5f}, {east:.5f}, {north:.5f}]"
+            )
+    if rejected:
+        raise RuntimeError(
+            "PMTiles publication rejected layers outside the configured build bounds "
+            f"{list(tileset.publication_bounds)}: {'; '.join(rejected)}"
+        )
+
+
+def _feature_id_expressions(layer: Layer, geometry: str) -> tuple[str, str]:
+    if layer.feature_id_column:
+        source_column = _quote_identifier(layer.feature_id_column)
+        numeric = f"CAST({source_column} AS BIGINT)"
+        return numeric, f"CAST({source_column} AS VARCHAR)"
+    hash_inputs = [_quote_identifier(name) for name in layer.feature_hash_columns]
+    hash_inputs.append(f"ST_AsWKB({geometry})")
+    numeric = f"CAST(hash({', '.join(hash_inputs)}) & 9223372036854775807 AS BIGINT)"
+    return numeric, f"CAST({numeric} AS VARCHAR)"
+
+
 def _prepare_layer(
     connection: Any,
     layer: Layer,
     temporary_directory: Path,
     memory_limit: str,
     threads_per_worker: int,
-) -> tuple[int, tuple[float, float, float, float]]:
+) -> tuple[int, tuple[float, float, float, float], int]:
     temporary_directory.mkdir(parents=True, exist_ok=True)
     connection.execute(f"SET memory_limit = {_sql_string(memory_limit)}")
     connection.execute(f"SET temp_directory = {_sql_string(str(temporary_directory))}")
     connection.execute(f"SET threads = {int(threads_per_worker)}")
-    feature_id = (
-        f"CAST({_quote_identifier(layer.feature_id_column)} AS BIGINT)"
-        if layer.feature_id_column
-        else "row_number() OVER ()::BIGINT"
-    )
     property_select = ",\n                ".join(
         f"{_property_expression(item)} AS {_quote_identifier(item.alias)}" for item in layer.properties
     )
     if property_select:
         property_select += ",\n                "
     geometry = _quote_identifier(layer.geometry_column)
+    feature_id, portal_feature_id = _feature_id_expressions(layer, geometry)
     source = _qualified_table(layer.schema, layer.table)
+    source_feature_count = int(
+        connection.execute(
+            f"SELECT count(*) FROM {source} WHERE {geometry} IS NOT NULL AND NOT ST_IsEmpty({geometry})"
+        ).fetchone()[0]
+        or 0
+    )
+    minimum_x, minimum_y = _lon_lat_to_mercator(
+        layer.publication_bounds[0], layer.publication_bounds[1]
+    )
+    maximum_x, maximum_y = _lon_lat_to_mercator(
+        layer.publication_bounds[2], layer.publication_bounds[3]
+    )
+    publication_envelope = (
+        f"ST_MakeEnvelope({minimum_x:.8f}, {minimum_y:.8f}, {maximum_x:.8f}, {maximum_y:.8f})"
+    )
     connection.execute("DROP TABLE IF EXISTS __portal_pmtiles_prepared")
     connection.execute(
         f"""
@@ -604,6 +712,7 @@ def _prepare_layer(
         WITH transformed AS MATERIALIZED (
             SELECT
                 {feature_id} AS feature_id,
+                {portal_feature_id} AS portal_feature_id,
                 {property_select}
                 ST_Transform(
                     CASE
@@ -616,6 +725,12 @@ def _prepare_layer(
                 ) AS geometry
             FROM {source}
             WHERE {geometry} IS NOT NULL AND NOT ST_IsEmpty({geometry})
+        ), clipped AS MATERIALIZED (
+            SELECT
+                * EXCLUDE (geometry),
+                ST_Intersection(geometry, {publication_envelope}) AS geometry
+            FROM transformed
+            WHERE geometry IS NOT NULL AND ST_Intersects(geometry, {publication_envelope})
         )
         SELECT
             *,
@@ -623,7 +738,7 @@ def _prepare_layer(
             ST_YMin(geometry) AS minimum_y,
             ST_XMax(geometry) AS maximum_x,
             ST_YMax(geometry) AS maximum_y
-        FROM transformed
+        FROM clipped
         WHERE geometry IS NOT NULL AND NOT ST_IsEmpty(geometry)
         """
     )
@@ -636,11 +751,19 @@ def _prepare_layer(
     count = int(row[0] or 0)
     if not count:
         raise RuntimeError(f"Layer {layer.layer_id} contains no usable geometry.")
-    return count, (float(row[1]), float(row[2]), float(row[3]), float(row[4]))
+    return (
+        count,
+        (float(row[1]), float(row[2]), float(row[3]), float(row[4])),
+        max(0, source_feature_count - count),
+    )
 
 
 def _mvt_struct(layer: Layer) -> str:
-    values = ["'geometry': geometry", "'feature_id': feature_id"]
+    values = [
+        "'geometry': geometry",
+        "'feature_id': feature_id",
+        "'__portal_feature_id': portal_feature_id",
+    ]
     values.extend(f"{_sql_string(item.source_name)}: {_quote_identifier(item.alias)}" for item in layer.properties)
     return "{" + ", ".join(values) + "}"
 
@@ -658,14 +781,14 @@ def _tile_query(layer: Layer, zoom: int, extent: int, buffer: int, simplificatio
         properties = ", " + properties
     return f"""
         WITH zoom_geometry AS MATERIALIZED (
-            SELECT feature_id{properties}, {simplified} AS geometry,
+            SELECT feature_id, portal_feature_id{properties}, {simplified} AS geometry,
                    minimum_x, minimum_y, maximum_x, maximum_y
             FROM __portal_pmtiles_prepared
         ), expanded AS (
             SELECT
                 tile_x.range::INTEGER AS tile_x,
                 tile_y.range::INTEGER AS tile_y,
-                feature_id{properties}, geometry
+                feature_id, portal_feature_id{properties}, geometry
             FROM zoom_geometry
             CROSS JOIN LATERAL range(
                 greatest(0, floor(((minimum_x + {WORLD_HALF_METERS}) / {WORLD_WIDTH_METERS}) * {scale})::BIGINT),
@@ -677,7 +800,7 @@ def _tile_query(layer: Layer, zoom: int, extent: int, buffer: int, simplificatio
             ) AS tile_y
         ), clipped AS (
             SELECT
-                tile_x, tile_y, feature_id{properties},
+                tile_x, tile_y, feature_id, portal_feature_id{properties},
                 ST_AsMVTGeom(
                     geometry,
                     ST_Extent(ST_TileEnvelope({zoom}, tile_x, tile_y)),
@@ -715,12 +838,12 @@ def _build_layer_parts(
     memory_limit: str,
     threads_per_worker: int,
     total_layers: int,
-) -> tuple[int, int, tuple[float, float, float, float]]:
+) -> tuple[int, int, tuple[float, float, float, float], int]:
     duckdb = _load_duckdb()
     connection = duckdb.connect(str(layer.database), read_only=True)
     try:
         _load_spatial(connection)
-        feature_count, bounds = _prepare_layer(
+        feature_count, bounds, excluded_feature_count = _prepare_layer(
             connection,
             layer,
             temporary_directory,
@@ -758,7 +881,7 @@ def _build_layer_parts(
                 f"({time.perf_counter() - started:.1f} sec)",
                 flush=True,
             )
-        return feature_count, tile_count, bounds
+        return feature_count, tile_count, bounds, excluded_feature_count
     finally:
         connection.close()
 
@@ -815,7 +938,7 @@ def _build_layer_fragment(
             f"Layer {layer_order + 1}/{total_layers} started: {layer.layer_id}",
             flush=True,
         )
-        feature_count, tile_count, bounds = _build_layer_parts(
+        feature_count, tile_count, bounds, excluded_feature_count = _build_layer_parts(
             parts,
             layer_order,
             layer,
@@ -840,6 +963,8 @@ def _build_layer_fragment(
             feature_count=feature_count,
             tile_count=tile_count,
             bounds=bounds,
+            source_feature_count=feature_count + excluded_feature_count,
+            excluded_feature_count=excluded_feature_count,
         )
     except Exception:
         parts.close()
@@ -962,16 +1087,17 @@ def _export_flatgeobuf_layer(
             f"{engine.title()} staging {layer_order + 1}/{total_layers}: {layer.layer_id}",
             flush=True,
         )
-        feature_count, bounds = _prepare_layer(
+        feature_count, bounds, excluded_feature_count = _prepare_layer(
             connection,
             layer,
             worker_temp,
             memory_limit,
             threads_per_worker,
         )
-        selections: list[str] = []
-        if layer.properties:
-            selections.append("feature_id AS __portal_feature_id")
+        selections: list[str] = [
+            "feature_id AS __portal_mvt_id",
+            "portal_feature_id AS __portal_feature_id",
+        ]
         selections.extend(
             f"{_quote_identifier(item.alias)} AS {_quote_identifier(item.source_name)}"
             for item in layer.properties
@@ -1000,6 +1126,8 @@ def _export_flatgeobuf_layer(
             feature_count=feature_count,
             tile_count=0,
             bounds=bounds,
+            source_feature_count=feature_count + excluded_feature_count,
+            excluded_feature_count=excluded_feature_count,
         )
     finally:
         connection.close()
@@ -1115,10 +1243,12 @@ def _write_gdal_vrt(
         source_node.text = result.parts_path.name
         ElementTree.SubElement(layer_node, "SrcLayer").text = result.parts_path.stem
         ElementTree.SubElement(layer_node, "LayerSRS").text = "EPSG:3857"
-        if layer.properties:
-            ElementTree.SubElement(layer_node, "FID", {"name": ""}).text = "__portal_feature_id"
-        else:
-            ElementTree.SubElement(layer_node, "FID")
+        ElementTree.SubElement(layer_node, "FID", {"name": ""}).text = "__portal_mvt_id"
+        ElementTree.SubElement(
+            layer_node,
+            "Field",
+            {"name": "__portal_feature_id", "src": "__portal_feature_id", "type": "String"},
+        )
         for item in layer.properties:
             attributes = {"name": item.source_name, "src": item.source_name}
             attributes.update(_ogr_field_definition(item))
@@ -1202,7 +1332,7 @@ def _validate_pmtiles_archive(
         layer_metadata = metadata_by_id[layer.layer_id]
         fields = layer_metadata.get("fields")
         actual_fields = set(fields) if isinstance(fields, dict) else set()
-        expected_fields = {item.source_name for item in layer.properties}
+        expected_fields = set(_metadata_fields(layer))
         if actual_fields != expected_fields:
             raise RuntimeError(
                 f"{engine_label} field validation failed for {layer.layer_id}. "
@@ -1276,7 +1406,7 @@ def _run_gdal_pmtiles(
         engine="gdal",
         phase="encoding",
         phase_percent=0,
-        message="GDAL is encoding the consolidated PMTiles archive.",
+        message="GDAL is encoding the tileset PMTiles archive.",
     )
     print(
         f"GDAL is encoding {len(tileset.layers)} layers with GDAL_NUM_THREADS={tileset.gdal_threads}.",
@@ -1321,7 +1451,7 @@ def _run_gdal_pmtiles(
                     engine="gdal",
                     phase="encoding",
                     phase_percent=percent,
-                    message="GDAL is encoding the consolidated PMTiles archive.",
+                    message="GDAL is encoding the tileset PMTiles archive.",
                 )
     process.stdout.close()
     return_code = process.wait()
@@ -1389,7 +1519,10 @@ def _union_bounds(
 
 
 def _metadata_fields(layer: Layer) -> dict[str, str]:
-    return {item.source_name: item.metadata_type for item in layer.properties}
+    return {
+        "__portal_feature_id": "String",
+        **{item.source_name: item.metadata_type for item in layer.properties},
+    }
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -1577,6 +1710,7 @@ def _build_tileset_python(tileset: Tileset, worker_count_override: int | None = 
         )
         completed = _build_layers(tileset, build_id, started_at, worker_count)
         completed.sort(key=lambda item: item.layer_order)
+        _validate_layer_publication_bounds(tileset, completed)
         _write_build_progress(
             tileset,
             "finalizing",
@@ -1595,7 +1729,15 @@ def _build_tileset_python(tileset: Tileset, worker_count_override: int | None = 
                     "database": str(layer.database),
                     "table": f"{layer.schema}.{layer.table}",
                     "featureCount": result.feature_count,
+                    "sourceFeatureCount": result.source_feature_count,
+                    "excludedFeatureCount": result.excluded_feature_count,
                     "tilePartCount": result.tile_count,
+                    "sourceBounds": _mercator_bounds_to_lon_lat(result.bounds),
+                    "stagedBytes": result.parts_path.stat().st_size if result.parts_path.is_file() else 0,
+                    "archive": tileset.output.name,
+                    "featureIdField": "__portal_feature_id",
+                    "sourceFeatureIdColumn": layer.feature_id_column,
+                    "featureIdStrategy": layer.feature_id_strategy,
                     "minimumZoom": layer.minimum_zoom,
                     "maximumZoom": layer.maximum_zoom,
                     "properties": [item.source_name for item in layer.properties],
@@ -1662,6 +1804,7 @@ def _build_tileset_python(tileset: Tileset, worker_count_override: int | None = 
             "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
             "sizeBytes": tileset.output.stat().st_size,
             "tileCount": tile_count,
+            "averageTileBytes": round(tileset.output.stat().st_size / tile_count, 1),
             "minimumZoom": int(verified_header["min_zoom"]),
             "maximumZoom": int(verified_header["max_zoom"]),
             "bounds": [minimum_lon, minimum_lat, maximum_lon, maximum_lat],
@@ -1830,7 +1973,7 @@ def _run_tippecanoe_group(
         f"--minimum-zoom={minimum_zoom}",
         f"--maximum-zoom={maximum_zoom}",
         "--projection=EPSG:3857",
-        "--exclude=__portal_feature_id",
+        "--exclude=__portal_mvt_id",
         f"--simplification={tileset.simplification}",
         "--simplify-only-low-zooms",
         "--no-tiny-polygon-reduction-at-maximum-zoom",
@@ -2018,6 +2161,7 @@ def _build_tileset_tippecanoe(
             "tippecanoe",
         )
         completed.sort(key=lambda item: item.layer_order)
+        _validate_layer_publication_bounds(tileset, completed)
         by_order = {result.layer_order: result for result in completed}
         grouped: dict[tuple[int, int], list[tuple[Layer, LayerBuildResult]]] = {}
         for layer_order, layer in enumerate(tileset.layers):
@@ -2200,7 +2344,15 @@ def _build_tileset_tippecanoe(
                 "database": str(layer.database),
                 "table": f"{layer.schema}.{layer.table}",
                 "featureCount": by_order[index].feature_count,
+                "sourceFeatureCount": by_order[index].source_feature_count,
+                "excludedFeatureCount": by_order[index].excluded_feature_count,
                 "tilePartCount": None,
+                "sourceBounds": _mercator_bounds_to_lon_lat(by_order[index].bounds),
+                "stagedBytes": by_order[index].parts_path.stat().st_size if by_order[index].parts_path.is_file() else 0,
+                "archive": tileset.output.name,
+                "featureIdField": "__portal_feature_id",
+                "sourceFeatureIdColumn": layer.feature_id_column,
+                "featureIdStrategy": layer.feature_id_strategy,
                 "minimumZoom": layer.minimum_zoom,
                 "maximumZoom": layer.maximum_zoom,
                 "properties": [item.source_name for item in layer.properties],
@@ -2224,6 +2376,7 @@ def _build_tileset_tippecanoe(
             "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
             "sizeBytes": tileset.output.stat().st_size,
             "tileCount": tile_count,
+            "averageTileBytes": round(tileset.output.stat().st_size / tile_count, 1),
             "minimumZoom": int(verified_header["min_zoom"]),
             "maximumZoom": int(verified_header["max_zoom"]),
             "bounds": bounds,
@@ -2301,6 +2454,7 @@ def _build_tileset_gdal(tileset: Tileset, worker_count_override: int | None = No
             "gdal",
         )
         completed.sort(key=lambda item: item.layer_order)
+        _validate_layer_publication_bounds(tileset, completed)
         source_vrt = stage_directory / "layers.vrt"
         layer_configuration = stage_directory / "layers.json"
         _write_gdal_vrt(source_vrt, tileset, completed)
@@ -2345,7 +2499,15 @@ def _build_tileset_gdal(tileset: Tileset, worker_count_override: int | None = No
                 "database": str(layer.database),
                 "table": f"{layer.schema}.{layer.table}",
                 "featureCount": completed[index].feature_count,
+                "sourceFeatureCount": completed[index].source_feature_count,
+                "excludedFeatureCount": completed[index].excluded_feature_count,
                 "tilePartCount": None,
+                "sourceBounds": _mercator_bounds_to_lon_lat(completed[index].bounds),
+                "stagedBytes": completed[index].parts_path.stat().st_size if completed[index].parts_path.is_file() else 0,
+                "archive": tileset.output.name,
+                "featureIdField": "__portal_feature_id",
+                "sourceFeatureIdColumn": layer.feature_id_column,
+                "featureIdStrategy": layer.feature_id_strategy,
                 "minimumZoom": layer.minimum_zoom,
                 "maximumZoom": layer.maximum_zoom,
                 "properties": [item.source_name for item in layer.properties],
@@ -2363,6 +2525,7 @@ def _build_tileset_gdal(tileset: Tileset, worker_count_override: int | None = No
             "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
             "sizeBytes": tileset.output.stat().st_size,
             "tileCount": tile_count,
+            "averageTileBytes": round(tileset.output.stat().st_size / tile_count, 1),
             "minimumZoom": int(verified_header["min_zoom"]),
             "maximumZoom": int(verified_header["max_zoom"]),
             "bounds": bounds,

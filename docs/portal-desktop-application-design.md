@@ -12,8 +12,9 @@ read-only system publication or a writable business database.
    as `config/system.db`.
 2. **Risk data** contains read-only analytical and inspection datasets stored in
    DuckDB. Connections must be opened in read-only mode.
-3. **Map data** contains PMTiles, styles, sprites, symbols, and JSON/TOML map
-   configuration. These files are immutable application inputs.
+3. **Map data** contains external PMTiles archives plus resource-owned styles,
+   sprites, symbols, and layer definitions. Runtime data paths are supplied by the
+   packaged JSON/TOML configuration. All are immutable application inputs.
 4. **Business data** contains user-created or updated workflow records. Each resource
    owns tables in `stormwater.db`; this is the only general-purpose database
    the desktop runtime may modify.
@@ -89,7 +90,7 @@ contract. Workstation-specific override files are not supported. During developm
 `PORTAL_CONFIG_FILE` may point the host and Python worker to that same canonical file.
 The packaged system database remains at
 `config/system.db`; the settings define named risk databases,
-map runtime/PMTiles/configuration roots, business database and exchange folders, media
+PMTiles and terrain roots, business database and exchange folders, media
 root, exports, logs, and temporary storage. Environment tokens use the
 `${PORTAL_DATA_ROOT}` form.
 
@@ -146,9 +147,9 @@ enabled until that key lifecycle and merge-station compatibility are designed.
 
 | Field | Value |
 | --- | --- |
-| Status | Desktop foundation and network publication client implemented; workflow synchronization continues |
-| Version | 0.3 |
-| Date | July 20, 2026 |
+| Status | Desktop foundation implemented; map-data performance architecture approved for phased implementation |
+| Version | 0.4 |
+| Date | August 12, 2026 |
 | Branch | `desktop` |
 | Target platform | Windows 11 desktop |
 | Stack | React, TypeScript, Tauri, Rust, bundled Python, SQLite, DuckDB, PMTiles |
@@ -185,7 +186,9 @@ The recommended target is a portable, local-first desktop application with contr
 - Tauri hosts the React application in WebView2.
 - Rust owns the trusted Tauri command boundary and invokes validated local Python commands; frequently used operations can move to typed Rust commands over time.
 - Bundled Python executables perform specialized jobs when Python is the better tool.
-- Read-only DuckDB, PMTiles, symbols, and other large reference data are published on a network share and opened there directly.
+- Read-only DuckDB, PMTiles, and other large reference data are published on a network
+  share and opened there directly. Map styles, sprites, symbols, and routing definitions
+  remain with the owning resource.
 - Each workstation owns a small local writable SQLite database, normally under 10 MB.
 - Workstations never open a writable SQLite database directly from the shared drive.
 - Users submit versioned change packages to the shared drive.
@@ -531,8 +534,8 @@ The selected role must control elevated behavior. Merely having an admin role on
 
 | Data class | Examples | Runtime policy |
 | --- | --- | --- |
-| Packaged static assets | React bundle, icons, resource metadata, help pages | Read-only, shipped with the app |
-| Published reference data | DuckDB, PMTiles, symbols, lookup files | Read-only and opened directly from the configured network root |
+| Packaged static assets | React bundle, icons, resource metadata, map styles and symbols, help pages | Read-only, shipped with the app |
+| Published reference data | DuckDB, PMTiles, terrain, lookup files | Read-only and opened directly from the configured network root |
 | Local writable data | Reports, user actions, preferences, outbox | Workstation-owned SQLite |
 | Canonical writable data | Merged system and workflow records | Updated only by merge station |
 | User-generated files | DOCX, PDF, XLSX, snapshots, submission ZIPs | Written to approved local folders, then explicitly published |
@@ -577,6 +580,273 @@ Recommended startup behavior:
 Publishing should use a staging folder followed by an atomic folder/version switch
 when the operational process is formalized. The current maintenance publishing script
 copies the approved build artifacts into the shared folder and validates required files.
+
+### Asset Risk Map Data And Performance Architecture
+
+The Storm Water Asset Risk Map uses a hybrid read-only data architecture. PMTiles
+serves stable, display-oriented layers, while configured DuckDB sources serve
+operational and risk layers that require current attributes or interactive filtering.
+The application must preserve this separation; a configured direct DuckDB layer must
+never silently fall back to a similarly named PMTiles layer.
+
+The August 12, 2026 diagnostic review established the following implementation
+baseline. These measurements explain the design priorities; they are not release
+budgets and must be refreshed after each phase.
+
+| Diagnostic | Observed baseline |
+| --- | --- |
+| Direct map sources | 11 configured DuckDB datasets; 10 had R-trees, but the current guarded predicate planned sequential scans |
+| Selective spatial query | Removing the redundant null guard changed representative plans to `RTREE_INDEX_SCAN`; one 197-row query improved from about 55 ms to 2 ms |
+| Broad spatial query | A representative 2,622-row network query was faster as a sequential scan, confirming the need for adaptive planning |
+| Geometry conversion | A 20,349-feature warm query improved from about 579 ms with Python WKB/Shapely conversion to about 77 ms with DuckDB transformation and GeoJSON generation |
+| Database startup | Warm open-and-spatial-load cost ranged from about 81 to 249 ms; a cold network open reached about 3.4 seconds |
+| Current vector publication | One approximately 614 MB PMTiles archive contained 67 layers and about 17,000 addressed tiles; reported bounds extended far beyond the intended service area |
+
+The following rules are approved:
+
+1. Resource-owned style JSON, sprites, symbols, layer definitions, and source-to-layer
+   mappings remain part of the Asset Risk Map resource.
+2. Runtime file locations remain in `config/portal.settings.json`. React, Rust, and
+   Python must not contain hard-coded workstation, mapped-drive, or UNC paths.
+3. PMTiles archives and DuckDB databases remain immutable, read-only runtime inputs.
+4. Direct DuckDB layers remain outside PMTiles. PMTiles generation must include only
+   the layers approved for tile publication.
+5. File identity, version, and integrity metadata must be published with each map-data
+   release so caches can be invalidated without relying on filenames alone.
+
+#### PMTiles Binary Transport And Caching
+
+PMTiles byte ranges must not travel through the JSON Python command channel. Encoding
+binary ranges as JSON arrays creates avoidable copies, serialization cost, memory use,
+and contention with DuckDB requests.
+
+The target transport is:
+
+```text
+MapLibre PMTiles request
+  -> validated Tauri custom protocol
+  -> Rust path allowlist and range validation
+  -> direct file-range response
+```
+
+Rust must process `Range` requests, return `206 Partial Content` with correct range
+headers, and stream the requested bytes without reconstructing them through Python.
+As a transitional safeguard, any Python PMTiles endpoint must return a file response
+rather than a Python byte iterator, but the final runtime path bypasses the Python
+worker completely.
+
+Every published archive must expose stable cache validators such as `ETag` and
+`Last-Modified`. The resource must use a versioned URL or immutable version token based
+on the publication manifest, file hash, or file identity. A new publication changes
+the token; unchanged archives remain cacheable. PMTiles and terrain reads must not
+share the serialized Python request queue used by DuckDB JSON queries.
+
+#### DuckDB Spatial Query Contract
+
+Spatial filtering must operate on the stored geometry in its native coordinate system
+so DuckDB can use an R-tree. The standard high-selectivity predicate is:
+
+```sql
+ST_Intersects(geometry, ST_GeomFromText(?))
+```
+
+Do not prepend a redundant `geometry IS NOT NULL` guard or wrap the indexed geometry
+column in `ST_Transform` in the `WHERE` clause when either form prevents an
+`RTREE_INDEX_SCAN`. The query region is transformed to the source coordinate system
+before binding. Projection and GeoJSON creation occur after filtering in DuckDB:
+
+```sql
+ST_AsGeoJSON(
+  ST_Transform(geometry, 'EPSG:2264', 'EPSG:4326', always_xy := true)
+)
+```
+
+This replaces per-feature WKB decoding, Shapely transformation, and Python GeoJSON
+construction for map responses. It also keeps the spatial index eligible while moving
+set-oriented geometry work into DuckDB.
+
+R-tree selection is adaptive rather than unconditional. High-zoom or selective
+requests use the R-tree path. Broad extents may use a sequential scan when random
+reads from a network database are slower than a contiguous scan. Each high-density
+direct layer declares an approved minimum zoom, maximum query extent, or equivalent
+density threshold. Small layers, including a culvert source with only a few thousand
+records, do not require an R-tree unless measured growth or latency justifies one.
+
+Attribute predicates must preserve column types:
+
+- equality and range filters compare directly against typed columns;
+- numeric filters must not wrap indexed columns in `CAST` or `TRY_CAST` when the
+  source schema is already numeric;
+- case-insensitive equality may use a maintained normalized search column when needed;
+- substring `contains` searches are not assumed to benefit from an ART index;
+- ART indexes are reserved for selective point lookups and measured filter paths;
+- Hilbert ordering and zonemap-friendly ordering remain publication-time optimizations.
+
+Release verification must run `EXPLAIN ANALYZE` for representative narrow and broad
+viewports against the actual configured databases. It must confirm the intended scan
+type, feature count, truncation behavior, and elapsed time instead of assuming that an
+existing index is being used.
+
+#### Query Batching, Connections, And Metadata
+
+One map movement must issue one logical viewport request for all visible direct
+DuckDB datasets, not one independent Python command per layer. The map service groups
+the request by resolved database path, opens each database once for the batch, loads
+the spatial extension once per connection, executes the approved layer queries, and
+returns results keyed by dataset or source ID.
+
+The runtime may retain a short-lived read-only connection per active batch or use a
+small bounded connection cache. It must not hold a permanent connection that prevents
+maintenance from atomically replacing a published database. A cached connection is
+discarded whenever the resolved path, file identity, size, modification time, or
+publication version changes.
+
+Table schema and geometry metadata are cached by:
+
+```text
+(resolved database path, publication/file signature, table name)
+```
+
+The cache is invalidated by a changed signature and must never allow metadata from an
+older database publication to validate a replacement file.
+
+The existing single Python worker remains acceptable for bounded compatibility jobs,
+but PMTiles never uses it. Viewport batches have generation IDs, and obsolete map
+generations are coalesced before entering the worker queue where practical. If batching
+and coalescing do not meet the measured target, map queries may move to a dedicated
+read-only worker or a small bounded worker pool. Unbounded per-layer processes and
+connections are prohibited.
+
+#### Viewport Fetching And MapLibre Updates
+
+The frontend maintains the geographic coverage of each successful direct-data result.
+A pan or small zoom change reuses that result while the visible bounds remain inside
+the cached buffered bounds. It refetches only when the viewport exits the retained
+coverage, the layer filter changes, the source publication changes, or the layer is
+explicitly refreshed. Grid- or tile-aligned request bounds may be used to improve cache
+reuse across small map movements.
+
+Map movement refreshes are debounced by approximately 150 to 250 milliseconds and are
+processed by one scheduled refresh pipeline. `moveend`, `zoomend`, and style events
+must not create duplicate requests for the same generation. A newer generation marks
+older work stale; stale results are neither rendered nor allowed to block newer work
+when they can be coalesced before execution.
+
+Primary and split-map views share one fetched result for the same dataset, viewport,
+filter, and publication version. Cache state must still track each map/source binding
+so updating the primary map cannot incorrectly suppress the split-map update.
+`GeoJSONSource.updateData()` may be used when stable unique feature IDs and a measured
+diff make incremental updates cheaper. Full `setData()` remains valid for a complete
+replacement.
+
+Direct GeoJSON responses keep explicit maximum-feature limits. A truncated response
+must include the limit and returned count, and the UI must show that the displayed
+result is incomplete. If a dense direct layer remains too costly after the approved
+index, SQL transformation, batching, and viewport-cache work, the next escalation is
+a dynamic MVT endpoint backed by DuckDB. It is not automatically moved into a
+pre-generated PMTiles archive.
+
+#### PMTiles Publication Layout
+
+A single archive containing all dense layers causes each requested vector tile to
+carry unrelated data and increases range size, decode work, and memory use. The target
+publication separates stable vector layers into a small number of thematic archives:
+
+1. core storm assets;
+2. buildings, parcels, and impervious surfaces;
+3. planning and project layers;
+4. transportation, hydrography, and reference layers.
+
+The exact catalog remains configuration-driven. Archive boundaries may be adjusted
+only after measuring tile sizes and common visibility combinations. Each archive and
+source layer declares useful minimum and maximum zoom levels based on density and use
+case. Dense labels and polygons must not be visible below a useful zoom merely because
+the source contains lower-zoom tiles.
+
+The publication job must clip, reject, or quarantine features outside the configured
+Mecklenburg build bounds. It produces a per-layer report containing source database,
+source table, feature count, geometry type, source bounds, published bounds, zoom
+range, archive name, and tile-size statistics. An archive with implausible geographic
+bounds fails publication review.
+
+Every published vector feature exposes the reserved string attribute
+`__portal_feature_id`. The value comes only from a verified non-null, unique internal
+row identifier such as `OBJECTID`, `FID`, or `OID`; business identifiers such as asset
+or facility IDs are not substitutes. When no valid internal column exists, Portal
+Manager generates a deterministic internal hash from the source row and geometry.
+The manifest records the source internal-ID column or generated strategy so the
+Desktop can resolve a selected tile feature back to the authoritative DuckDB row.
+
+Publication uses a staging location, validates every archive and manifest, then
+atomically switches the active version. The prior version remains available for
+rollback. Direct DuckDB source mappings are validated separately and are not inferred
+from PMTiles contents.
+
+#### Map Rendering Efficiency
+
+The interactive MapLibre instance uses `preserveDrawingBuffer: false`. Image and PDF
+exports use a temporary or off-screen export map configured for capture, then dispose
+it after the artifact is created. Export requirements must not impose a permanent
+rendering cost on normal navigation.
+
+The layer panel is rebuilt only after style load or an actual layer visibility/style
+change. Frequent `idle` events must not repeatedly scan the full style and trigger
+equivalent React state updates. Stable source, layer, group, and visibility lookup maps
+are precomputed and reused. Default visibility and label density are governed by zoom
+rules so hundreds of style layers do not all participate in low-zoom rendering.
+
+Existing 2D/3D safeguards remain in force. Switching modes preserves the user's valid
+center and zoom, applies terrain and building layers only within supported zoom ranges,
+and must not produce a blank map or unexpectedly reset to a regional extent.
+
+#### Performance Telemetry And Release Gates
+
+Map requests produce structured timings with at least:
+
+- request generation and refresh reason;
+- queue wait;
+- database open/connection reuse;
+- schema-metadata lookup and cache status;
+- query and geometry-conversion time;
+- serialization time, response bytes, and feature count;
+- scan type when captured by diagnostics;
+- truncation status;
+- frontend fetch and MapLibre update time;
+- stale, cancelled, or coalesced request count.
+
+PMTiles diagnostics include archive version, requested range size, response time, and
+cache validator. Logs must identify source and dataset IDs without exposing arbitrary
+filesystem paths to the UI.
+
+Performance verification runs against the configured `G:` or UNC network paths, not
+only local fixture databases. Tests include cold and warm file caches, narrow and broad
+viewports, rapid pan/zoom sequences, split-map mode, 2D/3D switching, export, and a
+representative set of simultaneously visible layers. Before implementation begins,
+the team records the current baseline and approves numeric budgets for time to first
+map, settled viewport refresh, interaction responsiveness, memory, and maximum response
+size. A release fails when it materially regresses an approved budget, displays an
+unreported truncated result, or allows obsolete viewport work to replace current data.
+
+#### Performance Implementation Sequence
+
+The accepted work is implemented and verified in this order:
+
+1. **Transport and query foundation:** move PMTiles ranges to direct Rust transport;
+   make spatial predicates R-tree eligible; transform geometry and generate GeoJSON
+   in DuckDB; add schema caching and structured timings.
+2. **Viewport and concurrency:** add coverage-aware caching, debounce and generation
+   coalescing; batch visible direct layers by database; share results between primary
+   and split maps.
+3. **PMTiles publication:** split the archive by theme; add immutable version tokens,
+   cache validators, geographic-bound checks, tile statistics, and atomic publication.
+4. **Rendering and selective escalation:** disable retained drawing buffers on the
+   interactive map; optimize layer-panel updates and zoom visibility; refine typed
+   attribute filters; add dynamic MVT only for layers that still fail the measured
+   budget.
+
+Each phase is independently releasable. The current source mapping and prior immutable
+map publication remain available as rollback inputs until the replacement passes
+functional parity, integrity, and performance tests.
 
 ### Local Writable SQLite
 
@@ -942,11 +1212,20 @@ Exit criterion: resource components do not depend on network URLs and use deskto
 
 - Validate the external shared-data layout and publication manifest.
 - Implement Rust read-only DuckDB access for common dashboard queries.
-- Implement PMTiles and media custom protocols.
+- Serve PMTiles byte ranges directly from the validated Rust custom protocol; binary
+  map data must bypass the JSON Python command channel.
+- Batch direct map-layer queries by viewport and database, preserve R-tree-eligible
+  predicates, and perform projection and GeoJSON generation in DuckDB.
+- Add publication-aware metadata caches, viewport-generation coalescing, and map
+  performance telemetry as defined in Asset Risk Map Data And Performance Architecture.
+- Implement the remaining media custom protocols.
 - Replace mapped drive assumptions with configurable UNC roots.
 - Verify CCTV video and snapshot access and desktop report image access.
 
-Exit criterion: read-only dashboards, maps, videos, and snapshots work without any local server. The desktop foundation already satisfies this for representative smoke-test paths.
+Exit criterion: read-only dashboards, maps, videos, and snapshots work without any
+local server; PMTiles does not enter the Python worker; representative direct layers
+use the intended adaptive spatial plan; and map performance passes the approved cold-
+and warm-network release budgets.
 
 ### Phase 4: Session, Resources, And Permissions
 
@@ -1025,6 +1304,16 @@ Exit criterion: approved users can perform normal work with no persistent backen
 - Test that the splash appears immediately, then test unavailable-shared-drive diagnostics, retry, and exit.
 - Test automatic sign-in by Windows UPN email, case-insensitive matching, unknown users, and inactive users.
 - Test large PMTiles, DuckDB, video, and snapshot files.
+- Test PMTiles byte ranges through Rust and verify that no binary payload enters the
+  Python command channel.
+- Run `EXPLAIN ANALYZE` for narrow and broad map extents and verify the approved
+  R-tree or sequential-scan path for each representative direct layer.
+- Test batched direct-layer requests, coverage-cache reuse, rapid stale viewport
+  generations, split-map result sharing, and reported feature truncation.
+- Test thematic PMTiles manifests, archive bounds, source-layer inventory, immutable
+  version tokens, and rollback to the prior publication.
+- Measure cold and warm map startup, pan/zoom settle time, memory, and 2D/3D switching
+  against the configured network source.
 - Test report generation from UNC media sources.
 - Test interrupted copy, submission, and merge operations.
 - Test two users editing the same base record and verify conflict detection.
@@ -1049,6 +1338,16 @@ The desktop transformation is complete when:
 12. Resource permissions are enforced using the currently selected role.
 13. Existing key reports and exports match approved baseline outputs.
 14. FastAPI, Uvicorn, Vite production serving, and service launcher scripts are not required.
+15. PMTiles range reads are served by Rust without entering the Python JSON command
+    channel.
+16. Configured direct DuckDB layers never silently fall back to PMTiles, and their
+    source paths are resolved only through application configuration.
+17. Representative narrow and broad spatial queries use the approved measured plan,
+    and feature truncation is reported to the user.
+18. Rapid pan, zoom, split-map, and 2D/3D operations do not allow a stale viewport
+    result to replace current map data.
+19. Each map publication passes archive inventory, geographic bounds, version,
+    integrity, tile-size, and rollback validation.
 
 ## Risks And Mitigations
 
@@ -1058,6 +1357,11 @@ The desktop transformation is complete when:
 | Writable SQLite is accidentally opened on a share | Centralize path policy in Rust and reject writable UNC database paths |
 | Users overwrite unsent changes during download | Block release replacement while the local outbox is nonempty |
 | Shared datasets are large or network access is slow | Keep files immutable, use PMTiles range reads, open DuckDB read-only, monitor latency, and publish versioned folders |
+| PMTiles binary data blocks the serialized Python worker | Serve validated range requests directly from Rust and version immutable archives |
+| A spatial index exists but the query plan performs a sequential scan | Use index-eligible predicates, inspect `EXPLAIN ANALYZE`, and choose an adaptive narrow/broad plan |
+| Rapid viewport changes queue obsolete DuckDB work | Debounce, batch, assign generations, and coalesce stale requests before execution |
+| One PMTiles archive carries unrelated dense layers | Publish a small set of thematic archives with layer-specific zoom and bounds validation |
+| Map export requirements slow normal interaction | Use a temporary export map and disable preserved drawing buffers on the interactive map |
 | Python packaging becomes too large | Split Python jobs by capability and package only required libraries |
 | Existing UI command keys reflect the former HTTP contract | Keep them behind the desktop adapter and replace them incrementally with typed domain commands |
 | UNC media access is inconsistent | Configure logical roots, test ACLs, cache selectively, and retain diagnostic path checks |
@@ -1074,7 +1378,9 @@ The following decisions should be treated as approved unless later requirements 
 3. Do not run a persistent local service or expose a localhost API.
 4. Use Rust Tauri commands for trusted application services.
 5. Package Python jobs as client-side executables and launch them on demand.
-6. Keep DuckDB, PMTiles, styles, and symbols outside the portable folder and open them read-only from the shared root.
+6. Keep DuckDB and PMTiles outside the portable folder and open them read-only from
+   the shared root; keep map styles, sprites, symbols, and routing definitions with the
+   Asset Risk Map resource while resolving data files through configuration.
 7. Support both mapped and UNC roots in configuration; prefer UNC paths when drive mappings differ across clients.
 8. Keep all writable SQLite databases local to a workstation.
 9. Exchange immutable submission packages through the network share.
@@ -1086,7 +1392,10 @@ The following decisions should be treated as approved unless later requirements 
 
 These items should be resolved during Phase 0 or Phase 1:
 
-- Whether to use a Rust DuckDB crate, bundled DuckDB CLI/library, or Python for each query family.
+- Whether non-map DuckDB query families should use a Rust DuckDB crate, a bundled
+  DuckDB library, or bounded Python jobs. The map transport decision is fixed: PMTiles
+  ranges are Rust-owned, while direct DuckDB map queries first use the approved batched
+  read-only path and move only if measured performance requires it.
 - Whether one Python executable or several smaller job-specific executables gives the best package and update behavior.
 - The authoritative UNC share roots and ACL design.
 - The exact merge-station conflict review UI and data-steward ownership.

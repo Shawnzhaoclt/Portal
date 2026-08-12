@@ -10,16 +10,19 @@ shared `maptiles/config/project.toml` file is not required by Portal Desktop.
 PMTiles remain external read-only data. Their locations and logical archive
 names are defined only in `config/portal.settings.json`:
 
-- `maps.pmtilesRoot` contains the current Portal-managed consolidated archive.
-- `maps.portalLayersArchive` names that archive.
+- `maps.pmtilesRoot` contains the current Portal-managed archives.
+- `maps.portalLayerArchives` names the four required thematic archives. All four
+  must pass their manifest and exact source-layer inventory checks.
 - `maps.terrainArchive` names the read-only Terrain-RGB PMTiles archive used by
   the MapLibre raster-dem source.
 - `maps.legacyPmtilesRoot` contains the retained planning archive used by map
   layers that have not moved to the Portal-managed archive.
 - `maps.legacyMapArchive` names the retained archive.
 
-When a style is requested, the resource reads the current Portal archive
-manifest and routes the 68 registered Spatial Data Warehouse source layers to it.
+When a style is requested, the resource validates all thematic archive manifests
+and routes the 68 registered Spatial Data Warehouse source layers to their theme.
+If any archive is absent, incomplete, or contains unexpected layers, the resource
+returns a clear publication error instead of serving a partial map.
 The eleven Planning Project layers declared by `maps.duckdbGeoJsonLayers` are read
 directly from their configured DuckDB tables for the visible map extent; they are
 not converted to PMTiles. This includes `Culverts_evw` under the stable `culverts`

@@ -7,14 +7,18 @@ import "./MapTilesViewer.css";
 import { formatDateTime } from "../../../lib/dateTime";
 import {
   Activity,
+  Check,
+  ChevronLeft,
   ChevronRight,
   CircleDot,
+  Copy,
   Download,
   ExternalLink,
   Filter,
   Landmark,
   Layers,
   ListOrdered,
+  LoaderCircle,
   LocateFixed,
   Map as MapIcon,
   Moon,
@@ -28,7 +32,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchAttributeFilterFields, fetchDuckDbGeoJson, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
+import { fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
 import { clientSetting } from "../../../desktop/settings";
 import { openExternalUrl } from "../../../desktop/runtime";
 import stormwaterLogoUrl from "./assets/stormwater-logo.png";
@@ -167,6 +171,11 @@ type RiskClassification = {
   color: string;
   textColor: string;
   softColor: string;
+};
+type DuckDbGeoJsonCoverage = {
+  bbox: Bounds;
+  signature: string;
+  data: DuckDbGeoJsonFeatureCollection;
 };
 
 const IDENTIFY_TOLERANCE_PX = 3;
@@ -512,8 +521,12 @@ export default function App() {
   const riskListActiveTabRef = useRef("cityworks_all");
   const riskListLayerSelectionRef = useRef<RiskLayerSelection>(DEFAULT_RISK_LIST_LAYER_SELECTION);
   const riskSortTypeRef = useRef<RiskSortType>("condition");
-  const duckDbGeoJsonRefreshRef = useRef<Record<string, number>>({});
-  const duckDbGeoJsonLastKeyRef = useRef<Record<string, string>>({});
+  const duckDbGeoJsonGenerationRef = useRef(0);
+  const duckDbGeoJsonPendingKeyRef = useRef("");
+  const duckDbGeoJsonCoverageRef = useRef<Record<string, DuckDbGeoJsonCoverage>>({});
+  const duckDbGeoJsonRefreshTimeoutRef = useRef<number | null>(null);
+  const duckDbGeoJsonInFlightRef = useRef(false);
+  const duckDbGeoJsonRefreshQueuedRef = useRef(false);
   const inventoryWidgetDragRef = useRef<FloatingWidgetDrag | null>(null);
   const inventoryWidgetOpenRef = useRef(false);
   const riskListWidgetDragRef = useRef<FloatingWidgetDrag | null>(null);
@@ -583,6 +596,8 @@ export default function App() {
   const [drawFeatures, setDrawFeatures] = useState<DrawGeoJsonFeature[]>([]);
   const [selectedDrawId, setSelectedDrawId] = useState<string | null>(null);
   const [map3dEnabled, setMap3dEnabled] = useState(false);
+  const [map3dTransitioning, setMap3dTransitioning] = useState(false);
+  const [mapDataWarning, setMapDataWarning] = useState("");
   const [assetSearch, setAssetSearch] = useState("");
   const [assetSearchResults, setAssetSearchResults] = useState<AssetSearchResult[]>([]);
   const [assetSearchOpen, setAssetSearchOpen] = useState(false);
@@ -1083,9 +1098,13 @@ export default function App() {
     const nextVisibility = Object.fromEntries(
       currentStyleLayers().map((layer) => [layer.id, getLayerVisibility(layer.id)]),
     );
-    setLayerRecords(layers);
+    setLayerRecords((current) => (
+      current.length === layers.length && current.every((layer, index) => layer.id === layers[index]?.id)
+        ? current
+        : layers
+    ));
     layerVisibilityRef.current = nextVisibility;
-    setLayerVisibilityState(nextVisibility);
+    setLayerVisibilityState((current) => shallowBooleanRecordEqual(current, nextVisibility) ? current : nextVisibility);
   }, [currentStyleLayers, getLayerVisibility, operationalLayers]);
 
   const updateRenderedFeatureMetric = useCallback(() => undefined, []);
@@ -1099,61 +1118,146 @@ export default function App() {
     setCurrentZoom((current) => (Math.abs(current - nextZoom) > 0.01 ? nextZoom : current));
   }, []);
 
-  const refreshDuckDbGeoJsonSources = useCallback(
-    (map: MapLibreMap | null) => {
-      if (!map?.isStyleLoaded()) {
+  const runDuckDbGeoJsonRefresh = useCallback(() => {
+    const maps = [mapRef.current, splitMapRef.current].filter(
+      (map): map is MapLibreMap => Boolean(map?.isStyleLoaded()),
+    );
+    if (!maps.length) {
+      return;
+    }
+    const viewportMap = mapRef.current?.isStyleLoaded() ? mapRef.current : maps[0];
+    const zoom = viewportMap.getZoom();
+    const visibleBbox = mapBounds(viewportMap);
+    const requestBbox = bufferedMapBounds(viewportMap);
+    const requests: Array<{
+      config: (typeof DUCKDB_GEOJSON_SOURCE_CONFIGS)[number];
+      signature: string;
+      filters: AttributeFilterPayload;
+    }> = [];
+
+    DUCKDB_GEOJSON_SOURCE_CONFIGS.forEach((config) => {
+      const visible = maps.some((map) => mapHasVisibleDuckDbSource(map, config.sourceId));
+      if (!visible) {
         return;
       }
-      const layers = operationalLayers();
-      const zoom = map.getZoom();
-      const bbox = bufferedMapBounds(map);
-      DUCKDB_GEOJSON_SOURCE_CONFIGS.forEach((config) => {
-        const source = map.getSource(config.sourceId) as GeoJSONSource | undefined;
-        if (!source) {
+      const filters = backendAttributeFilterPayloadForTargets(attributeFiltersRef.current, [config.datasetId]);
+      const signature = attributeFilterPayloadSignature(filters);
+      const cached = duckDbGeoJsonCoverageRef.current[config.sourceId];
+      if (cached && cached.signature === signature && boundsContain(cached.bbox, visibleBbox)) {
+        setDuckDbGeoJsonDataOnMaps(maps, config.sourceId, cached.data);
+        return;
+      }
+      requests.push({ config, signature, filters });
+    });
+
+    if (!requests.length) {
+      return;
+    }
+    const requestKey = [
+      requestBbox.map((value) => value.toFixed(5)).join(","),
+      zoom.toFixed(2),
+      ...requests.map(({ config, signature }) => `${config.datasetId}:${signature}`),
+    ].join("|");
+    if (duckDbGeoJsonPendingKeyRef.current === requestKey) {
+      return;
+    }
+    if (duckDbGeoJsonInFlightRef.current) {
+      duckDbGeoJsonGenerationRef.current += 1;
+      duckDbGeoJsonRefreshQueuedRef.current = true;
+      return;
+    }
+    duckDbGeoJsonInFlightRef.current = true;
+    duckDbGeoJsonPendingKeyRef.current = requestKey;
+    const generation = ++duckDbGeoJsonGenerationRef.current;
+    const started = performance.now();
+    fetchDuckDbGeoJsonBatch(
+      requestBbox,
+      zoom,
+      requests.map(({ config, filters }) => ({
+        dataset_id: config.datasetId,
+        limit: config.limit,
+        filters,
+      })),
+    )
+      .then((response) => {
+        if (duckDbGeoJsonGenerationRef.current !== generation) {
           return;
         }
-        const hasVisibleLayer = layers.some((layer) => {
-          if (layer.metadata?.duckdb_geojson_source !== config.sourceId || !map.getLayer(layer.id)) {
-            return false;
-          }
-          const visible = map.getLayoutProperty(layer.id, "visibility") !== "none";
-          return visible && layerVisibleAtZoom(layer, zoom);
-        });
-        if (!hasVisibleLayer) {
-          if (duckDbGeoJsonLastKeyRef.current[config.sourceId] !== "empty") {
-            source.setData(emptyDuckDbGeoJsonFeatureCollection() as unknown as Parameters<GeoJSONSource["setData"]>[0]);
-            duckDbGeoJsonLastKeyRef.current[config.sourceId] = "empty";
-          }
-          return;
-        }
-        const filterPayload = backendAttributeFilterPayloadForTargets(attributeFiltersRef.current, [config.datasetId]);
-        const requestKey = `${config.datasetId}:${bbox.map((value) => value.toFixed(5)).join(",")}:${zoom.toFixed(2)}:${attributeFilterPayloadSignature(filterPayload)}`;
-        if (duckDbGeoJsonLastKeyRef.current[config.sourceId] === requestKey) {
-          return;
-        }
-        duckDbGeoJsonLastKeyRef.current[config.sourceId] = requestKey;
-        const requestId = (duckDbGeoJsonRefreshRef.current[config.sourceId] || 0) + 1;
-        duckDbGeoJsonRefreshRef.current[config.sourceId] = requestId;
-        fetchDuckDbGeoJson(config.datasetId, bbox, config.limit, filterPayload)
-          .then((featureCollection) => {
-            if (duckDbGeoJsonRefreshRef.current[config.sourceId] !== requestId) {
-              return;
+        const warnings: string[] = [];
+        requests.forEach(({ config, signature }) => {
+          const featureCollection = response.results[config.datasetId];
+          if (!featureCollection) {
+            const message = response.errors[config.datasetId];
+            if (message) {
+              warnings.push(`${config.datasetId}: ${message}`);
             }
-            const nextSource = map.getSource(config.sourceId) as GeoJSONSource | undefined;
-            nextSource?.setData(featureCollection as unknown as Parameters<GeoJSONSource["setData"]>[0]);
-          })
-          .catch((error: Error) => {
-            console.warn(`Could not load DuckDB GeoJSON source ${config.datasetId}.`, error);
-          });
+            return;
+          }
+          duckDbGeoJsonCoverageRef.current[config.sourceId] = {
+            bbox: requestBbox,
+            signature,
+            data: featureCollection,
+          };
+          setDuckDbGeoJsonDataOnMaps(
+            [mapRef.current, splitMapRef.current].filter((map): map is MapLibreMap => Boolean(map?.isStyleLoaded())),
+            config.sourceId,
+            featureCollection,
+          );
+          if (featureCollection.metadata?.truncated) {
+            warnings.push(
+              `${config.datasetId} reached its ${Number(featureCollection.metadata.limit || config.limit).toLocaleString()} feature display limit.`,
+            );
+          }
+        });
+        setMapDataWarning(warnings.join(" "));
+        console.debug("DuckDB map viewport refreshed.", {
+          generation,
+          elapsed_ms: Math.round((performance.now() - started) * 10) / 10,
+          requested: requests.length,
+          server: response.metadata,
+        });
+      })
+      .catch((error: Error) => {
+        if (duckDbGeoJsonGenerationRef.current === generation) {
+          setMapDataWarning(`Map data refresh failed: ${error.message}`);
+        }
+        console.warn("Could not load the DuckDB GeoJSON viewport batch.", error);
+      })
+      .finally(() => {
+        duckDbGeoJsonInFlightRef.current = false;
+        duckDbGeoJsonPendingKeyRef.current = "";
+        if (duckDbGeoJsonRefreshQueuedRef.current) {
+          duckDbGeoJsonRefreshQueuedRef.current = false;
+          duckDbGeoJsonRefreshTimeoutRef.current = window.setTimeout(() => {
+            duckDbGeoJsonRefreshTimeoutRef.current = null;
+            runDuckDbGeoJsonRefresh();
+          }, 0);
+        }
       });
+  }, []);
+
+  const scheduleDuckDbGeoJsonRefresh = useCallback(
+    (delay = 180) => {
+      if (duckDbGeoJsonRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(duckDbGeoJsonRefreshTimeoutRef.current);
+      }
+      duckDbGeoJsonRefreshTimeoutRef.current = window.setTimeout(() => {
+        duckDbGeoJsonRefreshTimeoutRef.current = null;
+        runDuckDbGeoJsonRefresh();
+      }, delay);
     },
-    [operationalLayers],
+    [runDuckDbGeoJsonRefresh],
   );
 
-  const refreshDuckDbGeoJsonSourcesOnMaps = useCallback(() => {
-    refreshDuckDbGeoJsonSources(mapRef.current);
-    refreshDuckDbGeoJsonSources(splitMapRef.current);
-  }, [refreshDuckDbGeoJsonSources]);
+  const refreshDuckDbGeoJsonSources = useCallback(
+    (_map: MapLibreMap | null) => scheduleDuckDbGeoJsonRefresh(),
+    [scheduleDuckDbGeoJsonRefresh],
+  );
+
+  const refreshDuckDbGeoJsonSourcesOnMaps = useCallback(
+    () => scheduleDuckDbGeoJsonRefresh(),
+    [scheduleDuckDbGeoJsonRefresh],
+  );
 
   const applyAttributeFiltersToMap = useCallback((map: MapLibreMap | null, filters = attributeFiltersRef.current) => {
     if (!map?.isStyleLoaded()) {
@@ -1186,7 +1290,9 @@ export default function App() {
 
   useEffect(() => {
     attributeFiltersRef.current = attributeFilters;
-    duckDbGeoJsonLastKeyRef.current = {};
+    duckDbGeoJsonGenerationRef.current += 1;
+    duckDbGeoJsonPendingKeyRef.current = "";
+    duckDbGeoJsonCoverageRef.current = {};
     applyAttributeFiltersToMaps(attributeFilters);
     refreshDuckDbGeoJsonSourcesOnMaps();
     updateRenderedFeatureMetric();
@@ -1517,6 +1623,14 @@ export default function App() {
     setSelectedFeature(selectedFeatureFromIdentifyFeature(feature));
     setSelectedFeatureGeometry(feature.geometry || null);
   }, [selectedFeatureOptions]);
+
+  const closeSelectedFeatureInspector = useCallback(() => {
+    setSelectedFeature(null);
+    setSelectedFeatureOptions([]);
+    setSelectedFeatureOptionIndex(0);
+    setSelectedFeatureGeometry(null);
+    setSelectedFeatureStreetViewPoint(null);
+  }, []);
 
   const clearSearchFlash = useCallback(() => {
     if (searchFlashIntervalRef.current !== null) {
@@ -2120,6 +2234,7 @@ export default function App() {
           return;
         }
         rewriteDuckDbGeoJsonInventoryLayers(style);
+        refineMapPresentation(style);
         ensureBuildingExtrusionStyleLayer(style, map3dEnabledRef.current);
         if (cancelled) {
           return;
@@ -2170,7 +2285,7 @@ export default function App() {
         container: mapNodeRef.current,
         style: activeStyle,
         attributionControl: false,
-        preserveDrawingBuffer: true,
+        preserveDrawingBuffer: false,
         renderWorldCopies: false,
       } as MapOptions);
       const map = new maplibregl.Map(mapOptions);
@@ -2213,10 +2328,6 @@ export default function App() {
         scheduleInventoryMetricsRefresh();
         scheduleRiskTopListRefresh();
         scheduleRiskHistogramRefresh();
-      });
-      map.on("idle", () => {
-        refreshLayerPanel();
-        updateRenderedFeatureMetric();
       });
       map.on("moveend", () => {
         enforceProtectedBounds();
@@ -2301,7 +2412,7 @@ export default function App() {
         container: splitMapNodeRef.current,
         style: activeStyle,
         attributionControl: false,
-        preserveDrawingBuffer: true,
+        preserveDrawingBuffer: false,
         renderWorldCopies: false,
       } as MapOptions);
       splitOptions.center = primaryMap.getCenter();
@@ -2439,6 +2550,10 @@ export default function App() {
       if (inventoryMetricsRefreshTimeoutRef.current !== null) {
         window.clearTimeout(inventoryMetricsRefreshTimeoutRef.current);
       }
+      if (duckDbGeoJsonRefreshTimeoutRef.current !== null) {
+        window.clearTimeout(duckDbGeoJsonRefreshTimeoutRef.current);
+      }
+      duckDbGeoJsonGenerationRef.current += 1;
       splitMapRef.current?.remove();
       splitMapRef.current = null;
       middleMouseRotateCleanupRef.current?.();
@@ -2472,13 +2587,34 @@ export default function App() {
     setMapPdfSelectionFrame(null);
     mapPdfSelectionDragRef.current = null;
     try {
-      await waitForMapRender(map);
-      const canvas = map.getCanvas();
-      if (!canvas.width || !canvas.height) {
-        throw new Error("The map canvas is not ready for export.");
+      const exportStyle = structuredClone(map.getStyle()) as MapStyle;
+      DUCKDB_GEOJSON_SOURCE_CONFIGS.forEach((config) => {
+        const cached = duckDbGeoJsonCoverageRef.current[config.sourceId];
+        const source = exportStyle.sources?.[config.sourceId];
+        if (cached && source?.type === "geojson") {
+          source.data = cached.data as unknown as typeof source.data;
+        }
+      });
+      const exportMap = await createExportMap(map, exportStyle, selection);
+      let image: MapPdfImage;
+      try {
+        const canvas = exportMap.getCanvas();
+        if (!canvas.width || !canvas.height) {
+          throw new Error("The map canvas is not ready for export.");
+        }
+        const exportSelection: MapPdfSelectionRect = {
+          ...selection,
+          left: 0,
+          top: 0,
+          overlayWidth: Math.max(1, selection.width),
+          overlayHeight: Math.max(1, selection.height),
+        };
+        image = await mapCanvasToJpegImage(canvas, exportSelection);
+      } finally {
+        const container = exportMap.getContainer();
+        exportMap.remove();
+        container.remove();
       }
-
-      const image = await mapCanvasToJpegImage(canvas, selection);
       const northArrowImage = await imageUrlToJpegImage(northArrowCompassUrl, 640);
       const scaleInfo = getMapPdfScaleInfo(map, selection);
       const generatedAt = new Date();
@@ -2771,7 +2907,11 @@ export default function App() {
   };
 
   const toggle3dMap = () => {
+    if (map3dTransitioning) {
+      return;
+    }
     const nextEnabled = !map3dEnabledRef.current;
+    setMap3dTransitioning(true);
     map3dEnabledRef.current = nextEnabled;
     setMap3dEnabled(nextEnabled);
     if (nextEnabled) {
@@ -2797,6 +2937,7 @@ export default function App() {
         }
       }, 320);
     }
+    window.setTimeout(() => setMap3dTransitioning(false), nextEnabled ? 650 : 300);
   };
 
   const changeMapViewMode = (mode: MapViewMode) => {
@@ -2821,8 +2962,8 @@ export default function App() {
 
   const filteredLayerRecords = useMemo(() => filterLayersByName(layerRecords, layerNameFilter), [layerNameFilter, layerRecords]);
   const layerTree = useMemo(() => buildLayerTree(filteredLayerRecords), [filteredLayerRecords]);
-  const selectedFeaturePanelOffset = panelOpen ? "right-[392px]" : "right-4";
-  const basemapPanelOffset = panelOpen ? "right-[392px]" : "right-4";
+  const selectedFeaturePanelOffset = panelOpen ? "right-[404px] max-[980px]:right-3" : "right-3";
+  const basemapPanelOffset = panelOpen ? "right-[404px]" : "right-3";
   const compareModeActive = mapViewMode !== "single";
   const effectiveLayerPanelTarget = compareModeActive ? layerPanelTarget : "primary";
   const effectiveBasemapPanelTarget = compareModeActive ? basemapPanelTarget : "primary";
@@ -2833,25 +2974,25 @@ export default function App() {
   const displayedBasemapEnabled = effectiveBasemapPanelTarget === "primary" ? basemapEnabled : comparisonBasemapEnabled;
   const displayedBasemapSelect = effectiveBasemapPanelTarget === "primary" ? selectBasemap : selectComparisonBasemap;
   const displayedBasemapVisibilityToggle = effectiveBasemapPanelTarget === "primary" ? setBasemapVisibility : setComparisonBasemapVisibility;
-  const pageTitle = "Storm Water Asset Risk Viewer";
+  const pageTitle = "Storm Water Asset Risk Map";
 
   return (
-    <div className={`map-tiles-page theme-${colorScheme} grid h-screen max-h-screen w-full grid-rows-[48px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)] text-[var(--app-text)]`}>
-      <header className="map-tiles-app-header relative z-30 grid h-12 min-w-0 grid-cols-[minmax(280px,1fr)_minmax(360px,660px)_minmax(160px,1fr)] items-center gap-3 bg-[var(--brand-bg)] px-2 text-[var(--brand-fg)] shadow-[0_3px_12px_rgba(0,0,0,.28)]">
-        <div className="flex min-w-0 items-center gap-2 justify-self-start">
-          <span className="grid h-10 w-[116px] shrink-0 place-items-center bg-white px-1.5 shadow-sm">
-            <img className="max-h-9 w-full object-contain" src={stormwaterLogoUrl} alt="Charlotte-Mecklenburg Storm Water Services" />
+    <div className={`map-tiles-page theme-${colorScheme} grid h-screen max-h-screen w-full grid-rows-[52px_minmax(0,1fr)] overflow-hidden bg-[var(--app-bg)] text-[var(--app-text)]`}>
+      <header className="map-tiles-app-header relative z-30 grid h-[52px] min-w-0 grid-cols-[minmax(250px,1fr)_minmax(320px,600px)_minmax(220px,1fr)] items-center gap-3 border-b border-white/15 bg-[var(--brand-bg)] px-3 text-[var(--brand-fg)] shadow-[0_2px_10px_rgba(0,0,0,.22)] max-[1050px]:grid-cols-[minmax(190px,1fr)_minmax(260px,1.4fr)_auto]">
+        <div className="flex min-w-0 items-center gap-2.5 justify-self-start">
+          <span className="grid h-9 w-[104px] shrink-0 place-items-center rounded-sm bg-white px-1.5 shadow-sm">
+            <img className="max-h-8 w-full object-contain" src={stormwaterLogoUrl} alt="Charlotte-Mecklenburg Storm Water Services" />
           </span>
           <div className="min-w-0">
-            <strong className="block truncate text-[18px] font-semibold leading-tight">{pageTitle}</strong>
+            <strong className="block truncate text-[16px] font-semibold leading-tight tracking-[-.01em] max-[900px]:hidden">{pageTitle}</strong>
           </div>
         </div>
-        <div className="relative z-40 w-full max-w-[660px] min-w-0 justify-self-center">
+        <div className="relative z-40 w-full max-w-[600px] min-w-0 justify-self-center">
           <div className="relative min-w-0">
-            <label className="map-tiles-header-search relative block h-8 text-[var(--accent)]">
+            <label className="map-tiles-header-search relative block h-9 text-[var(--accent)]">
               <Search className="pointer-events-none absolute left-2.5 top-1/2 z-[1] h-4 w-4 -translate-y-1/2" />
               <input
-                className="map-tiles-header-search-input absolute inset-0 h-full w-full border border-[var(--control-border)] bg-[var(--search-bg)] py-0 pl-9 pr-2 text-[13px] font-medium text-[var(--panel-text)] outline-none placeholder:text-[var(--panel-muted)] focus:border-[var(--accent)]"
+                className="map-tiles-header-search-input absolute inset-0 h-full w-full rounded-sm border border-white/30 bg-[var(--search-bg)] py-0 pl-9 pr-2 text-[13px] font-medium text-[var(--panel-text)] shadow-[0_1px_4px_rgba(0,0,0,.12)] outline-none placeholder:text-[var(--panel-muted)] focus:border-white focus:ring-2 focus:ring-white/20"
                 value={assetSearch}
                 onBlur={() => window.setTimeout(() => setAssetSearchOpen(false), 140)}
                 onChange={(event) => {
@@ -2881,7 +3022,7 @@ export default function App() {
             ) : null}
           </div>
         </div>
-        <div className="map-tiles-header-actions flex shrink-0 items-center gap-1 justify-self-end">
+        <div className="map-tiles-header-actions flex shrink-0 items-center gap-1 rounded-sm bg-black/10 p-0.5 justify-self-end">
           <HeaderIconButton
             active={inventoryWidgetOpen}
             icon={<BarChart3 />}
@@ -3005,7 +3146,7 @@ export default function App() {
           ) : null}
         </div>
 
-        <div className="absolute left-3 top-4 z-20 grid justify-items-center gap-2">
+        <div className="map-tiles-tool-rail absolute left-3 top-3 z-20 grid w-12 justify-items-center gap-1 rounded-md border border-[var(--control-border)] bg-[color-mix(in_srgb,var(--control-bg)_94%,transparent)] p-1 shadow-[0_10px_28px_rgba(0,0,0,.22)] backdrop-blur-md">
           <NorthArrowControl
             bearing={mapBearing}
             dragging={northArrowDragging}
@@ -3022,6 +3163,7 @@ export default function App() {
             mapPdfExportActive={mapPdfExportSelecting}
             mapPdfExporting={mapPdfExporting}
             map3dActive={map3dEnabled}
+            map3dTransitioning={map3dTransitioning}
             mapViewMenuOpen={mapViewMenuOpen}
             mode={mapViewMode}
             selectedDrawId={selectedDrawId}
@@ -3034,7 +3176,7 @@ export default function App() {
             onMapViewMenuToggle={() => setMapViewMenuOpen((open) => !open)}
             onModeChange={changeMapViewMode}
           />
-          <div className="grid overflow-visible border border-[var(--control-border)] bg-[var(--control-bg)] shadow-[0_8px_24px_rgba(0,0,0,.18)]">
+          <div className="map-tiles-navigation-strip grid w-10 overflow-visible border-t border-[var(--control-border)] pt-1">
             <MapControlButton label="Zoom in" onClick={() => mapRef.current?.zoomIn({ duration: 180 })}>
               +
             </MapControlButton>
@@ -3047,17 +3189,34 @@ export default function App() {
           </div>
         </div>
 
+        {map3dTransitioning ? (
+          <div className="pointer-events-none absolute left-1/2 top-4 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-[var(--panel-border)] bg-[color-mix(in_srgb,var(--panel-bg)_94%,transparent)] px-3 py-2 text-[12px] font-semibold text-[var(--panel-text)] shadow-[0_10px_28px_rgba(0,0,0,.2)] backdrop-blur-md" role="status" aria-live="polite">
+            <LoaderCircle className="h-4 w-4 animate-spin text-[var(--accent)]" />
+            {map3dEnabled ? "Preparing 3D view" : "Returning to 2D"}
+          </div>
+        ) : null}
+
+        {mapDataWarning ? (
+          <div className="absolute left-20 top-3 z-30 flex max-w-[min(760px,calc(100vw-500px))] items-start gap-2 rounded-sm border border-amber-400/70 bg-amber-50/95 px-3 py-2 text-[11px] font-semibold text-amber-950 shadow-[0_8px_24px_rgba(0,0,0,.18)] backdrop-blur-sm" role="status">
+            <span className="min-w-0 flex-1">{mapDataWarning}</span>
+            <button className="grid h-5 w-5 shrink-0 place-items-center hover:bg-amber-200/70" type="button" onClick={() => setMapDataWarning("")} title="Dismiss map data message">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        ) : null}
+
         <aside
-          className={`map-tiles-layer-panel absolute bottom-4 right-4 top-4 z-20 grid w-[360px] max-w-[calc(100vw-80px)] grid-rows-[42px_minmax(0,1fr)] overflow-hidden border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_16px_40px_rgba(0,0,0,.28)] transition-transform duration-200 ${
+          className={`map-tiles-layer-panel absolute bottom-3 right-3 top-3 z-20 grid w-[380px] max-w-[calc(100vw-72px)] grid-rows-[48px_minmax(0,1fr)] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_48px_rgba(0,0,0,.26)] transition-transform duration-200 ${
             panelOpen ? "translate-x-0" : "translate-x-[calc(100%+24px)]"
           }`}
         >
-          <header className="flex items-center justify-between gap-2 bg-[var(--brand-bg)] px-3 text-[var(--brand-fg)]">
-            <strong className="truncate text-[13px] font-semibold">
-              {compareModeActive ? `${effectiveLayerPanelTarget === "primary" ? "Primary" : "Compare"} Layers` : "Map Layers"}
-            </strong>
+          <header className="flex items-center justify-between gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-3 text-[var(--panel-text)]">
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-sm bg-[var(--panel-active-bg)] text-[var(--accent)]"><Layers className="h-4 w-4" /></span>
+              <div className="min-w-0"><strong className="block truncate text-[13px] font-semibold">{compareModeActive ? `${effectiveLayerPanelTarget === "primary" ? "Primary" : "Compare"} Layers` : "Map Layers"}</strong><span className="block text-[10px] text-[var(--panel-muted)]">Visibility and filters</span></div>
+            </div>
             <button
-              className="grid h-8 w-8 place-items-center hover:bg-white/12"
+              className="grid h-8 w-8 place-items-center rounded-sm text-[var(--panel-muted)] hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
               type="button"
               onClick={() => setPanelOpen(false)}
               title="Close panel"
@@ -3114,7 +3273,7 @@ export default function App() {
 
         {basemapPanelOpen ? (
           <aside
-            className={`map-tiles-basemap-panel absolute bottom-4 top-4 z-30 grid w-[360px] max-w-[calc(100vw-80px)] grid-rows-[42px_minmax(0,1fr)] overflow-hidden border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_16px_40px_rgba(0,0,0,.28)] ${basemapPanelOffset}`}
+            className={`map-tiles-basemap-panel absolute bottom-3 top-3 z-30 grid w-[380px] max-w-[calc(100vw-72px)] grid-rows-[48px_minmax(0,1fr)] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_48px_rgba(0,0,0,.26)] ${basemapPanelOffset}`}
           >
             <header className="flex items-center justify-between gap-2 bg-[var(--brand-bg)] px-3 text-[var(--brand-fg)]">
               <strong className="truncate text-[13px] font-semibold">
@@ -3180,20 +3339,9 @@ export default function App() {
           />
         ) : null}
 
-        {!panelOpen ? (
-          <button
-            className="absolute right-0 top-1/2 z-20 flex h-28 w-8 -translate-y-1/2 items-center justify-center gap-1 border border-r-0 border-[var(--control-border)] bg-[var(--control-bg)] text-[var(--accent)] shadow-[0_8px_24px_rgba(0,0,0,.2)] hover:border-[var(--accent)]"
-            type="button"
-            onClick={() => setPanelOpen(true)}
-            title="Open map layers"
-            aria-label="Open map layers"
-          >
-            <span className="flex items-center gap-1 text-[10px] font-semibold uppercase tracking-[.08em]" style={{ writingMode: "vertical-rl" }}>
-              <Layers className="h-3.5 w-3.5" />
-              Layers
-            </span>
-          </button>
-        ) : null}
+        <div className="pointer-events-none absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 items-center gap-2 rounded-full border border-[var(--control-border)] bg-[color-mix(in_srgb,var(--control-bg)_90%,transparent)] px-3 py-1.5 text-[10px] font-semibold text-[var(--control-text)] shadow-[0_8px_22px_rgba(0,0,0,.16)] backdrop-blur-md">
+          <span>{map3dEnabled ? "3D" : "2D"}</span><span className="h-3 w-px bg-[var(--control-border)]" /><span>Zoom {currentZoom.toFixed(1)}</span>
+        </div>
 
         {inventoryWidgetOpen ? (
           <InventoryMetricsWidget
@@ -3248,48 +3396,96 @@ export default function App() {
         ) : null}
 
         {selectedFeature ? (
-          <aside className={`absolute bottom-4 z-20 grid max-h-[42vh] w-[330px] max-w-[calc(100vw-32px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_18px_45px_rgba(0,0,0,.34)] backdrop-blur-xl transition-[right] duration-200 ${selectedFeaturePanelOffset}`}>
-            <PanelHeading eyebrow="Selected" title="Feature Details" />
-            <div className="min-h-0 overflow-auto p-4">
-              {selectedFeatureOptions.length > 1 ? (
-                <label className="mb-3 grid gap-1.5">
-                  <span className="text-[10px] font-semibold uppercase tracking-[.14em] text-[var(--accent)]">
-                    Selected Feature
-                  </span>
+          <aside
+            className={`absolute bottom-3 top-3 z-30 grid w-[390px] max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_18px_48px_rgba(0,0,0,.3)] backdrop-blur-xl transition-[right] duration-200 ${selectedFeatureOptions.length > 1 ? "grid-rows-[52px_auto_auto_minmax(0,1fr)]" : "grid-rows-[52px_auto_minmax(0,1fr)]"} ${selectedFeaturePanelOffset}`}
+            aria-label="Feature details"
+          >
+            <header className="flex items-center justify-between gap-3 border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-4">
+              <div className="min-w-0">
+                <strong className="block truncate text-[14px] font-semibold text-[var(--panel-text)]">Feature details</strong>
+                <span className="block text-[10px] text-[var(--panel-muted)]">Map selection</span>
+              </div>
+              <button
+                type="button"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-sm text-[var(--panel-muted)] transition hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
+                onClick={closeSelectedFeatureInspector}
+                title="Close feature details"
+                aria-label="Close feature details"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </header>
+
+            {selectedFeatureOptions.length > 1 ? (
+              <div className="grid gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-bg)] px-4 py-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-[10px] font-semibold uppercase tracking-[.1em] text-[var(--panel-muted)]">Overlapping features</span>
+                  <strong className="text-[11px] font-semibold text-[var(--panel-text)]">
+                    {selectedFeatureOptionIndex + 1} of {selectedFeatureOptions.length}
+                  </strong>
+                </div>
+                <div className="grid grid-cols-[34px_minmax(0,1fr)_34px] gap-1.5">
+                  <button
+                    type="button"
+                    className="grid h-9 place-items-center rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={selectedFeatureOptionIndex <= 0}
+                    onClick={() => selectFeatureOption(selectedFeatureOptionIndex - 1)}
+                    title="Previous feature"
+                    aria-label="Previous feature"
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                  </button>
                   <select
-                    className="h-8 min-w-0 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2 text-[11px] font-semibold text-[var(--panel-text)] outline-none focus:border-[var(--accent)]"
+                    className="h-9 min-w-0 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2 text-[11px] font-semibold text-[var(--panel-text)] outline-none focus:border-[var(--accent)]"
                     value={selectedFeatureOptionIndex}
                     onChange={(event) => selectFeatureOption(Number(event.target.value))}
-                    aria-label="Selected feature"
+                    aria-label="Jump to an overlapping feature"
                   >
                     {selectedFeatureOptions.map((feature, index) => (
                       <option key={feature.uniqueKey} value={index}>
-                        {index + 1}. {feature.layerLabel} - {feature.featureLabel}
+                        {feature.layerLabel} - {feature.featureLabel}
                       </option>
                     ))}
                   </select>
-                </label>
-              ) : null}
-              <div className="mb-3 flex flex-wrap justify-end gap-2">
+                  <button
+                    type="button"
+                    className="grid h-9 place-items-center rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:opacity-40"
+                    disabled={selectedFeatureOptionIndex >= selectedFeatureOptions.length - 1}
+                    onClick={() => selectFeatureOption(selectedFeatureOptionIndex + 1)}
+                    title="Next feature"
+                    aria-label="Next feature"
+                  >
+                    <ChevronRight className="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            <div className="grid gap-3 border-b border-[var(--panel-border)] px-4 py-3.5">
+              <FeatureSummary feature={selectedFeature} />
+              <div className="grid grid-cols-2 gap-2">
                 <button
                   type="button"
-                  className="inline-flex h-7 items-center gap-1.5 border border-[var(--accent)] bg-[var(--panel-active-bg)] px-2.5 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--accent)] transition hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-transparent disabled:text-[var(--panel-disabled)]"
+                  className="inline-flex h-9 items-center justify-center gap-2 rounded-sm border border-[var(--accent)] bg-[var(--accent)] px-3 text-[11px] font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-[var(--panel-toolbar-bg)] disabled:text-[var(--panel-disabled)]"
                   onClick={flashSelectedFeature}
                   disabled={!selectedFeatureGeometry}
                 >
-                  <Activity className="h-3.5 w-3.5" />
+                  <Activity className="h-4 w-4" />
                   Flash feature
                 </button>
                 <button
                   type="button"
-                  className="inline-flex h-7 items-center gap-1.5 border border-[var(--accent)] bg-[var(--panel-active-bg)] px-2.5 text-[10px] font-semibold uppercase tracking-[.08em] text-[var(--accent)] transition hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-transparent disabled:text-[var(--panel-disabled)]"
+                  className="inline-flex h-9 items-center justify-center gap-2 rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-3 text-[11px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
                   onClick={openSelectedFeatureStreetView}
                   disabled={!selectedFeatureStreetViewUrl}
                 >
-                  <ExternalLink className="h-3.5 w-3.5" />
+                  <ExternalLink className="h-4 w-4" />
                   Street View
                 </button>
               </div>
+            </div>
+
+            <div className="min-h-0 overflow-auto px-4 py-3.5">
               <FeatureDetails feature={selectedFeature} />
             </div>
           </aside>
@@ -3985,8 +4181,8 @@ function HeaderIconButton({
 }) {
   return (
     <button
-      className={`grid h-8 w-8 place-items-center transition-colors disabled:cursor-wait disabled:opacity-70 ${
-        active ? "bg-white/20 text-white" : "text-white/80 hover:bg-white/12 hover:text-white"
+      className={`grid h-9 w-9 place-items-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-70 ${
+        active ? "bg-white text-[var(--brand-bg)] shadow-sm" : "text-white/85 hover:bg-white/15 hover:text-white"
       }`}
       type="button"
       title={label}
@@ -4180,7 +4376,7 @@ function MapControlButton({
 }) {
   return (
     <button
-      className="group relative grid h-9 w-9 place-items-center border-b border-[var(--control-border)] text-base font-semibold text-[var(--control-text)] last:border-b-0 hover:bg-[var(--row-hover)]"
+      className="group relative grid h-10 w-10 place-items-center rounded-sm text-base font-semibold text-[var(--control-text)] hover:bg-[var(--row-hover)]"
       type="button"
       onClick={onClick}
       title={label}
@@ -4204,6 +4400,7 @@ function MapToolStrip({
   mapPdfExportActive,
   mapPdfExporting,
   map3dActive,
+  map3dTransitioning,
   mapViewMenuOpen,
   mode,
   selectedDrawId,
@@ -4222,6 +4419,7 @@ function MapToolStrip({
   mapPdfExportActive: boolean;
   mapPdfExporting: boolean;
   map3dActive: boolean;
+  map3dTransitioning: boolean;
   mapViewMenuOpen: boolean;
   mode: MapViewMode;
   selectedDrawId: string | null;
@@ -4241,12 +4439,12 @@ function MapToolStrip({
   ];
 
   return (
-    <div className="relative z-20 h-[144px] w-9">
-      <div className="grid border border-[var(--control-border)] bg-[var(--control-bg)] shadow-[0_8px_24px_rgba(0,0,0,.18)]">
+    <div className="relative z-20 w-10 border-t border-[var(--control-border)] pt-1">
+      <div className="grid gap-0.5">
         <MapToolButton active={mapViewMenuOpen} label="Select map view mode" onClick={onMapViewMenuToggle}>
           <KeplerSplitIcon className="h-[18px] w-[18px]" />
         </MapToolButton>
-        <MapToolButton active={map3dActive} label={map3dActive ? "Switch to 2D" : "Switch to 3D"} onClick={onMap3dToggle}>
+        <MapToolButton active={map3dActive} disabled={map3dTransitioning} label={map3dActive ? "Switch to 2D" : "Switch to 3D"} onClick={onMap3dToggle}>
           <span className="text-[11px] font-bold leading-none">{map3dActive ? "2D" : "3D"}</span>
         </MapToolButton>
         <MapToolButton active={drawActive} label="Draw on map" onClick={onDrawToggle}>
@@ -4313,7 +4511,7 @@ function MapToolButton({
 }) {
   return (
     <button
-      className={`group relative grid h-9 w-9 place-items-center border-b border-[var(--control-border)] text-[var(--control-text)] transition-colors last:border-b-0 hover:bg-[var(--row-hover)] disabled:cursor-wait disabled:opacity-70 ${
+      className={`group relative grid h-10 w-10 place-items-center rounded-sm text-[var(--control-text)] transition-colors hover:bg-[var(--row-hover)] disabled:cursor-wait disabled:opacity-70 ${
         active ? "bg-[var(--panel-active-bg)] text-[var(--accent)]" : ""
       }`}
       type="button"
@@ -5251,15 +5449,6 @@ function treeCellIndentStyle(depth: number): React.CSSProperties {
   };
 }
 
-function PanelHeading({ eyebrow, title }: { eyebrow: string; title: string }) {
-  return (
-    <header className="flex items-center justify-between gap-3 border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-4 py-3 text-[10px] font-semibold uppercase tracking-[.16em] text-[var(--accent)]">
-      <span>{eyebrow}</span>
-      <strong className="text-[13px] font-semibold normal-case tracking-normal text-[var(--panel-text)]">{title}</strong>
-    </header>
-  );
-}
-
 function NorthArrowControl({
   bearing,
   dragging,
@@ -5285,8 +5474,8 @@ function NorthArrowControl({
   return (
     <div className="pointer-events-none">
       <button
-        className={`group relative pointer-events-auto grid h-[64px] w-[48px] cursor-grab select-none grid-rows-[1fr_12px] place-items-center border bg-[var(--control-bg)] text-[var(--accent)] shadow-xl backdrop-blur-sm transition-colors active:cursor-grabbing ${
-          dragging ? "border-[var(--accent)] ring-2 ring-[var(--accent)]" : "border-[var(--control-border)] hover:border-[var(--accent)]"
+        className={`group relative pointer-events-auto grid h-[58px] w-10 cursor-grab select-none grid-rows-[1fr_12px] place-items-center rounded-sm bg-transparent text-[var(--accent)] transition-colors active:cursor-grabbing ${
+          dragging ? "bg-[var(--panel-active-bg)] ring-2 ring-[var(--accent)]" : "hover:bg-[var(--row-hover)]"
         }`}
         type="button"
         onPointerDown={onPointerDown}
@@ -5298,7 +5487,7 @@ function NorthArrowControl({
         style={{ touchAction: "none" }}
       >
         <img
-          className="h-11 w-11 origin-center select-none"
+          className="h-9 w-9 origin-center select-none"
           src={northArrowCompassUrl}
           alt=""
           aria-hidden="true"
@@ -5320,27 +5509,92 @@ function NorthArrowControl({
   );
 }
 
+function FeatureSummary({ feature }: { feature: SelectedFeature }) {
+  const [copied, setCopied] = useState(false);
+  const featureId = feature.properties.find(([key]) => key.toLowerCase() === "feature_id")?.[1] || "";
+
+  const copyFeatureId = async () => {
+    if (!featureId) {
+      return;
+    }
+    try {
+      await copyTextToClipboard(featureId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not copy the feature ID.");
+    }
+  };
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex min-w-0 items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="m-0 break-words text-[16px] font-semibold leading-tight text-[var(--panel-text)]">{feature.layerLabel}</h2>
+          <span className="mt-1 block text-[10px] font-medium text-[var(--panel-muted)]">Selected map layer</span>
+        </div>
+        <span className="shrink-0 rounded-full border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-2.5 py-1 text-[9px] font-semibold uppercase tracking-[.08em] text-[var(--accent)]">
+          {feature.layerType}
+        </span>
+      </div>
+      {featureId ? (
+        <div className="flex items-center justify-between gap-3 rounded-sm border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-3 py-2.5">
+          <div className="min-w-0">
+            <span className="block text-[9px] font-semibold uppercase tracking-[.1em] text-[var(--panel-muted)]">Feature ID</span>
+            <strong className="mt-0.5 block truncate font-mono text-[13px] font-semibold text-[var(--panel-text)]" title={featureId}>{featureId}</strong>
+          </div>
+          <button
+            type="button"
+            className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-sm px-2.5 text-[10px] font-semibold text-[var(--accent)] transition hover:bg-[var(--row-hover)]"
+            onClick={() => void copyFeatureId()}
+            title="Copy feature ID"
+          >
+            {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+            {copied ? "Copied" : "Copy"}
+          </button>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function FeatureDetails({ feature }: { feature: SelectedFeature }) {
+  const attributes = feature.properties.filter(([key]) => key.toLowerCase() !== "feature_id");
   return (
     <div className="grid gap-2.5">
-      <div className="grid gap-1 border-b border-[var(--panel-border)] pb-2.5">
-        <span className="text-sm font-semibold leading-snug text-[var(--panel-text)]">{feature.layerLabel}</span>
-        <strong className="text-[10px] font-semibold uppercase text-[var(--accent)]">{feature.layerType}</strong>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="m-0 text-[12px] font-semibold text-[var(--panel-text)]">Attributes</h3>
+        <span className="text-[10px] font-medium text-[var(--panel-muted)]">{attributes.length}</span>
       </div>
-      {feature.properties.length ? (
-        <dl className="grid grid-cols-[minmax(82px,42%)_minmax(0,1fr)] gap-x-2.5 gap-y-1.5">
-          {feature.properties.map(([key, value]) => (
-            <div key={`${key}:${value}`} className="contents">
-              <dt className="min-w-0 [overflow-wrap:anywhere] text-[10px] font-semibold text-[var(--panel-muted)]">{key}</dt>
-              <dd className="m-0 min-w-0 break-words text-[11px] font-medium text-[var(--panel-text)]">{value}</dd>
+      {attributes.length ? (
+        <dl className="m-0 grid border-t border-[var(--panel-border)]">
+          {attributes.map(([key, value]) => (
+            <div key={`${key}:${value}`} className="grid grid-cols-[minmax(104px,40%)_minmax(0,1fr)] gap-3 border-b border-[var(--panel-border)] py-2.5 last:border-b-0">
+              <dt className="min-w-0 [overflow-wrap:anywhere] text-[10px] font-medium text-[var(--panel-muted)]" title={key}>{key}</dt>
+              <dd className="m-0 min-w-0 select-text break-words text-[11px] font-medium leading-relaxed text-[var(--panel-text)]">{value}</dd>
             </div>
           ))}
         </dl>
       ) : (
-        <p className="m-0 text-[11px] font-semibold text-[var(--panel-muted)]">No properties</p>
+        <p className="m-0 rounded-sm border border-dashed border-[var(--panel-border)] px-3 py-5 text-center text-[11px] font-medium text-[var(--panel-muted)]">No additional attributes</p>
       )}
     </div>
   );
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.left = "-9999px";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  textarea.remove();
 }
 
 function selectedFeatureFromMapFeature(feature: MapGeoJSONFeature, layer: StyleLayer | undefined, propertyLimit?: number): SelectedFeature {
@@ -5390,7 +5644,7 @@ function selectedFeatureFromIdentifyFeature(feature: IdentifyFeature): SelectedF
 function selectedFeatureFromSearchResult(result: AssetSearchResult): SelectedFeature {
   const properties = Object.entries(result.properties || {})
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .map(([key, value]) => [key, formatPropertyValue(value)] as [string, string]);
+    .map(([key, value]) => [displayFeaturePropertyName(key), formatPropertyValue(value)] as [string, string]);
   const matchEntry: [string, string] = ["Matched", `${result.match_field}: ${result.match_value}`];
   return {
     layerLabel: result.layer_name,
@@ -5402,7 +5656,7 @@ function selectedFeatureFromSearchResult(result: AssetSearchResult): SelectedFea
 function selectedFeatureFromRiskTopListItem(item: RiskTopListItem): SelectedFeature {
   const properties = Object.entries(item.properties || {})
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .map(([key, value]) => [key, formatPropertyValue(value)] as [string, string]);
+    .map(([key, value]) => [displayFeaturePropertyName(key), formatPropertyValue(value)] as [string, string]);
   const riskEntry: [string, string] = [item.risk_field, formatRiskScore(item.risk_score)];
   return {
     layerLabel: item.layer_label,
@@ -5414,8 +5668,12 @@ function selectedFeatureFromRiskTopListItem(item: RiskTopListItem): SelectedFeat
 function readableFeatureProperties(feature: MapGeoJSONFeature, propertyLimit?: number): Array<[string, string]> {
   const entries = Object.entries(feature.properties || {})
     .filter(([, value]) => value !== null && value !== undefined && value !== "")
-    .map(([key, value]) => [key, formatPropertyValue(value)] as [string, string]);
+    .map(([key, value]) => [displayFeaturePropertyName(key), formatPropertyValue(value)] as [string, string]);
   return Number.isFinite(propertyLimit) ? entries.slice(0, propertyLimit) : entries;
+}
+
+function displayFeaturePropertyName(key: string): string {
+  return key.toLowerCase() === "__portal_feature_id" ? "feature_id" : key;
 }
 
 function formatPropertyValue(value: unknown): string {
@@ -5445,11 +5703,13 @@ function featureDisplayLabel(properties: MapGeoJSONFeature["properties"], origin
   for (const pattern of priorityPatterns) {
     const match = entries.find(([key]) => pattern.test(key));
     if (match) {
-      return `${match[0]}: ${formatPropertyValue(match[1])}`;
+      return `${displayFeaturePropertyName(match[0])}: ${formatPropertyValue(match[1])}`;
     }
   }
   const first = entries[0];
-  return first ? `${first[0]}: ${formatPropertyValue(first[1])}` : `Feature ${originalIndex + 1}`;
+  return first
+    ? `${displayFeaturePropertyName(first[0])}: ${formatPropertyValue(first[1])}`
+    : `Feature ${originalIndex + 1}`;
 }
 
 function dedupeIdentifyFeatures(features: IdentifyFeature[]): IdentifyFeature[] {
@@ -6580,6 +6840,47 @@ function rewriteDuckDbGeoJsonInventoryLayers(style: MapStyle): void {
   }
 }
 
+function refineMapPresentation(style: MapStyle): void {
+  (style.layers as StyleLayer[]).forEach((layer) => {
+    const sourceLayer = String(layer["source-layer"] || layer.metadata?.tile_source_layer || "").toLowerCase();
+
+    // Preserve the original thematic colors but keep broad polygon overlays
+    // transparent enough for aerial imagery and asset geometry to remain useful.
+    if (layer.type === "fill" && sourceLayer === "communityfloodplain_py") {
+      layer.paint = {
+        ...(layer.paint || {}),
+        "fill-color": "#18a999",
+        "fill-opacity": 0.3,
+        "fill-outline-color": "#087f72",
+      };
+    }
+    if (layer.type === "fill" && sourceLayer === "femafloodplain_py") {
+      layer.paint = {
+        ...(layer.paint || {}),
+        "fill-color": "#2f80c9",
+        "fill-opacity": 0.26,
+        "fill-outline-color": "#155d96",
+      };
+    }
+
+    // Dense multi-line infrastructure labels are valuable only at parcel
+    // scale. Collision-aware placement keeps the map legible in 2D and 3D.
+    if (layer.type === "symbol" && ["stormpipes_ln", "stormstructure_pt", "stormdrainage_ln"].includes(sourceLayer)) {
+      (layer as StyleLayer & { minzoom?: number }).minzoom = Math.max(
+        Number((layer as StyleLayer & { minzoom?: number }).minzoom) || 0,
+        17.5,
+      );
+      layer.layout = {
+        ...(layer.layout || {}),
+        "text-allow-overlap": false,
+        "text-ignore-placement": false,
+        "text-optional": true,
+        "text-padding": Math.max(Number(layer.layout?.["text-padding"]) || 0, 4),
+      };
+    }
+  });
+}
+
 function normalizeInitialVisibility(style: MapStyle, basemapVisible: boolean, labelsVisible: boolean): void {
   style.layers.forEach((layer) => {
     const typedLayer = layer as StyleLayer;
@@ -6662,6 +6963,47 @@ function mapBoundsIntersectProtectedBounds(map: MapLibreMap, protectedBounds: Bo
     bounds.getNorth() >= protectedBounds[1] &&
     bounds.getSouth() <= protectedBounds[3]
   );
+}
+
+function mapBounds(map: MapLibreMap): Bounds {
+  const bounds = map.getBounds();
+  return [
+    clampLng(bounds.getWest()),
+    clampLat(bounds.getSouth()),
+    clampLng(bounds.getEast()),
+    clampLat(bounds.getNorth()),
+  ];
+}
+
+function boundsContain(outer: Bounds, inner: Bounds): boolean {
+  return outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3];
+}
+
+function shallowBooleanRecordEqual(left: Record<string, boolean>, right: Record<string, boolean>): boolean {
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => left[key] === right[key]);
+}
+
+function mapHasVisibleDuckDbSource(map: MapLibreMap, sourceId: string): boolean {
+  const zoom = map.getZoom();
+  return ((map.getStyle().layers || []) as StyleLayer[]).some((layer) => {
+    if (layer.metadata?.duckdb_geojson_source !== sourceId || !map.getLayer(layer.id)) {
+      return false;
+    }
+    return map.getLayoutProperty(layer.id, "visibility") !== "none" && layerVisibleAtZoom(layer, zoom);
+  });
+}
+
+function setDuckDbGeoJsonDataOnMaps(
+  maps: MapLibreMap[],
+  sourceId: string,
+  featureCollection: DuckDbGeoJsonFeatureCollection,
+): void {
+  maps.forEach((map) => {
+    const source = map.getSource(sourceId) as GeoJSONSource | undefined;
+    source?.setData(featureCollection as unknown as Parameters<GeoJSONSource["setData"]>[0]);
+  });
 }
 
 function bufferedMapBounds(map: MapLibreMap): Bounds {
@@ -6883,6 +7225,63 @@ type MapPdfImage = {
   width: number;
   height: number;
 };
+
+async function createExportMap(
+  sourceMap: MapLibreMap,
+  style: MapStyle,
+  selection: MapPdfSelectionRect,
+): Promise<MapLibreMap> {
+  const container = document.createElement("div");
+  container.style.position = "fixed";
+  container.style.left = "-100000px";
+  container.style.top = "0";
+  container.style.width = `${Math.max(1, Math.round(selection.width))}px`;
+  container.style.height = `${Math.max(1, Math.round(selection.height))}px`;
+  container.style.pointerEvents = "none";
+  document.body.appendChild(container);
+  const center = sourceMap.unproject([
+    selection.left + selection.width / 2,
+    selection.top + selection.height / 2,
+  ]);
+  const exportMap = new maplibregl.Map({
+    container,
+    style,
+    center,
+    zoom: sourceMap.getZoom(),
+    bearing: sourceMap.getBearing(),
+    pitch: sourceMap.getPitch(),
+    attributionControl: false,
+    preserveDrawingBuffer: true,
+    renderWorldCopies: false,
+    fadeDuration: 0,
+    canvasContextAttributes: {
+      antialias: false,
+      desynchronized: true,
+      failIfMajorPerformanceCaveat: false,
+      powerPreference: "high-performance",
+      preserveDrawingBuffer: true,
+    },
+  } as MapOptions);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timeout = window.setTimeout(() => reject(new Error("The export map did not finish loading.")), 12_000);
+      exportMap.once("load", () => {
+        window.clearTimeout(timeout);
+        resolve();
+      });
+      exportMap.once("error", (event) => {
+        window.clearTimeout(timeout);
+        reject(new Error(event.error?.message || "The export map could not load."));
+      });
+    });
+    await waitForMapRender(exportMap);
+    return exportMap;
+  } catch (error) {
+    exportMap.remove();
+    container.remove();
+    throw error;
+  }
+}
 
 function waitForMapRender(map: MapLibreMap): Promise<void> {
   return new Promise((resolve) => {

@@ -141,6 +141,18 @@ export type DuckDbGeoJsonFeatureCollection = {
   metadata?: Record<string, unknown>;
 };
 
+export type DuckDbGeoJsonBatchRequest = {
+  dataset_id: string;
+  limit: number;
+  filters?: AttributeFilterPayload;
+};
+
+export type DuckDbGeoJsonBatchResponse = {
+  results: Record<string, DuckDbGeoJsonFeatureCollection>;
+  errors: Record<string, string>;
+  metadata?: Record<string, unknown>;
+};
+
 export type AttributeFilterOperator =
   | "eq"
   | "ne"

@@ -192,6 +192,9 @@ class PmtilesBuilderTests(unittest.TestCase):
             self.assertEqual(tippecanoe_manifest["layers"][0]["properties"], ["label"])
             self.assertEqual(tippecanoe_manifest["layers"][1]["properties"], ["category"])
             self.assertEqual(tippecanoe_manifest["layers"][2]["properties"], [])
+            self.assertTrue(
+                all(item["featureIdField"] == "__portal_feature_id" for item in tippecanoe_manifest["layers"])
+            )
             tippecanoe_header = read_header(tippecanoe_output)
             self.assertEqual(tippecanoe_header["min_zoom"], 7)
             self.assertEqual(tippecanoe_header["max_zoom"], 8)
@@ -202,9 +205,9 @@ class PmtilesBuilderTests(unittest.TestCase):
                 item["id"]: set(item.get("fields", {}))
                 for item in tippecanoe_metadata["vector_layers"]
             }
-            self.assertEqual(tippecanoe_fields["test-points"], {"label"})
-            self.assertEqual(tippecanoe_fields["test-lines"], {"category"})
-            self.assertEqual(tippecanoe_fields["test-geometry-only"], set())
+            self.assertEqual(tippecanoe_fields["test-points"], {"label", "__portal_feature_id"})
+            self.assertEqual(tippecanoe_fields["test-lines"], {"category", "__portal_feature_id"})
+            self.assertEqual(tippecanoe_fields["test-geometry-only"], {"__portal_feature_id"})
             progress = json.loads((temporary / "progress.json").read_text(encoding="utf-8"))
             self.assertEqual(progress["status"], "succeeded")
             self.assertEqual(progress["engine"], "tippecanoe")
@@ -233,9 +236,9 @@ class PmtilesBuilderTests(unittest.TestCase):
                 item["id"]: set(item.get("fields", {}))
                 for item in gdal_metadata["vector_layers"]
             }
-            self.assertEqual(fields_by_layer["test-points"], {"label"})
-            self.assertEqual(fields_by_layer["test-lines"], {"category"})
-            self.assertEqual(fields_by_layer["test-geometry-only"], set())
+            self.assertEqual(fields_by_layer["test-points"], {"label", "__portal_feature_id"})
+            self.assertEqual(fields_by_layer["test-lines"], {"category", "__portal_feature_id"})
+            self.assertEqual(fields_by_layer["test-geometry-only"], {"__portal_feature_id"})
             progress = json.loads((temporary / "progress.json").read_text(encoding="utf-8"))
             self.assertEqual(progress["status"], "succeeded")
             self.assertEqual(progress["engine"], "gdal")
@@ -292,10 +295,19 @@ class PmtilesBuilderTests(unittest.TestCase):
             ):
                 builder.load_tilesets(config_path)
 
-    def test_portal_tileset_and_resource_registry_share_the_68_layer_allowlist(self) -> None:
+    def test_portal_tilesets_and_resource_registry_share_the_68_layer_allowlist(self) -> None:
         config = json.loads((SCRIPT_DIRECTORY / "pmtiles.settings.json").read_text(encoding="utf-8"))
-        tileset = next(item for item in config["tilesets"] if item["id"] == "portal-layers")
-        configured = {str(item).lower() for item in tileset["includeLayers"]}
+        portal_tilesets = [item for item in config["tilesets"] if item.get("enabled", True)]
+        self.assertEqual(
+            {item["id"] for item in portal_tilesets},
+            {"core_storm", "property_surfaces", "planning_projects", "transport_reference"},
+        )
+        configured_layers = [
+            str(layer).lower()
+            for tileset in portal_tilesets
+            for layer in tileset["includeLayers"]
+        ]
+        configured = set(configured_layers)
         registry_path = (
             SCRIPT_DIRECTORY.parents[1]
             / "python"
@@ -313,13 +325,42 @@ class PmtilesBuilderTests(unittest.TestCase):
             for item in json.loads(registry_path.read_text(encoding="utf-8"))
         }
 
+        archive_registry_path = registry_path.with_name("portal-layer-archives.json")
+        archive_registry = json.loads(archive_registry_path.read_text(encoding="utf-8"))
+        registered_by_archive = {
+            archive_id: {str(layer).lower() for layer in layers}
+            for archive_id, layers in archive_registry.items()
+        }
+
         self.assertEqual(len(configured), 68)
+        self.assertEqual(len(configured_layers), len(configured))
         self.assertIn("topo_ln", configured)
         self.assertIn("stormpipes_ln", configured)
         self.assertNotIn("culverts", configured)
         self.assertNotIn("cw_inspections_all_pt", configured)
         self.assertNotIn("itpipes_defects_top_risk_pt", configured)
         self.assertEqual(configured, registered)
+        self.assertEqual(
+            {item["id"]: {str(layer).lower() for layer in item["includeLayers"]} for item in portal_tilesets},
+            registered_by_archive,
+        )
+
+        _config, resolved_tilesets = builder.load_tilesets(SCRIPT_DIRECTORY / "pmtiles.settings.json")
+        resolved_layers = [layer for tileset in resolved_tilesets for layer in tileset.layers]
+        generated_layers = {
+            layer.layer_id for layer in resolved_layers if layer.feature_id_strategy == "generated_hash"
+        }
+        self.assertEqual(
+            generated_layers,
+            {"capitalimprovementprojects_vln", "capitalimprovementprojects_vpt"},
+        )
+        self.assertTrue(
+            all(
+                layer.feature_id_column in {"OBJECTID", "OBJECTID_1"}
+                for layer in resolved_layers
+                if layer.feature_id_strategy != "generated_hash"
+            )
+        )
 
     def test_planning_layer_ids_use_configured_direct_duckdb_sources(self) -> None:
         portal_root = SCRIPT_DIRECTORY.parents[1]

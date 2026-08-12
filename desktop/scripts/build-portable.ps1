@@ -208,9 +208,12 @@ if ($null -ne $existingSettings) {
         $existingSettingsObject | Add-Member -MemberType NoteProperty -Name maps -Value $templateSettingsObject.maps
     } else {
         $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name duckdbGeoJsonLayers -Value $templateSettingsObject.maps.duckdbGeoJsonLayers -Force
+        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name terrainRoot -Value $templateSettingsObject.maps.terrainRoot -Force
         $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name terrainArchive -Value $templateSettingsObject.maps.terrainArchive -Force
+        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name portalLayerArchives -Value $templateSettingsObject.maps.portalLayerArchives -Force
         $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name projectConfigFile -Value $templateSettingsObject.maps.projectConfigFile -Force
         $existingSettingsObject.maps.PSObject.Properties.Remove("configurationRoot")
+        $existingSettingsObject.maps.PSObject.Properties.Remove("portalLayersArchive")
     }
     if ($null -ne $existingSettingsObject.risk -and $null -ne $existingSettingsObject.risk.databases) {
         $existingSettingsObject.risk.databases.PSObject.Properties.Remove("mapRisk")

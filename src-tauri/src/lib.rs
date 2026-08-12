@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashMap,
     env, fs,
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom, Write},
@@ -7,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, StatusCode};
 use tauri::Manager;
@@ -578,7 +579,283 @@ fn file_protocol_response(
     builder.body(bytes).map_err(|error| error.to_string())
 }
 
+#[derive(Debug)]
+struct MapArchiveRegistry {
+    archives: HashMap<String, PathBuf>,
+}
+
+static MAP_ARCHIVE_REGISTRY: OnceLock<Result<MapArchiveRegistry, String>> = OnceLock::new();
+
+fn configured_setting_string(
+    settings: &serde_json::Value,
+    pointer: &str,
+    environment_name: &str,
+) -> Option<String> {
+    env::var(environment_name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            settings
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn expand_portal_setting_path(raw_path: &str, settings: &serde_json::Value) -> Result<PathBuf, String> {
+    let application_root = installation_root()?.display().to_string();
+    let data_root = local_data_root()?.display().to_string();
+    let shared_root = configured_shared_data_root(settings)?.display().to_string();
+    let expanded = raw_path
+        .replace("${PORTAL_APP_ROOT}", &application_root)
+        .replace("${PORTAL_DATA_ROOT}", &data_root)
+        .replace("${PORTAL_SHARED_DATA_ROOT}", &shared_root);
+    if expanded.contains("${") {
+        return Err(format!(
+            "The configured map path contains an unresolved setting: {raw_path}"
+        ));
+    }
+    Ok(PathBuf::from(expanded))
+}
+
+fn registered_archive_name(
+    settings: &serde_json::Value,
+    pointer: &str,
+    environment_name: &str,
+) -> Result<Option<String>, String> {
+    let Some(name) = configured_setting_string(settings, pointer, environment_name) else {
+        return Ok(None);
+    };
+    validate_archive_name(&name)?;
+    Ok(Some(name))
+}
+
+fn validate_archive_name(name: &str) -> Result<(), String> {
+    let path = Path::new(name);
+    if path.components().count() != 1
+        || path.file_name().and_then(|value| value.to_str()) != Some(name)
+        || path.extension().and_then(|value| value.to_str()) != Some("pmtiles")
+    {
+        return Err(format!(
+            "The configured map archive must be a PMTiles file name: {name}"
+        ));
+    }
+    Ok(())
+}
+
+fn build_map_archive_registry() -> Result<MapArchiveRegistry, String> {
+    let settings = load_client_settings()?;
+    let pmtiles_root = configured_setting_string(
+        &settings,
+        "/maps/pmtilesRoot",
+        "PORTAL_MAP_PMTILES_ROOT",
+    )
+    .ok_or_else(|| "Portal settings do not define maps.pmtilesRoot.".to_string())?;
+    let pmtiles_root = expand_portal_setting_path(&pmtiles_root, &settings)?;
+    let legacy_root = configured_setting_string(
+        &settings,
+        "/maps/legacyPmtilesRoot",
+        "PORTAL_MAP_LEGACY_PMTILES_ROOT",
+    )
+    .map(|value| expand_portal_setting_path(&value, &settings))
+    .transpose()?;
+    let terrain_root = configured_setting_string(
+        &settings,
+        "/maps/terrainRoot",
+        "PORTAL_MAP_TERRAIN_ROOT",
+    )
+    .map(|value| expand_portal_setting_path(&value, &settings))
+    .transpose()?
+    .unwrap_or_else(|| pmtiles_root.clone());
+
+    let mut archives = HashMap::new();
+    if let Some(thematic) = settings
+        .pointer("/maps/portalLayerArchives")
+        .and_then(|value| value.as_object())
+    {
+        for value in thematic.values() {
+            let name = value.as_str().ok_or_else(|| {
+                "maps.portalLayerArchives values must be PMTiles file names.".to_string()
+            })?;
+            validate_archive_name(name)?;
+            archives.insert(name.to_string(), pmtiles_root.join(name));
+        }
+    }
+    if let (Some(root), Some(name)) = (
+        legacy_root,
+        registered_archive_name(
+            &settings,
+            "/maps/legacyMapArchive",
+            "PORTAL_MAP_LEGACY_ARCHIVE",
+        )?,
+    ) {
+        archives.insert(name.clone(), root.join(name));
+    }
+    if let Some(name) = registered_archive_name(
+        &settings,
+        "/maps/terrainArchive",
+        "PORTAL_MAP_TERRAIN_ARCHIVE",
+    )? {
+        let configured = terrain_root.join(&name);
+        let path = if configured.is_file() {
+            configured
+        } else {
+            // Older packaged settings used a separate terrain root. The canonical
+            // PMTiles root is a safe configured fallback during that migration.
+            pmtiles_root.join(&name)
+        };
+        archives.insert(name, path);
+    }
+    Ok(MapArchiveRegistry { archives })
+}
+
+fn map_archive_registry() -> Result<&'static MapArchiveRegistry, String> {
+    match MAP_ARCHIVE_REGISTRY.get_or_init(build_map_archive_registry) {
+        Ok(registry) => Ok(registry),
+        Err(error) => Err(error.clone()),
+    }
+}
+
+fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpResponse<Vec<u8>>> {
+    const PREFIX: &str = "/api/pmtiles/";
+    let archive_name = request.uri().path().strip_prefix(PREFIX)?;
+    let error_response = |status: u16, message: String| {
+        response_builder(status, Some("text/plain; charset=utf-8"), None)
+            .body(message.into_bytes())
+            .expect("valid PMTiles protocol error response")
+    };
+    if request.method() != "GET" && request.method() != "HEAD" {
+        return Some(error_response(405, "PMTiles supports GET and HEAD only.".to_string()));
+    }
+    if archive_name.is_empty()
+        || Path::new(archive_name).components().count() != 1
+        || Path::new(archive_name).extension().and_then(|value| value.to_str()) != Some("pmtiles")
+    {
+        return Some(error_response(404, "PMTiles archive is not registered.".to_string()));
+    }
+    let registry = match map_archive_registry() {
+        Ok(registry) => registry,
+        Err(error) => return Some(error_response(500, error)),
+    };
+    let Some(path) = registry.archives.get(archive_name) else {
+        return Some(error_response(404, "PMTiles archive is not registered.".to_string()));
+    };
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => {
+            return Some(error_response(
+                404,
+                format!("PMTiles archive is not a file: {}", path.display()),
+            ))
+        }
+        Err(error) => {
+            return Some(error_response(
+                404,
+                format!("PMTiles archive was not found: {} ({error})", path.display()),
+            ))
+        }
+    };
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .unwrap_or_default();
+    let etag = format!(
+        "W/\"{:x}-{:x}-{:x}\"",
+        metadata.len(),
+        modified.as_secs(),
+        modified.subsec_nanos()
+    );
+    if request.headers().get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok())
+        == Some(etag.as_str())
+        && request.headers().get(header::RANGE).is_none()
+    {
+        return Some(
+            response_builder(StatusCode::NOT_MODIFIED.as_u16(), None, None)
+                .header(header::ETAG, etag)
+                .body(Vec::new())
+                .expect("valid PMTiles not-modified response"),
+        );
+    }
+    let immutable = request
+        .uri()
+        .query()
+        .is_some_and(|query| url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "v" && !value.is_empty()));
+    let cache_control = if immutable {
+        "public, max-age=31536000, immutable"
+    } else {
+        "no-cache"
+    };
+    let file_size = metadata.len();
+    let range_header = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok());
+    // PMTiles normally supplies an explicit range. If WebView issues an
+    // unexpected open-ended or range-free GET, cap the first response instead
+    // of reading a multi-hundred-megabyte archive into one protocol buffer.
+    let (start, end, status) = file_response_range(range_header, file_size, true);
+    let length = if file_size == 0 { 0 } else { end - start + 1 };
+    let response_length = if request.method() == "HEAD" { file_size } else { length };
+    let mut builder = response_builder(status, Some("application/octet-stream"), None)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CACHE_CONTROL, cache_control)
+        .header(header::ETAG, etag)
+        .header(header::CONTENT_LENGTH, response_length.to_string())
+        .header(
+            header::ACCESS_CONTROL_EXPOSE_HEADERS,
+            "Accept-Ranges, Content-Range, Content-Length, ETag",
+        );
+    if status == StatusCode::PARTIAL_CONTENT.as_u16() {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{file_size}"),
+        );
+    }
+    if request.method() == "HEAD" {
+        return Some(
+            builder
+                .status(StatusCode::OK)
+                .body(Vec::new())
+                .expect("valid PMTiles HEAD response"),
+        );
+    }
+    let mut file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            return Some(error_response(
+                500,
+                format!("Could not open PMTiles archive {}: {error}", path.display()),
+            ))
+        }
+    };
+    if let Err(error) = file.seek(SeekFrom::Start(start)) {
+        return Some(error_response(
+            500,
+            format!("Could not seek PMTiles archive {}: {error}", path.display()),
+        ));
+    }
+    let mut bytes = Vec::with_capacity(length.min(16 * 1024 * 1024) as usize);
+    if let Err(error) = file.take(length).read_to_end(&mut bytes) {
+        return Some(error_response(
+            500,
+            format!("Could not read PMTiles archive {}: {error}", path.display()),
+        ));
+    }
+    Some(
+        builder
+            .body(bytes)
+            .expect("valid PMTiles range response"),
+    )
+}
+
 fn local_protocol_response(request: HttpRequest<Vec<u8>>) -> HttpResponse<Vec<u8>> {
+    if let Some(response) = pmtiles_protocol_response(&request) {
+        return response;
+    }
     let result = run_python_job("request", &protocol_request(&request));
     let response = match result {
         Ok(response) => response,

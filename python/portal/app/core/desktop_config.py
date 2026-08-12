@@ -26,7 +26,6 @@ _MAP_SOURCE_ENVIRONMENT_KEYS = frozenset(
     {
         "PORTAL_MAP_PMTILES_ROOT",
         "PORTAL_MAP_LEGACY_PMTILES_ROOT",
-        "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
         "PORTAL_MAP_LEGACY_ARCHIVE",
         "PORTAL_MAP_CONFIG_FILE",
         "PORTAL_MAP_TERRAIN_ROOT",
@@ -156,7 +155,6 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_SDW_DUCKDB": _value(config, "dataSources", "spatialDataWarehouse", "database"),
         "PORTAL_MAP_PMTILES_ROOT": _value(config, "maps", "pmtilesRoot"),
         "PORTAL_MAP_LEGACY_PMTILES_ROOT": _value(config, "maps", "legacyPmtilesRoot"),
-        "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE": _value(config, "maps", "portalLayersArchive"),
         "PORTAL_MAP_LEGACY_ARCHIVE": _value(config, "maps", "legacyMapArchive"),
         "PORTAL_MAP_CONFIG_FILE": _value(config, "maps", "projectConfigFile"),
         "PORTAL_MAP_TERRAIN_ROOT": _value(config, "maps", "terrainRoot"),
@@ -195,6 +193,17 @@ def configure_environment() -> dict[str, Any]:
                 os.environ.pop(name, None)
         elif value:
             os.environ.setdefault(name, value)
+    maps_config = config.get("maps")
+    thematic_archives = (
+        maps_config.get("portalLayerArchives") if isinstance(maps_config, dict) else None
+    )
+    if isinstance(thematic_archives, dict):
+        os.environ["PORTAL_MAP_THEMATIC_ARCHIVES_JSON"] = json.dumps(
+            thematic_archives,
+            sort_keys=True,
+        )
+    else:
+        os.environ.pop("PORTAL_MAP_THEMATIC_ARCHIVES_JSON", None)
     map_configuration_file = mappings["PORTAL_MAP_CONFIG_FILE"]
     if map_configuration_file and "${" not in map_configuration_file:
         config_path = Path(map_configuration_file)
@@ -239,10 +248,6 @@ def configured_paths() -> dict[str, str]:
         "legacy_pmtiles_root": os.getenv(
             "PORTAL_MAP_LEGACY_PMTILES_ROOT",
             _value(config, "maps", "legacyPmtilesRoot"),
-        ),
-        "portal_layers_archive": os.getenv(
-            "PORTAL_MAP_PORTAL_LAYERS_ARCHIVE",
-            _value(config, "maps", "portalLayersArchive"),
         ),
         "legacy_map_archive": os.getenv(
             "PORTAL_MAP_LEGACY_ARCHIVE",

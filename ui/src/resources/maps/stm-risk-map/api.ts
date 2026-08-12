@@ -3,6 +3,8 @@ import type {
   AssetSearchResponse,
   AttributeFilterPayload,
   Bounds,
+  DuckDbGeoJsonBatchRequest,
+  DuckDbGeoJsonBatchResponse,
   DuckDbGeoJsonFeatureCollection,
   InventoryMetricsResponse,
   Manifest,
@@ -66,6 +68,19 @@ export async function fetchDuckDbGeoJson(
   return fetchJson<DuckDbGeoJsonFeatureCollection>(url.href);
 }
 
+export async function fetchDuckDbGeoJsonBatch(
+  bbox: Bounds,
+  zoom: number,
+  requests: DuckDbGeoJsonBatchRequest[],
+): Promise<DuckDbGeoJsonBatchResponse> {
+  return fetchJson<DuckDbGeoJsonBatchResponse>(apiPath("/api/duckdb/geojson-batch"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ bbox, zoom, requests }),
+    cache: "no-store",
+  });
+}
+
 export async function fetchAttributeFilterFields(targetId: string): Promise<AttributeFilterFieldsResponse> {
   const url = new URL(apiPath(`/api/filters/fields/${encodeURIComponent(targetId)}`), window.location.origin);
   return fetchJson<AttributeFilterFieldsResponse>(url.href);
@@ -118,8 +133,8 @@ function appendAttributeFilters(url: URL, filters?: AttributeFilterPayload): voi
   url.searchParams.set("filters", JSON.stringify(filters));
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
-  return portalRequestJson<T>(url, { cache: "no-store" });
+async function fetchJson<T>(url: string, options: RequestInit = {}): Promise<T> {
+  return portalRequestJson<T>(url, { ...options, cache: "no-store" });
 }
 
 function apiPath(path: string): string {
@@ -136,10 +151,12 @@ function rewritePmtilesUrls(style: MapStyle, styleBase: URL): void {
       return;
     }
     const innerUrl = source.url.slice("pmtiles://".length);
-    const filename = innerUrl.split(/[\\/]/).pop() || "";
+    const archiveReference = innerUrl.split(/[\\/]/).pop() || "";
+    const [filename, query = ""] = archiveReference.split("?", 2);
+    const querySuffix = query ? `?${query}` : "";
     const origin = apiOrigin();
     if (origin && filename.toLowerCase().endsWith(".pmtiles")) {
-      source.url = `pmtiles://${origin}/api/pmtiles/${filename}`;
+      source.url = `pmtiles://${origin}/api/pmtiles/${filename}${querySuffix}`;
       return;
     }
     if (/^(https?:)?\/\//i.test(innerUrl) || /^[A-Za-z]:[\\/]/.test(innerUrl)) {

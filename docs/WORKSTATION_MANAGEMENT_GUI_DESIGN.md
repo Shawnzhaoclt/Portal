@@ -234,8 +234,8 @@ zoom ranges, tilesets, and output paths. `Build map tiles` remains an explicit m
 operation. Ordinary mirror refreshes and non-weekly daily workflows do not start the
 potentially long tile build; the configured weekly workflow starts it only after the
 Spatial Data Warehouse mirror has been rebuilt successfully.
-The current PMTiles registry contains only the 67 approved Spatial Data Warehouse
-layers in `databases_local/tiles/portal_layers.pmtiles`. Eleven Planning Project
+The current PMTiles registry contains 68 approved Spatial Data Warehouse layers,
+split among four thematic archives under `databases_local/tiles`. Eleven Planning Project
 layers remain direct DuckDB sources and are never encoded into PMTiles. Their
 database, table, geometry, feature-ID, and exposed-field mappings are maintained in
 `maps.duckdbGeoJsonLayers` in `portal.settings.json`. The ITPipes display layers use
@@ -245,14 +245,14 @@ from the configured Cityworks spatial mirror. No shared-data database path is
 embedded in application or builder code.
 MapLibre style JSON, sprite assets, and the expected source-layer registry belong to
 the Storm Water Asset Risk Map resource and are bundled with Portal Desktop. The
-shared tiles directory contains only the configured PMTiles archive and its build
-manifest; archive locations and file names come from configuration.
+shared tiles directory contains the four configured thematic PMTiles archives and
+their build manifests; archive locations and file names come from configuration.
 The authoritative DuckDB remains on its configured shared path and is opened
 read-only; it is not copied to local SSD. A bounded process pool transforms each
 layer and stages only approved fields in disposable local FlatGeobuf files.
 Tippecanoe encodes independent zoom-compatible groups concurrently while dividing
 the configured CPU allowance across the processes, and `tile-join` combines the
-groups into the consolidated archive. The Manager
+groups within each thematic archive. The Manager
 validates the PMTiles header, expected layer IDs, and exact field allowlists before
 atomic publication. GDAL and then the Portal-owned Python encoder provide controlled
 fallbacks only when an engine is unavailable. The Manager UI reports staging,

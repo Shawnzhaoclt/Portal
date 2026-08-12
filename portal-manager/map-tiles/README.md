@@ -15,6 +15,12 @@ The primary builder uses DuckDB Spatial and the packaged Tippecanoe toolchain to
 4. validate the PMTiles v3 header, layer IDs, and exact field allowlists; and
 5. atomically publish the validated archive and manifest.
 
+Every published feature includes the queryable string property
+`__portal_feature_id`. It comes from a verified unique internal source column
+(`OBJECTID`, numbered `OBJECTID_*`, `FID`, or `OID`) and never from a business
+identifier. If a source view has no unique internal row ID, the builder emits a
+deterministic publication hash and records that strategy in the manifest.
+
 The source DuckDB is never copied to local storage. Only disposable conversion
 files are written under the configured local temporary directory. If the packaged
 Tippecanoe runtime is unavailable, the configured GDAL engine is used; if both
@@ -48,32 +54,32 @@ Build every configured tileset:
 python build_pmtiles_from_duckdb.py
 ```
 
-Build the consolidated Portal tileset:
+Build one thematic Portal tileset:
 
 ```powershell
-python build_pmtiles_from_duckdb.py --tileset portal-layers
+python build_pmtiles_from_duckdb.py --tileset core_storm
 ```
 
 Force the diagnostic Python encoder:
 
 ```powershell
-python build_pmtiles_from_duckdb.py --tileset portal-layers --engine python
+python build_pmtiles_from_duckdb.py --tileset core_storm --engine python
 ```
 
 The self-contained Tippecanoe runtime and license texts are maintained under
 `vendor/tippecanoe`. Portable builds copy this directory beside the builder, so
 production does not depend on another project or a machine-wide installation.
 
-The consolidated archive contains only the 67 approved Spatial Data Warehouse
-vector layers. It is published to:
+The 68 approved Spatial Data Warehouse vector layers are split among four
+thematic archives under:
 
 ```text
-G:\Strategic Planning\Planning\stm_risk_data\databases_local\tiles\portal_layers.pmtiles
+G:\Strategic Planning\Planning\stm_risk_data\databases_local\tiles
 ```
 
-The allowlist is explicit and mandatory. A build fails when any configured layer
-is missing instead of silently publishing an incomplete archive. `Topo_ln` is
-available in the SDW mirror but is outside the current replacement scope.
+The allowlists are explicit, disjoint, and mandatory. A build fails when any
+configured layer is missing instead of silently publishing an incomplete archive.
+`Topo_ln` is included in the transportation/reference archive.
 
 The eleven Planning Project layers sourced from Cityworks, risk-ranking, and
 proactive DuckDBs are intentionally excluded from this builder. Portal Desktop

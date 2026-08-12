@@ -53,10 +53,15 @@
     "maps":  {
                  "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/tiles",
                  "legacyPmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
-                 "portalLayersArchive":  "portal_layers.pmtiles",
+                 "portalLayerArchives":  {
+                                                "core_storm":  "portal_core_storm.pmtiles",
+                                                "property_surfaces":  "portal_property_surfaces.pmtiles",
+                                                "planning_projects":  "portal_planning_projects.pmtiles",
+                                                "transport_reference":  "portal_transport_reference.pmtiles"
+                                            },
                  "legacyMapArchive":  "planning_project.pmtiles",
                  "projectConfigFile":  "${PORTAL_APP_ROOT}/config/project.toml",
-                 "terrainRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/terrain",
+                 "terrainRoot":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/tiles",
                  "terrainArchive":  "mecklenburg_terrain.pmtiles",
                  "reportsRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
                  "duckdbGeoJsonLayers":  [
