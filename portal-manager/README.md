@@ -66,28 +66,37 @@ release directory. It reads both the Portal portable folder and
 `updates.releaseRoot` from the configured Portal settings file; it does not use
 hard-coded deployment paths.
 
-Release publication is a System Admin operation. Portal Admins can prepare and
-review catalog changes in Portal Administration, but the native host rechecks
-the selected system-admin capability before copying any system database,
-executable, or full-package release.
+Software release publication is a System Admin operation. The **Releases** page does
+not publish `system.db`; catalog data has an independent publication lifecycle.
 
-Before every publication, Manager copies its authoritative writable
-`config\system.db` into the Portal Desktop portable folder and verifies that the
-two files have the same SHA-256 digest. The Desktop copy is then marked read-only.
-System-database-only releases are created from that verified Desktop copy; full
-releases include it in the portable ZIP. The authoritative Manager database remains
-writable and is never used directly by Portal Desktop.
+The page shows one release version read from the built Portal package. Choose only
+the update scope:
 
-Choose the update type explicitly:
-
-- **System database only** replaces only `config\system.db`.
 - **Portal executable only** replaces only `Portal.exe`.
-- **Full portable folder** publishes the complete ZIP and refreshes the
-  first-time installation bundle.
+- **Complete application** replaces the complete application folder.
 
-Provide a newer semantic release version such as `0.2.1`. Full releases must
-match the `VERSION` file in the Portal portable folder. The manager rejects an
-older or duplicate shared-release version.
+Every publication writes one `portal-release.json`. It records the single version,
+selected update scope, update payload, SHA-256 values, and a complete installation
+payload. The complete package is always produced for new installation, repair, and
+recovery, even when existing clients need only `Portal.exe`.
+
+The user-owned `%LOCALAPPDATA%\StormWaterPortal\data` directory is excluded from
+packages and permanently protected by the updater. Full updates replace application
+files and managed configuration but never remove or overwrite synchronized data.
+
+## System Catalog Publication
+
+The authoritative writable catalog remains at `config\system.db` in Portal Manager.
+A System Admin publishes it from **Portal Administration > System Catalog** by
+selecting **Publish read-only catalog**. No software or semantic version is entered.
+
+The Manager closes its catalog worker, creates and verifies the read-only Desktop
+copy, and publishes `system.catalog` through the same central data-manifest workflow
+used by DuckDB and PMTiles sources. The publisher calculates the checksum, schema
+fingerprint, and immutable data version. Changed content receives a generated
+timestamp-and-hash version; unchanged content keeps the existing version. Portal
+Desktop checks and activates this required read-only source at its next startup,
+before user authentication. The Manager's authoritative database remains writable.
 
 ## Python Sync Worker
 

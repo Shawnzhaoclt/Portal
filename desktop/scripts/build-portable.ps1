@@ -60,6 +60,7 @@ $outputPrefix = $OutputDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorCha
 $existingSettingsPath = Join-Path $OutputDirectory "config\portal.settings.json"
 $settingsTemplatePath = Join-Path $projectRoot "desktop\config\desktop-config.template.json"
 $projectConfigSourcePath = Join-Path $projectRoot "desktop\config\project.toml"
+$removePortalSourcePath = Join-Path $projectRoot "desktop\release\Remove-Portal.bat"
 $settingsRecoveryPath = Join-Path ([System.IO.Path]::GetTempPath()) "Portal-Desktop.portal.settings.json"
 $existingSettings = if (Test-Path -LiteralPath $existingSettingsPath -PathType Leaf) {
     $settingsText = Get-Content -LiteralPath $existingSettingsPath -Raw
@@ -78,6 +79,73 @@ if (-not (Test-Path -LiteralPath $cargo -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $projectConfigSourcePath -PathType Leaf)) {
     throw "The packaged map project configuration was not found at $projectConfigSourcePath."
 }
+if (-not (Test-Path -LiteralPath $removePortalSourcePath -PathType Leaf)) {
+    throw "The Portal removal script was not found at $removePortalSourcePath."
+}
+$templateSettings = Get-Content -LiteralPath $settingsTemplatePath -Raw | ConvertFrom-Json
+$cacheBackedPaths = @(
+    $templateSettings.risk.databases.PSObject.Properties.Value
+    $templateSettings.assetHistory.sources.PSObject.Properties | ForEach-Object { $_.Value.database }
+    $templateSettings.dataSources.PSObject.Properties | ForEach-Object {
+        $accessModeProperty = $_.Value.PSObject.Properties["accessMode"]
+        $accessMode = if ($null -ne $accessModeProperty) { [string]$accessModeProperty.Value } else { "" }
+        if ($accessMode -ne "direct-network") {
+            $databaseProperty = $_.Value.PSObject.Properties["database"]
+            $manifestProperty = $_.Value.PSObject.Properties["manifest"]
+            if ($null -ne $databaseProperty) { $databaseProperty.Value }
+            if ($null -ne $manifestProperty) { $manifestProperty.Value }
+        }
+    }
+    $templateSettings.aifSources.itpipesIntermediateDatabase
+    $templateSettings.aifSources.cityworksIntermediateDatabase
+    $templateSettings.aifSources.itpipesProductionDatabase
+    $templateSettings.maps.pmtilesRoot
+    $templateSettings.maps.legacyPmtilesRoot
+    $templateSettings.maps.terrainRoot
+    $templateSettings.maps.pmtilesDetailSources.PSObject.Properties | ForEach-Object { $_.Value.database }
+    $templateSettings.maps.duckdbGeoJsonLayers | ForEach-Object { $_.database }
+) | Where-Object { $_ }
+$sharedCacheFallbacks = @($cacheBackedPaths | Where-Object { [string]$_ -match '\$\{PORTAL_SHARED_DATA_ROOT\}' })
+if ($sharedCacheFallbacks.Count -gt 0) {
+    throw "Desktop cache-backed database and PMTiles settings must not point to PORTAL_SHARED_DATA_ROOT."
+}
+$cacheSourceIds = @(
+    $templateSettings.system.sourceId
+    $templateSettings.risk.databaseSourceIds.PSObject.Properties.Value
+    $templateSettings.assetHistory.sources.PSObject.Properties | ForEach-Object { $_.Value.sourceId }
+    $templateSettings.dataSources.PSObject.Properties | ForEach-Object {
+        $accessModeProperty = $_.Value.PSObject.Properties["accessMode"]
+        $accessMode = if ($null -ne $accessModeProperty) { [string]$accessModeProperty.Value } else { "" }
+        if ($accessMode -ne "direct-network") {
+            $sourceIdProperty = $_.Value.PSObject.Properties["sourceId"]
+            if ($null -ne $sourceIdProperty) { $sourceIdProperty.Value }
+        }
+    }
+    $templateSettings.aifSources.itpipesIntermediateSourceId
+    $templateSettings.aifSources.cityworksIntermediateSourceId
+    $templateSettings.aifSources.itpipesProductionSourceId
+    $templateSettings.maps.portalLayerArchiveSources.PSObject.Properties.Value
+    $templateSettings.maps.terrainSourceId
+    $templateSettings.maps.pmtilesDetailSources.PSObject.Properties | ForEach-Object { $_.Value.databaseSourceId }
+    $templateSettings.maps.duckdbGeoJsonLayers | ForEach-Object { $_.databaseSourceId }
+) | Where-Object { $_ } | Sort-Object -Unique
+if ($cacheSourceIds.Count -eq 0) {
+    throw "Desktop settings do not declare any logical local-cache source IDs."
+}
+$directNetworkSources = @(
+    $templateSettings.dataSources.PSObject.Properties |
+        Where-Object {
+            $accessModeProperty = $_.Value.PSObject.Properties["accessMode"]
+            $null -ne $accessModeProperty -and [string]$accessModeProperty.Value -eq "direct-network"
+        }
+)
+if ($directNetworkSources.Count -ne 1 -or [string]$directNetworkSources[0].Value.sourceId -ne "portal.serving") {
+    throw "portal.serving must be the only direct-network Desktop data source."
+}
+$directNetworkSourceIds = @($templateSettings.dataCache.directNetworkSourceIds)
+if ($directNetworkSourceIds -notcontains "portal.serving") {
+    throw "dataCache.directNetworkSourceIds must exclude portal.serving from local downloads."
+}
 if (-not (Get-Command pnpm -ErrorAction SilentlyContinue)) {
     throw "pnpm is required to build the React UI."
 }
@@ -88,6 +156,31 @@ if (-not (Get-Command $PythonExecutable -ErrorAction SilentlyContinue)) {
 & $PythonExecutable -c "import dotenv, duckdb, openpyxl, pandas, pyodbc, sqlalchemy"
 if ($LASTEXITCODE -ne 0) {
     throw "The selected Python environment is missing Portal runtime dependencies: $PythonExecutable"
+}
+
+$duckDbRuntimeInfo = @(& $PythonExecutable -c "import duckdb; c=duckdb.connect(); print(duckdb.__version__); print(c.execute('PRAGMA platform').fetchone()[0])")
+if ($LASTEXITCODE -ne 0 -or $duckDbRuntimeInfo.Count -lt 2) {
+    throw "Could not determine the bundled DuckDB version and platform."
+}
+$duckDbVersion = ([string]$duckDbRuntimeInfo[0]).Trim().TrimStart("v")
+$duckDbPlatform = ([string]$duckDbRuntimeInfo[1]).Trim()
+$duckDbSpatialExtension = Join-Path $env:USERPROFILE ".duckdb\extensions\v$duckDbVersion\$duckDbPlatform\spatial.duckdb_extension"
+if (-not (Test-Path -LiteralPath $duckDbSpatialExtension -PathType Leaf)) {
+    Write-Host "Installing the signed DuckDB spatial extension on the build workstation..."
+    & $PythonExecutable -c "import duckdb; c=duckdb.connect(); c.install_extension('spatial')"
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $duckDbSpatialExtension -PathType Leaf)) {
+        throw "DuckDB spatial $duckDbVersion for $duckDbPlatform was not found at $duckDbSpatialExtension. The full portable release cannot be built without its offline spatial runtime."
+    }
+}
+$env:PORTAL_BUILD_SPATIAL_EXTENSION = $duckDbSpatialExtension
+try {
+    & $PythonExecutable -c "import os, duckdb; c=duckdb.connect(); c.execute('SET autoinstall_known_extensions=false'); c.execute('SET autoload_known_extensions=false'); c.load_extension(os.environ['PORTAL_BUILD_SPATIAL_EXTENSION']); assert c.execute('SELECT ST_AsText(ST_Point(1, 2))').fetchone()[0] == 'POINT (1 2)'"
+    if ($LASTEXITCODE -ne 0) {
+        throw "The local DuckDB spatial extension is incompatible with the selected Python runtime."
+    }
+}
+finally {
+    Remove-Item Env:PORTAL_BUILD_SPATIAL_EXTENSION -ErrorAction SilentlyContinue
 }
 
 Write-Host "[1/4] Building React UI..."
@@ -149,6 +242,7 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
     --specpath $pythonBuild `
     --paths (Join-Path $projectRoot "python") `
     --collect-submodules portal `
+    --collect-all pytz `
     --add-data "$projectRoot\python\portal\app\config;portal\app\config" `
     --add-data "$projectRoot\python\portal\app\resources\maps\stm_risk_map\assets;portal\app\resources\maps\stm_risk_map\assets" `
     --add-data "$systemSeed;portal\data" `
@@ -180,8 +274,9 @@ if (Test-Path -LiteralPath $OutputDirectory -PathType Container) {
 }
 $configOutput = Join-Path $OutputDirectory "config"
 $runtimeOutput = Join-Path $OutputDirectory "runtime"
+$duckDbExtensionOutput = Join-Path $runtimeOutput "duckdb\extensions"
 New-Item -ItemType Directory -Force -Path `
-    $OutputDirectory, $configOutput, $runtimeOutput | Out-Null
+    $OutputDirectory, $configOutput, $runtimeOutput, $duckDbExtensionOutput | Out-Null
 
 $portalExecutable = Join-Path $tauriRoot "target\release\Portal.exe"
 $portalUpdaterExecutable = Join-Path $tauriRoot "target\release\PortalUpdater.exe"
@@ -198,22 +293,27 @@ if (-not (Test-Path -LiteralPath $pythonWorkerDirectory -PathType Container) -or
 }
 
 Copy-Item -LiteralPath $portalExecutable -Destination (Join-Path $OutputDirectory "Portal.exe") -Force
+Copy-Item -LiteralPath $removePortalSourcePath -Destination (Join-Path $OutputDirectory "Remove-Portal.bat") -Force
 Copy-Item -LiteralPath $pythonWorkerDirectory -Destination (Join-Path $runtimeOutput "portal-python") -Recurse -Force
 Copy-Item -LiteralPath $portalUpdaterExecutable -Destination (Join-Path $runtimeOutput "PortalUpdater.exe") -Force
+Copy-Item -LiteralPath $duckDbSpatialExtension -Destination (Join-Path $duckDbExtensionOutput "spatial.duckdb_extension") -Force
 $settingsOutput = Join-Path $configOutput "portal.settings.json"
 if ($null -ne $existingSettings) {
     $existingSettingsObject = $existingSettings | ConvertFrom-Json
     $templateSettingsObject = Get-Content -LiteralPath $settingsTemplatePath -Raw | ConvertFrom-Json
-    if ($null -eq $existingSettingsObject.maps) {
-        $existingSettingsObject | Add-Member -MemberType NoteProperty -Name maps -Value $templateSettingsObject.maps
-    } else {
-        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name duckdbGeoJsonLayers -Value $templateSettingsObject.maps.duckdbGeoJsonLayers -Force
-        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name terrainRoot -Value $templateSettingsObject.maps.terrainRoot -Force
-        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name terrainArchive -Value $templateSettingsObject.maps.terrainArchive -Force
-        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name portalLayerArchives -Value $templateSettingsObject.maps.portalLayerArchives -Force
-        $existingSettingsObject.maps | Add-Member -MemberType NoteProperty -Name projectConfigFile -Value $templateSettingsObject.maps.projectConfigFile -Force
-        $existingSettingsObject.maps.PSObject.Properties.Remove("configurationRoot")
-        $existingSettingsObject.maps.PSObject.Properties.Remove("portalLayersArchive")
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name dataCache -Value $templateSettingsObject.dataCache -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name system -Value $templateSettingsObject.system -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name risk -Value $templateSettingsObject.risk -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name assetHistory -Value $templateSettingsObject.assetHistory -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name dataSources -Value $templateSettingsObject.dataSources -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name aifSources -Value $templateSettingsObject.aifSources -Force
+    $existingSettingsObject | Add-Member -MemberType NoteProperty -Name maps -Value $templateSettingsObject.maps -Force
+    if ($null -ne $existingSettingsObject.externalServices.cityworks) {
+        $existingSettingsObject.externalServices.cityworks | Add-Member `
+            -MemberType NoteProperty `
+            -Name requestUrlTemplate `
+            -Value $templateSettingsObject.externalServices.cityworks.requestUrlTemplate `
+            -Force
     }
     if ($null -ne $existingSettingsObject.risk -and $null -ne $existingSettingsObject.risk.databases) {
         $existingSettingsObject.risk.databases.PSObject.Properties.Remove("mapRisk")
@@ -246,9 +346,12 @@ Set-Content -LiteralPath (Join-Path $OutputDirectory "VERSION") -Value $version 
 Storm Water Asset Intelligence Portal Desktop $version
 
 Run Portal.exe from this local folder. No local service or installer is required.
-Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. Published SQLite
-source snapshots, current read-only risk DuckDB files, and PMTiles are loaded from the
-shared data root in config\portal.settings.json. The map project catalog is
+Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. At startup,
+the application checks the shared publication manifest and activates verified read-only
+system catalog, DuckDB, PMTiles, and terrain files in its local versioned source cache.
+The frequently refreshed portal.serving SQLite snapshot is the only direct-network
+source and is resolved through its atomic G-drive manifest. All other resources read
+active local versions. The map project catalog is
 packaged as config\project.toml, while map styles and sprites are packaged with
 the map resource.
 

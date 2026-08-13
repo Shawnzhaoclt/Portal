@@ -1,49 +1,145 @@
 {
     "schemaVersion":  1,
     "shared":  {
-                   "dataRoot":  ""
+                   "dataRoot":  "G:/Strategic Planning/Planning/stm_risk_data"
                },
+    "dataCache":  {
+                       "enabled":  true,
+                       "remoteManifest":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal-data.current.json",
+                       "localRoot":  "${PORTAL_DATA_ROOT}/data/source-cache",
+                       "checkPolicy":  "startup-only",
+                       "directNetworkSourceIds":  [
+                                                       "portal.serving"
+                                                   ],
+                       "gracePeriodDays":  7,
+                       "maximumConcurrentDownloads":  1,
+                       "retainActiveVersions":  1,
+                       "resumePartialDownloads":  true,
+                       "minimumStartupFreeBytes":  16106127360,
+                       "diskSafetyReserveBytes":  1073741824,
+                       "stagingRecoveryHours":  72
+                   },
     "updates":  {
                     "releaseRoot":  "G:/Strategic Planning/Planning/stm_risk_app"
                 },
     "system":  {
+                   "sourceId":  "system.catalog",
                    "database":  "${PORTAL_APP_ROOT}/config/system.db",
                    "readOnly":  true
                },
     "risk":  {
                  "databases":  {
-                                   "assetRisk":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/amteam/amteam.duckdb",
-                                   "inventory":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/inventory/inventory.db",
-                                   "cityPipes":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb"
+                                   "assetRisk":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.amteam/amteam.duckdb",
+                                   "inventory":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.inventory/inventory.db",
+                                   "cityPipes":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-sdw/virt_sdw_01_sdw.duckdb"
                                },
+                 "databaseSourceIds":  {
+                                           "assetRisk":  "intermediate.amteam",
+                                           "inventory":  "intermediate.inventory",
+                                           "cityPipes":  "mirror.virt-sdw-sdw"
+                                       },
                  "readOnly":  true
              },
+    "assetHistory":  {
+                         "sources":  {
+                                         "inventory":  {
+                                                           "sourceId":  "intermediate.inventory",
+                                                           "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.inventory/inventory.db"
+                                                       },
+                                         "step401":  {
+                                                         "sourceId":  "intermediate.riskranking",
+                                                         "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db"
+                                                     },
+                    "cityworks":  {
+                                      "sourceId":  "mirror.cityworks-workorder",
+                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.cityworks-workorder/myrs_cwdbprd_1_swpt_cityworks_db.duckdb"
+                                  },
+                    "cityworksRisk":  {
+                                          "sourceId":  "intermediate.cityworks",
+                                          "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.cityworks/cityworks.db"
+                                      },
+                    "itpipesIntermediate":  {
+                                                   "sourceId":  "intermediate.itpipes",
+                                                   "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.itpipes/itpipes.db"
+                                               },
+                    "itpipesProduction":  {
+                                                 "sourceId":  "mirror.itpipes",
+                                                 "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.itpipes/itpipes_stormwater_prod.duckdb"
+                                  },
+                    "priorityPipes":  {
+                                            "sourceId":  "intermediate.prioritypipes",
+                                            "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.prioritypipes/prioritypipes.db"
+                                  }
+                },
+                         "inventoryTables":  {
+                                                  "structure":  { "table":  "STORMSTRUCTURE_1_PT", "idField":  "ITPIPE_ASSETID", "entityType":  "STRUCTURES" },
+                                                  "pipe":  { "table":  "STORMPIPES_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "PIPES" },
+                                                  "channel":  { "table":  "STORMDRAINAGE_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "CHANNELS" }
+                                              },
+                         "step401Tables":  {
+                                                "cityworksUnassigned":  "t_0001_UR_AC_CWOnly_All_Unassigned",
+                                                "cityworksAssigned":  "t_0004_UR_AC_CWOnly_Assigned_Or_Universal",
+                                                "itpipesUnassigned":  "t_0001_UR_AC_ITPipesOnly_All_Unassigned",
+                                                "itpipesAssigned":  "t_0004_UR_AC_ITPipesOnly_Assigned_Or_Universal",
+                                                "assetIdField":  "ITPIPE_ASSETID"
+                                            },
+    "cityworksTables":  {
+                                                 "inspection":  "azteca_INSPECTION",
+                                                 "inspectionQuestion":  "azteca_INSPQUESTION",
+                                                 "workOrder":  "azteca_WORKORDER",
+                                                 "workOrderEntity":  "azteca_WORKORDERENTITY",
+                                                 "activityLink":  "azteca_ACTIVITYLINK",
+                            "request":  "azteca_REQUEST"
+                        },
+    "cityworksRiskTables":  {
+                                 "scoredInspection":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT"
+                             },
+    "itpipesTables":  {
+                           "defects":  "ITPipes_Defects_Merged_PT",
+                           "inspection":  "MLI",
+                           "asset":  "ML"
+                       },
+    "priorityPipesTables":  {
+                                 "scored":  "PRIORITY_PIPES_SCORED"
+                             },
+                         "assetInspectionTemplatePattern":  "%Asset Insp%",
+                         "readOnly":  true
+                     },
     "dataSources":  {
                         "portalSources":  {
+                                              "sourceId":  "portal.serving",
+                                              "accessMode":  "direct-network",
                                               "manifest":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json",
                                               "readOnly":  true
                                           },
                         "itpipes":  {
-                                         "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/itpipes_stormwater_prod.duckdb",
+                                         "sourceId":  "mirror.itpipes",
+                                         "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.itpipes/itpipes_stormwater_prod.duckdb",
                                          "readOnly":  true
                                      },
                         "itpipesMerged":  {
-                                               "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/itpipes/itpipes.db",
+                                               "sourceId":  "intermediate.itpipes",
+                                               "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.itpipes/itpipes.db",
                                                "readOnly":  true
                                            },
                         "gisFacility":  {
-                                            "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                                            "sourceId":  "mirror.cityworks-spatial",
+                                            "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.cityworks-spatial/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
                                             "readOnly":  true
                                         },
                         "spatialDataWarehouse":  {
-                                                     "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/virt_sdw_01_sdw.duckdb",
+                                                     "sourceId":  "mirror.virt-sdw-sdw",
+                                                     "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-sdw/virt_sdw_01_sdw.duckdb",
                                                      "readOnly":  true
                                                  }
                     },
     "aifSources":  {
-                       "itpipesIntermediateDatabase":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/itpipes/itpipes.db",
-                       "cityworksIntermediateDatabase":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/cityworks/cityworks.db",
-                       "itpipesProductionDatabase":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/itpipes_stormwater_prod.duckdb",
+                       "itpipesIntermediateSourceId":  "intermediate.itpipes",
+                       "cityworksIntermediateSourceId":  "intermediate.cityworks",
+                       "itpipesProductionSourceId":  "mirror.itpipes",
+                       "itpipesIntermediateDatabase":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.itpipes/itpipes.db",
+                       "cityworksIntermediateDatabase":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.cityworks/cityworks.db",
+                       "itpipesProductionDatabase":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.itpipes/itpipes_stormwater_prod.duckdb",
                        "itpipesDefectsTable":  "ITPipes_Defects_Merged_PT",
                        "itpipesMaximumConditionTable":  "DEFECTS_NS_LN_MAX_CL_PT",
                        "cityworksInspectionHistoryTable":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT",
@@ -51,23 +147,37 @@
                        "itpipesObservationTable":  "MLO"
                    },
     "maps":  {
-                 "pmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/tiles",
-                 "legacyPmtilesRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/pmtiles",
+                 "pmtilesRoot":  "${PORTAL_DATA_ROOT}/data/source-cache",
+                 "legacyPmtilesRoot":  "${PORTAL_DATA_ROOT}/data/source-cache",
                  "portalLayerArchives":  {
                                                 "core_storm":  "portal_core_storm.pmtiles",
                                                 "property_surfaces":  "portal_property_surfaces.pmtiles",
                                                 "planning_projects":  "portal_planning_projects.pmtiles",
                                                 "transport_reference":  "portal_transport_reference.pmtiles"
                                             },
-                 "legacyMapArchive":  "planning_project.pmtiles",
+                 "portalLayerArchiveSources":  {
+                                                       "portal_core_storm.pmtiles":  "map.core-storm",
+                                                       "portal_property_surfaces.pmtiles":  "map.property-surfaces",
+                                                       "portal_planning_projects.pmtiles":  "map.planning-projects",
+                                                       "portal_transport_reference.pmtiles":  "map.transport-reference"
+                                                   },
+                 "legacyMapArchive":  "portal_core_storm.pmtiles",
                  "projectConfigFile":  "${PORTAL_APP_ROOT}/config/project.toml",
-                 "terrainRoot":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/tiles",
+                 "terrainRoot":  "${PORTAL_DATA_ROOT}/data/source-cache",
                  "terrainArchive":  "mecklenburg_terrain.pmtiles",
-                 "reportsRoot":  "${PORTAL_SHARED_DATA_ROOT}/maptiles/build/reports",
+                 "terrainSourceId":  "terrain.pmtiles",
+                 "reportsRoot":  "${PORTAL_APP_ROOT}/config/map-reports",
+                 "pmtilesDetailSources":  {
+                                                     "spatial-data-warehouse":  {
+                                                                                   "databaseSourceId":  "mirror.sdw-spatial",
+                                                                                   "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.sdw-spatial/virt_sdw_01_sdw_spatial_warehouse.duckdb"
+                                                                               }
+                                                 },
                  "duckdbGeoJsonLayers":  [
                                                   {
                                                       "id":  "culverts",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                                                      "databaseSourceId":  "mirror.cityworks-spatial",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.cityworks-spatial/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
                                                       "table":  "Culverts_evw",
                                                       "geometryColumn":  "Shape",
                                                       "featureIdColumn":  "OBJECTID",
@@ -76,7 +186,8 @@
                                                   },
                                                   {
                                                       "id":  "cw_inspections_all_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/cityworks/cityworks.db",
+                                                      "databaseSourceId":  "intermediate.cityworks",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.cityworks/cityworks.db",
                                                       "table":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "INSPECTIONID",
@@ -85,7 +196,8 @@
                                                   },
                                                   {
                                                       "id":  "itpipes_defects_ln",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "DEFECTS_MOST_RECENT_NS_LN",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "MLO_ID",
@@ -94,7 +206,8 @@
                                                   },
                                                   {
                                                       "id":  "itpipes_defects_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "DEFECTS_MOST_RECENT_NS_PT",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "MLO_ID",
@@ -103,7 +216,8 @@
                                                   },
                                                   {
                                                       "id":  "itpipes_defects_top_risk_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "DEFECTS_MOST_RECENT_TOP_RISK_NS_PT",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "MLO_ID",
@@ -112,7 +226,8 @@
                                                   },
                                                   {
                                                       "id":  "priority_pipes_proactive_inv_pv_cw_ln",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/proactive/proactive.duckdb",
+                                                      "databaseSourceId":  "intermediate.proactive",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.proactive/proactive.duckdb",
                                                       "table":  "PRIORITY_PIPES_PROACTIVE_INV_PV_CW_LN",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "ITPIPE_ASSETID",
@@ -121,7 +236,8 @@
                                                   },
                                                   {
                                                       "id":  "proactive_inv_pv_cw_ln",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/proactive/proactive.duckdb",
+                                                      "databaseSourceId":  "intermediate.proactive",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.proactive/proactive.duckdb",
                                                       "table":  "PROACTIVE_INV_PV_CW_LN",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "ITPIPE_ASSETID",
@@ -130,7 +246,8 @@
                                                   },
                                                   {
                                                       "id":  "rr_sc_cwonly_all_unassigned_allrisk_0101_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "t_0101_RR_SC_CWOnly_All_Unassigned_AllRisk",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "INSPECTIONID",
@@ -139,7 +256,8 @@
                                                   },
                                                   {
                                                       "id":  "rr_sc_cwonly_everything_allrisk_0101_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "t_0101_RR_SC_CWOnly_Everything_AllRisk",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "INSPECTIONID",
@@ -148,7 +266,8 @@
                                                   },
                                                   {
                                                       "id":  "top_deduplicated_wo_filtered_risk_defects_ns_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "TOP_DEDUPLICATED_WO_FILTERED_RISK_DEFECTS_NS",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "MLO_ID",
@@ -157,7 +276,8 @@
                                                   },
                                                   {
                                                       "id":  "ur_scfilter_cwonly_all_unassigned_allrisk_0101_pt",
-                                                      "database":  "${PORTAL_SHARED_DATA_ROOT}/intermediate/riskranking/riskranking.db",
+                                                      "databaseSourceId":  "intermediate.riskranking",
+                                                      "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/intermediate.riskranking/riskranking.db",
                                                       "table":  "t_0101_UR_SCFilter_CWOnly_All_Unassigned_AllRisk",
                                                       "geometryColumn":  "geometry",
                                                       "featureIdColumn":  "INSPECTIONID",
@@ -217,6 +337,7 @@
                              "cityworks":  {
                                                "inspectionUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/InspectionEdit.aspx?InspectionId={id}",
                                                "workOrderUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/WOGeneralEdit.aspx?WorkOrderId={id}",
+                                               "requestUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/RequestEdit.aspx?RequestId={id}",
                                                "investigationUrlTemplate":  "https://cityworksprod.ci.charlotte.nc.us/Stormwater_OfficeCompanion/WorkManagement/InspectionEdit.aspx?InspectionId={id}"
                                            },
                              "maps":  {

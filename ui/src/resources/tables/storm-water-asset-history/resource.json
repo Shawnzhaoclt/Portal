@@ -1,0 +1,16 @@
+{
+  "resource_id": "TABAH001",
+  "resource_slug": "storm_water_asset_history",
+  "type": "tab",
+  "name": "Storm Water Asset History",
+  "url": "/asset-history",
+  "category": "Risk",
+  "description": "Review Step 401 assignment status and all related Cityworks activity for storm structures, pipes, and channels.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/storm-water-asset-history.png",
+    "thumbnail_dark": "assets/portal-thumbnails/storm-water-asset-history-dark.png"
+  },
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

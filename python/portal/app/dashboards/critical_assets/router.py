@@ -7,6 +7,7 @@ import duckdb
 from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 
 from portal.app.core.data_sources import CriticalAssetsDataSource, critical_assets_data_source
+from portal.app.core.duckdb_extensions import DuckDBSpatialExtensionError, load_spatial_extension
 from portal.app.core.records import clean_record
 
 
@@ -239,8 +240,10 @@ def critical_assets_connection() -> duckdb.DuckDBPyConnection:
         ) from error
 
     try:
-        connection.execute("LOAD spatial")
-    except duckdb.Error:
+        load_spatial_extension(connection)
+    except DuckDBSpatialExtensionError:
+        # This dashboard never returns geometry. Keep it usable for databases
+        # whose scalar columns do not require the spatial extension.
         pass
 
     return connection

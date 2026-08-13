@@ -86,6 +86,35 @@
   animation: desktop-startup-progress 1.4s ease-in-out infinite;
 }
 
+.desktop-cache-progress {
+  width: min(520px, 84vw);
+  margin-top: 24px;
+}
+
+.desktop-cache-progress-track {
+  height: 8px;
+  overflow: hidden;
+  background: #cfdae5;
+}
+
+.desktop-cache-progress-track span {
+  display: block;
+  height: 100%;
+  background: #255a8f;
+  transition: width 160ms ease-out;
+}
+
+.desktop-cache-progress-detail {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, auto));
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 8px;
+  color: #687586;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
 .desktop-startup-error-icon {
   width: 32px;
   height: 32px;

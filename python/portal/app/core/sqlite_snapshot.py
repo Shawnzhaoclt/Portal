@@ -98,6 +98,15 @@ def resolve_sqlite_snapshot(manifest_path: str | Path) -> Path:
     if not manifest.is_file():
         raise SQLiteSnapshotError(f"SQLite snapshot manifest was not found: {manifest}")
 
+    # The Desktop source cache already resolves and validates the immutable
+    # SQLite publication. Its active local path can therefore be opened
+    # directly without recreating a second pointer manifest.
+    if manifest.suffix.casefold() in {".sqlite", ".sqlite3", ".db"}:
+        with manifest.open("rb") as handle:
+            if handle.read(16) != b"SQLite format 3\0":
+                raise SQLiteSnapshotError(f"Cached SQLite snapshot has an invalid header: {manifest}")
+        return manifest
+
     try:
         payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
     except (OSError, json.JSONDecodeError) as error:

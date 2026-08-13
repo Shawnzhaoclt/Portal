@@ -9,7 +9,6 @@ import {
   KeyRound,
   LayoutDashboard,
   RefreshCw,
-  Save,
   Search,
   Settings2,
   ShieldCheck,
@@ -307,7 +306,6 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
   const [dictionaries, setDictionaries] = useState<DictionaryRow[]>([]);
   const [holidays, setHolidays] = useState<HolidayRow[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
-  const [releaseVersion, setReleaseVersion] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
@@ -402,27 +400,6 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
     });
   }, [actor, changeRole, loading, onToolbarChange, refresh, selectedRole]);
 
-  async function publishCatalog() {
-    if (!isSystemAdmin) return;
-    if (!(await appConfirm(
-      "Publish the current system catalog as a read-only release?",
-      { title: "Publish system catalog", kind: "warning", confirmLabel: "Publish catalog" },
-    ))) return;
-    setBusy("publish");
-    setError("");
-    try {
-      const result = await invoke<{ currentReleaseVersion?: string }>("publish_portal_release", {
-        updateMode: "system-db",
-        releaseVersion: releaseVersion.trim() || null,
-      });
-      setReleaseVersion(result.currentReleaseVersion || releaseVersion);
-      setNotice(`System catalog ${result.currentReleaseVersion || "release"} published.`);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : String(reason));
-    } finally {
-      setBusy("");
-    }
-  }
 
   async function addUser() {
     const firstName = await promptText("First name");
@@ -549,8 +526,7 @@ export default function PortalAdministrationWorkspace({ onToolbarChange }: { onT
               </div>
               <section className="manager-admin-panel manager-admin-overview-panel">
                 <div className="manager-admin-panel-heading"><div><p className="eyebrow">SYSTEM CATALOG</p><h3>Administration is local and explicit</h3></div><Settings2 size={22} /></div>
-                <p>Changes are written to the local system catalog through the Python management runner. Resource discovery remains the source of truth for application URLs; permissions and user preferences are maintained here.</p>
-                <div className="manager-admin-publish-row"><label><span>Release version</span><input value={releaseVersion} placeholder="2026-218" onChange={(event) => setReleaseVersion(event.target.value)} /></label><button className="manager-admin-primary" disabled={!isSystemAdmin || busy === "publish"} onClick={() => void publishCatalog()}><Save size={15} />{busy === "publish" ? "Publishing..." : "Publish system catalog"}</button></div>
+                <p>Changes are written to the local system catalog through the Python management runner. System Admins publish the catalog from the current System Catalog page; its data version is generated from validated content and does not use a software release number.</p>
               </section>
             </>
           ) : null}

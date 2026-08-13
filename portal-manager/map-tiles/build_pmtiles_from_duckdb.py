@@ -1726,8 +1726,10 @@ def _build_tileset_python(tileset: Tileset, worker_count_override: int | None = 
             layer_results.append(
                 {
                     "id": layer.layer_id,
+                    "sourceId": layer.source_id,
                     "database": str(layer.database),
                     "table": f"{layer.schema}.{layer.table}",
+                    "geometryColumn": layer.geometry_column,
                     "featureCount": result.feature_count,
                     "sourceFeatureCount": result.source_feature_count,
                     "excludedFeatureCount": result.excluded_feature_count,
@@ -1738,6 +1740,11 @@ def _build_tileset_python(tileset: Tileset, worker_count_override: int | None = 
                     "featureIdField": "__portal_feature_id",
                     "sourceFeatureIdColumn": layer.feature_id_column,
                     "featureIdStrategy": layer.feature_id_strategy,
+                    "featureHashColumns": (
+                        list(layer.feature_hash_columns)
+                        if layer.feature_id_strategy == "generated_hash"
+                        else []
+                    ),
                     "minimumZoom": layer.minimum_zoom,
                     "maximumZoom": layer.maximum_zoom,
                     "properties": [item.source_name for item in layer.properties],
@@ -2341,8 +2348,10 @@ def _build_tileset_tippecanoe(
         layer_results = [
             {
                 "id": layer.layer_id,
+                "sourceId": layer.source_id,
                 "database": str(layer.database),
                 "table": f"{layer.schema}.{layer.table}",
+                "geometryColumn": layer.geometry_column,
                 "featureCount": by_order[index].feature_count,
                 "sourceFeatureCount": by_order[index].source_feature_count,
                 "excludedFeatureCount": by_order[index].excluded_feature_count,
@@ -2353,6 +2362,11 @@ def _build_tileset_tippecanoe(
                 "featureIdField": "__portal_feature_id",
                 "sourceFeatureIdColumn": layer.feature_id_column,
                 "featureIdStrategy": layer.feature_id_strategy,
+                "featureHashColumns": (
+                    list(layer.feature_hash_columns)
+                    if layer.feature_id_strategy == "generated_hash"
+                    else []
+                ),
                 "minimumZoom": layer.minimum_zoom,
                 "maximumZoom": layer.maximum_zoom,
                 "properties": [item.source_name for item in layer.properties],
@@ -2496,8 +2510,10 @@ def _build_tileset_gdal(tileset: Tileset, worker_count_override: int | None = No
         layer_results = [
             {
                 "id": layer.layer_id,
+                "sourceId": layer.source_id,
                 "database": str(layer.database),
                 "table": f"{layer.schema}.{layer.table}",
+                "geometryColumn": layer.geometry_column,
                 "featureCount": completed[index].feature_count,
                 "sourceFeatureCount": completed[index].source_feature_count,
                 "excludedFeatureCount": completed[index].excluded_feature_count,
@@ -2508,6 +2524,11 @@ def _build_tileset_gdal(tileset: Tileset, worker_count_override: int | None = No
                 "featureIdField": "__portal_feature_id",
                 "sourceFeatureIdColumn": layer.feature_id_column,
                 "featureIdStrategy": layer.feature_id_strategy,
+                "featureHashColumns": (
+                    list(layer.feature_hash_columns)
+                    if layer.feature_id_strategy == "generated_hash"
+                    else []
+                ),
                 "minimumZoom": layer.minimum_zoom,
                 "maximumZoom": layer.maximum_zoom,
                 "properties": [item.source_name for item in layer.properties],

@@ -56,6 +56,58 @@ export type PortalUpdateCheck = {
   message: string
 }
 
+export type DataCacheProgress = {
+  phase: string
+  message: string
+  sourceId: string
+  displayName: string
+  currentFileBytes: number
+  currentFileSize: number
+  completedBytes: number
+  totalBytes: number
+  completedSources: number
+  totalSources: number
+  bytesPerSecond: number
+  etaSeconds: number | null
+  background: boolean
+}
+
+export type DataCacheStartupResult = {
+  enabled: boolean
+  offline: boolean
+  blockingDownloads: number
+  backgroundDownloads: number
+  activeSources: number
+  publicationId: string
+  localManifest: string
+  message: string
+}
+
+export type DataCacheStatus = {
+  enabled: boolean
+  offline: boolean
+  activeSources: number
+  publicationId: string
+  lastCheckedAtEpoch: number
+  localManifest: string
+  updating: boolean
+  totalCacheBytes: number
+  sources: DataCacheSourceStatus[]
+  lastError: string
+}
+
+export type DataCacheSourceStatus = {
+  id: string
+  displayName: string
+  activeVersion: string
+  remoteVersion: string
+  publishedAtUtc: string
+  updateClass: string
+  validationState: string
+  validatedAtEpoch: number
+  sizeBytes: number
+}
+
 export function isDesktopRuntime() {
   return typeof window !== 'undefined' && Boolean(window.__TAURI_INTERNALS__)
 }
@@ -68,6 +120,16 @@ export async function getDesktopContext() {
 export async function startDesktopSession<TUser>() {
   if (!isDesktopRuntime()) throw new Error('Desktop startup is available only inside Tauri.')
   return invoke<DesktopStartupSession<TUser>>('desktop_startup_session')
+}
+
+export async function startDataCache() {
+  if (!isDesktopRuntime()) throw new Error('Desktop data cache is available only inside Tauri.')
+  return invoke<DataCacheStartupResult>('data_cache_startup')
+}
+
+export async function getDataCacheStatus() {
+  if (!isDesktopRuntime()) throw new Error('Desktop data cache is available only inside Tauri.')
+  return invoke<DataCacheStatus>('data_cache_status')
 }
 
 export async function exitDesktopApplication() {

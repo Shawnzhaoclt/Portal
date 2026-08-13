@@ -15,7 +15,19 @@ from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from portal.app.core.desktop_config import configured_map_duckdb_geojson_layers
+from portal.app.core.desktop_config import (
+    configured_map_duckdb_geojson_layers,
+    configured_pmtiles_detail_sources,
+)
+from portal.app.core.duckdb_extensions import load_spatial_extension
+from portal.app.core.source_cache import (
+    resolve_file_info as resolve_cached_file_info,
+    resolve_file_name as resolve_cached_file_name,
+)
+from portal.app.resources.tables.storm_water_asset_history.source import (
+    assignment_status as query_step401_assignment,
+    binary_assignment_status,
+)
 from portal.runtime.transport import (
     FileResponse,
     LocalApplication,
@@ -365,6 +377,22 @@ def configured_pmtiles_path(
     archive = Path(archive_name).name
     if archive != archive_name or Path(archive).suffix.lower() != ".pmtiles":
         raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
+    cached = resolve_cached_file_name(archive)
+    if cached is not None:
+        return cached
+    if os.environ.get("PORTAL_DESKTOP_MODE", "").strip().lower() in {"1", "true", "yes", "on"}:
+        registered_names = {
+            state.legacy_map_archive,
+            state.terrain_archive,
+            *state.portal_layer_archives.values(),
+        } - {""}
+        if archive not in registered_names:
+            raise HTTPException(status_code=404, detail=f"PMTiles archive is not registered: {archive_name}")
+        cache_manifest = Path(os.environ.get("PORTAL_SOURCE_CACHE_MANIFEST", "source-cache/current.json"))
+        unavailable = cache_manifest.parent / "unavailable" / archive
+        if required:
+            raise HTTPException(status_code=404, detail=f"No active local PMTiles version is available: {archive}")
+        return unavailable
     registrations = [(state.legacy_pmtiles_dir / archive, state.legacy_map_archive)]
     registrations.extend(
         (state.pmtiles_dir / archive, registered_name)
@@ -427,8 +455,24 @@ def expected_portal_archive_layers(state: BackendState) -> dict[str, set[str]]:
 
 
 def portal_archive_source_layers(state: BackendState, archive_name: str) -> set[str]:
+    payload, _manifest_path = portal_archive_manifest_payload(state, archive_name)
+    layers = payload.get("layers")
+    if not isinstance(layers, list):
+        raise HTTPException(status_code=500, detail="Portal PMTiles manifest has no layer list.")
+    return {
+        str(item.get("id") or "").lower()
+        for item in layers
+        if isinstance(item, dict) and str(item.get("id") or "").strip()
+    }
+
+
+def portal_archive_manifest_payload(
+    state: BackendState,
+    archive_name: str,
+) -> tuple[dict[str, Any], Path]:
     archive = configured_pmtiles_path(state, archive_name)
-    manifest_path = archive.with_suffix(archive.suffix + ".manifest.json")
+    manifest_name = archive.name + ".manifest.json"
+    manifest_path = resolve_cached_file_name(manifest_name) or archive.with_suffix(archive.suffix + ".manifest.json")
     try:
         payload = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
     except FileNotFoundError as exc:
@@ -441,14 +485,49 @@ def portal_archive_source_layers(state: BackendState, archive_name: str) -> set[
             status_code=500,
             detail=f"Portal PMTiles manifest is invalid: {manifest_path}",
         ) from exc
-    layers = payload.get("layers") if isinstance(payload, dict) else None
-    if not isinstance(layers, list):
+    if not isinstance(payload, dict):
         raise HTTPException(status_code=500, detail=f"Portal PMTiles manifest has no layer list: {manifest_path}")
-    return {
-        str(item.get("id") or "").lower()
-        for item in layers
-        if isinstance(item, dict) and str(item.get("id") or "").strip()
-    }
+    return payload, manifest_path
+
+
+def portal_pmtiles_layer_manifest(
+    state: BackendState,
+    dataset_id: str,
+) -> tuple[dict[str, Any], str, str]:
+    normalized_dataset_id = dataset_id.strip().lower()
+    for archive_id, source_layers in expected_portal_archive_layers(state).items():
+        if normalized_dataset_id not in source_layers:
+            continue
+        archive_name = state.portal_layer_archives.get(archive_id, "")
+        if not archive_name:
+            raise HTTPException(status_code=503, detail=f"No PMTiles archive is configured for {dataset_id}.")
+        payload, _manifest_path = portal_archive_manifest_payload(state, archive_name)
+        layers = payload.get("layers")
+        if not isinstance(layers, list):
+            raise HTTPException(status_code=500, detail="Portal PMTiles manifest has no layer list.")
+        layer = next(
+            (
+                item
+                for item in layers
+                if isinstance(item, dict)
+                and str(item.get("id") or "").strip().lower() == normalized_dataset_id
+            ),
+            None,
+        )
+        if layer is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"The active PMTiles manifest does not describe {dataset_id}.",
+            )
+        cached_archive = resolve_cached_file_info(archive_name)
+        if cached_archive is not None:
+            archive_version = cached_archive[1]
+        else:
+            archive = configured_pmtiles_path(state, archive_name)
+            stat = archive.stat()
+            archive_version = f"{stat.st_mtime_ns:x}-{stat.st_size:x}"
+        return layer, archive_name, archive_version
+    raise HTTPException(status_code=404, detail=f"PMTiles dataset is not registered: {dataset_id}")
 
 
 def active_thematic_portal_archives(
@@ -553,6 +632,10 @@ def route_resource_style(payload: dict[str, Any], state: BackendState) -> dict[s
 
 
 def versioned_pmtiles_url(state: BackendState, archive_name: str) -> str:
+    cached = resolve_cached_file_info(archive_name)
+    if cached is not None:
+        _, version = cached
+        return f"pmtiles://{archive_name}?v={version}" if version else f"pmtiles://{archive_name}"
     path = configured_pmtiles_path(state, archive_name, required=False)
     if not path.is_file():
         return f"pmtiles://{archive_name}"
@@ -585,7 +668,11 @@ def create_app() -> LocalApplication:
         published_layers: set[str] = set()
         for archive_id, expected in expected_archive_layers.items():
             archive_name = configured_archives.get(archive_id, "")
-            archive_path = state.pmtiles_dir / archive_name if archive_name else None
+            archive_path = (
+                configured_pmtiles_path(state, archive_name, required=False)
+                if archive_name
+                else None
+            )
             actual: set[str] = set()
             validation_error = ""
             if archive_path is None:
@@ -831,6 +918,38 @@ def create_app() -> LocalApplication:
                 "Access-Control-Expose-Headers": "Accept-Ranges, Content-Range, Content-Length, ETag",
             },
         )
+
+    @app.get("/api/map/feature-details")
+    def map_feature_details(
+        dataset_id: str = Query("", min_length=1, max_length=128),
+        feature_id: str = Query("", min_length=1, max_length=256),
+    ) -> dict[str, Any]:
+        return query_pmtiles_feature_details(
+            get_state(),
+            dataset_id.strip().lower(),
+            feature_id.strip(),
+        )
+
+    @app.get("/api/map/asset-assignment")
+    def map_asset_assignment(
+        asset_id: str = Query("", min_length=1, max_length=128),
+    ) -> dict[str, Any]:
+        normalized_asset_id = asset_id.strip()
+        try:
+            result = query_step401_assignment(normalized_asset_id)
+        except HTTPException:
+            return {
+                "asset_id": normalized_asset_id,
+                "status": "data_unavailable",
+                "available": False,
+            }
+        return {
+            "asset_id": normalized_asset_id,
+            "status": binary_assignment_status(result),
+            "available": True,
+            "source_version": result.get("version") or "",
+            "published_at": result.get("published_at"),
+        }
 
     @app.get("/api/terrain/{terrain_id}/{z}/{x}/{y}.png")
     def terrain_tile(terrain_id: str, z: int, x: int, y: int) -> FileResponse:
@@ -2595,24 +2714,239 @@ def open_configured_duckdb(layer: dict[str, Any], label: str = "Configured DuckD
     path = Path(str(layer["database"]))
     if not path.exists():
         raise HTTPException(status_code=503, detail=f"{label} file was not found: {path}")
+    connection = None
     try:
         connection = duckdb.connect(str(path), read_only=True)
-        load_duckdb_spatial_extension(connection)
+        load_spatial_extension(connection)
         return connection
     except Exception as exc:  # noqa: BLE001 - surface DuckDB locks and extension errors through API
+        if connection is not None:
+            connection.close()
         raise HTTPException(status_code=503, detail=f"Could not open {label} {path}: {exc}") from exc
+
+
+def query_pmtiles_feature_details(
+    state: BackendState,
+    dataset_id: str,
+    feature_id: str,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    layer_manifest, archive_name, archive_version = portal_pmtiles_layer_manifest(
+        state,
+        dataset_id,
+    )
+    detail_sources = configured_pmtiles_detail_sources()
+    manifest_source_id = str(layer_manifest.get("sourceId") or "").strip().lower()
+    detail_source = detail_sources.get(manifest_source_id) if manifest_source_id else None
+    if detail_source is None:
+        manifest_database_name = Path(str(layer_manifest.get("database") or "")).name.casefold()
+        matching_sources = [
+            source
+            for source in detail_sources.values()
+            if manifest_database_name
+            and str(source.get("databaseFileName") or "").casefold() == manifest_database_name
+        ]
+        detail_source = matching_sources[0] if len(matching_sources) == 1 else None
+    if detail_source is None:
+        raise HTTPException(
+            status_code=503,
+            detail=f"No local DuckDB detail source is registered for PMTiles layer {dataset_id}.",
+        )
+
+    table_name = str(layer_manifest.get("table") or "").strip()
+    if not table_name:
+        raise HTTPException(
+            status_code=503,
+            detail=f"The active PMTiles manifest does not identify the source table for {dataset_id}.",
+        )
+    relation = quote_qualified_identifier(table_name)
+    database = Path(str(detail_source["database"]))
+    connection = open_configured_duckdb(
+        {"database": str(database)},
+        "PMTiles feature-detail DuckDB",
+    )
+    try:
+        try:
+            described = connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Could not inspect the source table for {dataset_id}: {exc}",
+            ) from exc
+        fields = [(str(row[0]), str(row[1])) for row in described]
+        fields_by_lower = {name.casefold(): (name, data_type) for name, data_type in fields}
+        configured_geometry = str(layer_manifest.get("geometryColumn") or "").strip()
+        geometry_field = fields_by_lower.get(configured_geometry.casefold()) if configured_geometry else None
+        if geometry_field is None:
+            geometry_field = next(
+                ((name, data_type) for name, data_type in fields if duckdb_type_is_geometry(data_type)),
+                None,
+            )
+        geometry_columns = {
+            name.casefold()
+            for name, data_type in fields
+            if duckdb_type_is_geometry(data_type)
+        }
+        if geometry_field is not None:
+            geometry_columns.add(geometry_field[0].casefold())
+
+        source_feature_id_column = str(layer_manifest.get("sourceFeatureIdColumn") or "").strip()
+        feature_id_strategy = str(layer_manifest.get("featureIdStrategy") or "").strip()
+        try:
+            numeric_feature_id = int(feature_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail="The selected PMTiles feature ID is invalid.") from exc
+
+        if source_feature_id_column:
+            source_feature_field = fields_by_lower.get(source_feature_id_column.casefold())
+            if source_feature_field is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        f"The source feature-ID column {source_feature_id_column} was not found "
+                        f"for {dataset_id}."
+                    ),
+                )
+            predicate = f"{quote_identifier(source_feature_field[0])} = ?"
+            parameters: list[Any] = [numeric_feature_id]
+        elif feature_id_strategy == "generated_hash":
+            if geometry_field is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail=f"The generated feature ID for {dataset_id} cannot be resolved without geometry.",
+                )
+            raw_hash_columns = layer_manifest.get("featureHashColumns")
+            hash_column_names = (
+                [str(name) for name in raw_hash_columns if isinstance(name, str)]
+                if isinstance(raw_hash_columns, list)
+                else sorted(
+                    name
+                    for name, _data_type in fields
+                    if name.casefold() not in geometry_columns
+                )
+            )
+            resolved_hash_columns = []
+            for name in hash_column_names:
+                field = fields_by_lower.get(name.casefold())
+                if field is None:
+                    raise HTTPException(
+                        status_code=503,
+                        detail=f"A generated feature-ID field is missing for {dataset_id}: {name}",
+                    )
+                resolved_hash_columns.append(field[0])
+            hash_inputs = [quote_identifier(name) for name in resolved_hash_columns]
+            hash_inputs.append(f"ST_AsWKB({quote_identifier(geometry_field[0])})")
+            generated_id = (
+                f"CAST(hash({', '.join(hash_inputs)}) & 9223372036854775807 AS BIGINT)"
+            )
+            predicate = f"{generated_id} = ?"
+            parameters = [numeric_feature_id]
+        else:
+            raise HTTPException(
+                status_code=503,
+                detail=f"The active PMTiles manifest has no queryable feature-ID strategy for {dataset_id}.",
+            )
+
+        selected_fields = [
+            (name, data_type)
+            for name, data_type in fields
+            if name.casefold() not in geometry_columns and not duckdb_type_is_binary(data_type)
+        ]
+        select_parts = [quote_identifier(name) for name, _data_type in selected_fields]
+        if geometry_field is not None:
+            select_parts.append(
+                f"ST_GeometryType({quote_identifier(geometry_field[0])}) AS __portal_geometry_type"
+            )
+        if not select_parts:
+            select_parts.append("1 AS __portal_present")
+        rows = connection.execute(
+            f"SELECT {', '.join(select_parts)} FROM {relation} WHERE {predicate} LIMIT 2",
+            parameters,
+        ).fetchall()
+        if not rows:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Feature {feature_id} was not found in the active DuckDB source for {dataset_id}.",
+            )
+        if len(rows) > 1:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Feature ID {feature_id} is not unique in the active DuckDB source for {dataset_id}.",
+            )
+        row_values = dict(zip([item[0] for item in connection.description], rows[0]))
+        detail_fields = []
+        for name, data_type in fields:
+            if name.casefold() in geometry_columns:
+                continue
+            binary = duckdb_type_is_binary(data_type)
+            detail_fields.append(
+                {
+                    "name": name,
+                    "data_type": data_type,
+                    "value": None if binary else jsonable_detail_value(row_values.get(name)),
+                    "binary_omitted": binary,
+                }
+            )
+        return {
+            "ok": True,
+            "dataset_id": dataset_id,
+            "feature_id": feature_id,
+            "archive": archive_name,
+            "archive_version": archive_version,
+            "source_id": str(detail_source["databaseSourceId"]),
+            "table": table_name,
+            "feature_id_strategy": feature_id_strategy,
+            "geometry": {
+                "column": geometry_field[0] if geometry_field else "",
+                "type": str(row_values.get("__portal_geometry_type") or ""),
+            },
+            "fields": detail_fields,
+            "field_count": len(detail_fields),
+            "elapsed_ms": round((time.perf_counter() - started) * 1000, 2),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 - surface source lookup failures through the resource API
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not load full feature details for {dataset_id}: {exc}",
+        ) from exc
+    finally:
+        connection.close()
+
+
+def quote_qualified_identifier(identifier: str) -> str:
+    parts = [part.strip() for part in identifier.split(".")]
+    if not parts or len(parts) > 3 or any(not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_$]*", part) for part in parts):
+        raise HTTPException(status_code=500, detail=f"Configured DuckDB table name is invalid: {identifier}")
+    return ".".join(quote_identifier(part) for part in parts)
+
+
+def duckdb_type_is_geometry(data_type: str) -> bool:
+    return str(data_type).strip().upper().startswith("GEOMETRY")
+
+
+def duckdb_type_is_binary(data_type: str) -> bool:
+    normalized = str(data_type).strip().upper()
+    return normalized.startswith("BLOB") or normalized.startswith("BITSTRING")
+
+
+def jsonable_detail_value(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        return [jsonable_detail_value(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): jsonable_detail_value(item) for key, item in value.items()}
+    return str(value)
 
 
 def open_inventory_duckdb(layer: dict[str, Any]) -> Any:
     return open_configured_duckdb(layer, "Inventory DuckDB")
-
-
-def load_duckdb_spatial_extension(connection: Any) -> None:
-    try:
-        connection.execute("LOAD spatial")
-    except Exception:
-        connection.execute("INSTALL spatial")
-        connection.execute("LOAD spatial")
 
 
 def duckdb_database_signature(database_path: Path) -> str:

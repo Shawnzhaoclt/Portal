@@ -3,9 +3,8 @@ param(
     [string]$SourceDirectory,
     [string]$ReleaseRoot = "G:\Strategic Planning\Planning\stm_risk_app",
     [Parameter(Mandatory = $true)]
-    [ValidateSet("system-db", "portal-exe", "full")]
-    [string]$UpdateMode,
-    [string]$ReleaseVersion
+    [ValidateSet("portal-exe", "full")]
+    [string]$UpdateMode
 )
 
 $ErrorActionPreference = "Stop"
@@ -16,20 +15,44 @@ function Get-PayloadManifest {
     param(
         [string]$Version,
         [string]$Mode,
-        [string]$PayloadPath
+        [string]$PayloadPath,
+        [string]$InstallationPayloadPath
     )
 
+    $payload = [ordered]@{
+        file = [System.IO.Path]::GetFileName($PayloadPath)
+        sha256 = (Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        size = (Get-Item -LiteralPath $PayloadPath).Length
+    }
+    $installationPayload = [ordered]@{
+        file = [System.IO.Path]::GetFileName($InstallationPayloadPath)
+        sha256 = (Get-FileHash -LiteralPath $InstallationPayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        size = (Get-Item -LiteralPath $InstallationPayloadPath).Length
+    }
     [ordered]@{
         schemaVersion = 1
         version = $Version
         updateMode = $Mode
-        payload = [ordered]@{
-            file = [System.IO.Path]::GetFileName($PayloadPath)
-            sha256 = (Get-FileHash -LiteralPath $PayloadPath -Algorithm SHA256).Hash.ToLowerInvariant()
-            size = (Get-Item -LiteralPath $PayloadPath).Length
-        }
+        payload = $payload
+        installationPayload = $installationPayload
+        preservePaths = @("data")
         publishedAtUtc = [DateTime]::UtcNow.ToString("o")
     }
+}
+
+function New-PortalInstallationArchive {
+    param(
+        [string]$Source,
+        [string]$Destination
+    )
+
+    $temporaryArchive = "$Destination.part"
+    Remove-Item -LiteralPath $temporaryArchive -Force -ErrorAction SilentlyContinue
+    & tar.exe -a -c -f $temporaryArchive --exclude=data --exclude=./data -C $Source .
+    if ($LASTEXITCODE -ne 0) {
+        throw "Windows tar.exe could not create the complete Portal installation package."
+    }
+    Move-Item -LiteralPath $temporaryArchive -Destination $Destination -Force
 }
 
 function Write-Manifest {
@@ -53,65 +76,55 @@ $versionPath = Join-Path $SourceDirectory "VERSION"
 $portalExecutable = Join-Path $SourceDirectory "Portal.exe"
 $systemDatabase = Join-Path $SourceDirectory "config\system.db"
 $updater = Join-Path $SourceDirectory "runtime\PortalUpdater.exe"
-foreach ($required in @($versionPath, $portalExecutable, $systemDatabase, $updater)) {
+$spatialExtension = Join-Path $SourceDirectory "runtime\duckdb\extensions\spatial.duckdb_extension"
+foreach ($required in @($versionPath, $portalExecutable, $systemDatabase, $updater, $spatialExtension)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Portable release source is missing $required"
     }
 }
 
 $packagedVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
-$version = if ($ReleaseVersion) { $ReleaseVersion.Trim() } else { $packagedVersion }
+$version = $packagedVersion
 if ($version -notmatch '^\d+\.\d+\.\d+([-.][0-9A-Za-z.-]+)?$') {
-    throw "ReleaseVersion must be a semantic version."
-}
-if ($UpdateMode -eq "full" -and $version -ne $packagedVersion) {
-    throw "A full release version must match the packaged VERSION file ($packagedVersion). Rebuild the portable folder first."
+    throw "The packaged VERSION file must contain a semantic version."
 }
 
 $ReleaseRoot = [System.IO.Path]::GetFullPath($ReleaseRoot)
 New-Item -ItemType Directory -Force -Path $ReleaseRoot | Out-Null
 
+$installationPayloadPath = Join-Path $ReleaseRoot "Portal-Desktop-$version.zip"
+New-PortalInstallationArchive -Source $SourceDirectory -Destination $installationPayloadPath
+
 switch ($UpdateMode) {
-    "system-db" {
-        $payloadPath = Join-Path $ReleaseRoot "system-$version.db"
-        Copy-Item -LiteralPath $systemDatabase -Destination $payloadPath -Force
-    }
     "portal-exe" {
         $payloadPath = Join-Path $ReleaseRoot "Portal-$version.exe"
         Copy-Item -LiteralPath $portalExecutable -Destination $payloadPath -Force
     }
     "full" {
-        $payloadPath = Join-Path $ReleaseRoot "Portal-Desktop-$version.zip"
-        $temporaryArchive = "$payloadPath.part"
-        Remove-Item -LiteralPath $temporaryArchive -Force -ErrorAction SilentlyContinue
-        Add-Type -AssemblyName System.IO.Compression.FileSystem
-        [System.IO.Compression.ZipFile]::CreateFromDirectory(
-            $SourceDirectory,
-            $temporaryArchive,
-            [System.IO.Compression.CompressionLevel]::Optimal,
-            $false
-        )
-        Move-Item -LiteralPath $temporaryArchive -Destination $payloadPath -Force
+        $payloadPath = $installationPayloadPath
     }
 }
 
-$manifest = Get-PayloadManifest -Version $version -Mode $UpdateMode -PayloadPath $payloadPath
-Write-Manifest -Manifest $manifest -Destination (Join-Path $ReleaseRoot "portal-release.json")
-
-if ($UpdateMode -eq "full") {
-    Write-Manifest -Manifest $manifest -Destination (Join-Path $ReleaseRoot "portal-bootstrap.json")
-}
-
+$manifest = Get-PayloadManifest `
+    -Version $version `
+    -Mode $UpdateMode `
+    -PayloadPath $payloadPath `
+    -InstallationPayloadPath $installationPayloadPath
 Copy-Item -LiteralPath $updater -Destination (Join-Path $ReleaseRoot "PortalUpdater.exe") -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\release\Download-Portal.bat") -Destination (Join-Path $ReleaseRoot "Download-Portal.bat") -Force
+Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\release\Remove-Portal.bat") -Destination (Join-Path $ReleaseRoot "Remove-Portal.bat") -Force
 $legacyInstaller = Join-Path $ReleaseRoot "Install-Portal.bat"
 if (Test-Path -LiteralPath $legacyInstaller) {
     Remove-Item -LiteralPath $legacyInstaller -Force
 }
+Write-Manifest -Manifest $manifest -Destination (Join-Path $ReleaseRoot "portal-release.json")
+
+$legacyBootstrapManifest = Join-Path $ReleaseRoot "portal-bootstrap.json"
+if (Test-Path -LiteralPath $legacyBootstrapManifest) {
+    Remove-Item -LiteralPath $legacyBootstrapManifest -Force
+}
 
 Write-Host "Published Portal $UpdateMode release $version"
-Write-Host "Incremental manifest: $(Join-Path $ReleaseRoot 'portal-release.json')"
+Write-Host "Release manifest: $(Join-Path $ReleaseRoot 'portal-release.json')"
 Write-Host "First-time download script: $(Join-Path $ReleaseRoot 'Download-Portal.bat')"
-if ($UpdateMode -ne "full") {
-    Write-Host "The existing portal-bootstrap.json remains the full release used for first-time installations."
-}
+Write-Host "Complete removal script: $(Join-Path $ReleaseRoot 'Remove-Portal.bat')"

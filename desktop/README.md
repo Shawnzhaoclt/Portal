@@ -27,6 +27,9 @@ Output:
 dist\Portal-Desktop\
   Portal.exe
   runtime\
+    duckdb\
+      extensions\
+        spatial.duckdb_extension
     portal-python\
       portal-python.exe
       _internal\
@@ -38,51 +41,67 @@ dist\Portal-Desktop\
   manifest.json
 ```
 
-Client computers extract the folder locally and run `Portal.exe`. No installer, Python runtime, Conda environment, local service, or administrator access is required.
+Client computers extract the folder locally and run `Portal.exe`. No installer, Python runtime, Conda environment, local service, or administrator access is required. The signed DuckDB spatial extension is packaged in the runtime and loaded only from that local file, so map queries do not download extensions from the internet.
+
+Source DuckDB, `system.db`, PMTiles, and terrain files are resolved through the
+versioned cache under `%LOCALAPPDATA%\StormWaterPortal\data\source-cache`. The shared
+drive is checked once at startup for the central publication manifest; cache-backed
+resources never fall back to direct shared-drive reads. The small, five-minute
+`portal.serving` SQLite publication is the sole exception: resources read its atomic
+`portal_sources.current.json` publication directly from the shared drive. Portal
+requires at least 15 GB of free space on the drive containing the local cache;
+otherwise startup stops with a clear message. Cache-backed DuckDB and PMTiles settings
+use logical source IDs, and the portable build rejects any cache-backed fallback that
+points to `PORTAL_SHARED_DATA_ROOT`.
 
 ## Shared Release Distribution
 
 Publish portable releases to the shared release folder with an explicitly selected
-update type. The publisher never guesses the type from the changed files.
+update scope. The package `VERSION` is the only software version entered into the
+release workflow.
 
 ```powershell
-# First release or any mixed/runtime/structural change. The portable folder's
-# VERSION must already be 0.2.0.
+# First release or any mixed/runtime/structural change.
 .\desktop\scripts\publish-portable-release.ps1 -UpdateMode full
 
-# Read-only system publication only. No Portal rebuild is required.
-.\desktop\scripts\publish-portable-release.ps1 -UpdateMode system-db -ReleaseVersion 0.2.1
-
 # Portal host executable only.
-.\desktop\scripts\publish-portable-release.ps1 -UpdateMode portal-exe -ReleaseVersion 0.2.2
+.\desktop\scripts\publish-portable-release.ps1 -UpdateMode portal-exe
 ```
 
 The release path comes from `updates.releaseRoot` in
 `config\portal.settings.json`; the standard shared folder is
-`G:\Strategic Planning\Planning\stm_risk_app`. Every release uses a newer
-semantic version. For targeted updates, provide it with `-ReleaseVersion`; for a
-full release it must equal the package `VERSION`.
+`G:\Strategic Planning\Planning\stm_risk_app`. The publisher always reads the
+semantic version from the portable folder's `VERSION` file.
 
-`full` publishes a complete ZIP and refreshes `portal-bootstrap.json`. New users
-run `Download-Portal.bat` from the shared release folder; it installs to
-`%LOCALAPPDATA%\StormWaterPortal\app` and creates a Desktop shortcut. The bootstrap
-manifest is intentionally always a full release.
+Every publication atomically replaces one `portal-release.json`. It contains one
+release version, the selected `updateMode`, the payload for existing installations,
+and a complete `installationPayload` for installation and recovery. New users run
+`Download-Portal.bat`; it reads this same manifest, installs the complete package to
+`%LOCALAPPDATA%\StormWaterPortal\app`, and creates a Desktop shortcut.
 
-`system-db` replaces only `config\system.db`. `portal-exe` replaces only
-`Portal.exe`. Both publish `portal-release.json` without replacing the bootstrap
-bundle. A Python runtime update, any change that requires multiple files, or a
-folder-structure change must use `full`.
+Users can run `Remove-Portal.bat` from the shared release folder to remove Portal.
+The script warns that the operation is permanent and requires explicit confirmation
+before deleting `%LOCALAPPDATA%\StormWaterPortal`, including the application, local
+databases, downloaded source cache, settings, and exports. It also removes the Portal
+Desktop shortcut.
 
-Every release mode preserves `%LOCALAPPDATA%\StormWaterPortal\data` exactly as it
-is. Full releases replace only `%LOCALAPPDATA%\StormWaterPortal\app`; they discard
-any legacy `app\data` folder and never package or overwrite the user-owned data
-directory.
+`portal-exe` tells existing installations to replace only `Portal.exe`; `full` tells
+them to replace the complete application folder. Both scopes publish a complete ZIP
+for new installation, repair, and recovery. A Python runtime update, any change that
+requires multiple files, a DuckDB runtime or spatial-extension change, or a folder-structure change must use `full`. The read-only
+system catalog is published independently as the `system.catalog` data source from
+Portal Manager; it does not use a semantic software version.
+
+Every update scope preserves `%LOCALAPPDATA%\StormWaterPortal\data` exactly as it
+is. The publisher excludes `data` from the complete ZIP, the manifest declares
+`preservePaths: ["data"]`, and the updater independently rejects targets under that
+directory. Full releases replace `%LOCALAPPDATA%\StormWaterPortal\app` and managed
+configuration only; data synchronization owns the data directory.
 
 On startup, Portal checks the current `portal-release.json` after validating the
 shared data drive. When its version is newer, Portal closes itself, starts the
 bundled updater, applies the selected payload, and restarts. The updater records
-the applied release in `config\update-state.json`, so an already applied
-database-only release is not offered again.
+the applied release in `config\update-state.json`.
 
 Portal is temporarily unavailable during the daily maintenance window from 10:00 PM through
 5:00 AM local time. A launch during that window shows the maintenance splash for
@@ -91,7 +110,7 @@ view with the same dynamic 15-second shutdown countdown when the maintenance win
 begins, including after the workstation resumes or regains focus, and exits only after
 the countdown completes.
 
-The portable folder intentionally excludes DuckDB and PMTiles. Map styles and sprites
+The portable folder intentionally excludes source-data DuckDB databases and PMTiles. Map styles and sprites
 are packaged with the map resource, and the map project catalog is copied to the
 portable `config\project.toml` file. The default shared layout is:
 

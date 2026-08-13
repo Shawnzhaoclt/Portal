@@ -15,6 +15,7 @@ dependencies:
   # Tabular files: CSV, Excel
   - numpy
   - pandas
+  - pytz
   - openpyxl
   - xlrd
   # DuckDB and Parquet/GeoParquet

@@ -21,6 +21,7 @@ from portal.app.dashboards.planning import router as planning_router
 from portal.app.resources.maps.stm_risk_map import router as map_tiles_router
 from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
 from portal.app.resources.forms.create_aif_from_itpipes.router import router as create_aif_router
+from portal.app.resources.tables.storm_water_asset_history import router as asset_history_router
 from portal.app.holidays import router as holiday_router
 from portal.app.favorites import router as favorites_router
 from portal.app.weekly_time import router as weekly_time_router
@@ -44,6 +45,7 @@ app.include_router(planning_router)
 app.include_router(map_tiles_router)
 app.include_router(cctv_review_report_router)
 app.include_router(create_aif_router)
+app.include_router(asset_history_router)
 app.include_router(holiday_router)
 app.include_router(favorites_router)
 app.include_router(weekly_time_router)

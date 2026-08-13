@@ -68,6 +68,83 @@ def _map_tiles_configuration(
     return directory, builder, config
 
 
+def _data_publication_configuration(
+    settings: dict[str, Any],
+    manager_settings: Path,
+) -> tuple[Path, Path, Path]:
+    manager_base = manager_settings.resolve().parent
+    directory = _expand_path(
+        str(settings.get("dataPublicationDirectory") or "../data-publication"),
+        manager_base,
+    )
+    script = _expand_path(
+        str(settings.get("dataPublicationScript") or "publish_data_versions.py"),
+        directory,
+    )
+    config = _expand_path(
+        str(settings.get("dataPublicationSettingsFile") or "publication.settings.json"),
+        directory,
+    )
+    return directory, script, config
+
+
+def _safe_data_publication_summary(config_path: Path) -> dict[str, Any]:
+    try:
+        config = _read_json(config_path)
+        shared_root = _expand_path(str(config.get("sharedDataRoot") or ""), config_path.parent)
+        central = _expand_path(
+            str(config.get("centralManifest") or "databases_local/portal-data.current.json"),
+            shared_root,
+        )
+        publications = _expand_path(
+            str(config.get("publicationsDirectory") or "databases_local/publications"),
+            shared_root,
+        )
+        manifest = _read_json(central) if central.is_file() else {}
+        producer_definitions = config.get("producers") if isinstance(config.get("producers"), dict) else {}
+        producers: list[dict[str, Any]] = []
+        prepared_count = 0
+        for producer, definition in producer_definitions.items():
+            definition = definition if isinstance(definition, dict) else {}
+            fragment = publications / str(definition.get("fragment") or f"{producer}.current.json")
+            journal = publications / f"{producer}.transaction.json"
+            fragment_value = _read_json(fragment) if fragment.is_file() else {}
+            journal_value = _read_json(journal) if journal.is_file() else {}
+            journal_state = str(journal_value.get("state") or "not published")
+            prepared_count += int(journal_state == "prepared")
+            producers.append(
+                {
+                    "producer": str(producer),
+                    "fragment": str(fragment),
+                    "producer_release_id": str(fragment_value.get("producerReleaseId") or ""),
+                    "published_at_utc": str(fragment_value.get("publishedAtUtc") or ""),
+                    "source_count": len(fragment_value.get("sources") or []),
+                    "transaction_state": journal_state,
+                }
+            )
+        return {
+            "central_manifest": str(central),
+            "central_manifest_available": central.is_file(),
+            "publication_id": str(manifest.get("publicationId") or ""),
+            "published_at_utc": str(manifest.get("publishedAtUtc") or ""),
+            "published_source_count": len(manifest.get("sources") or []),
+            "prepared_transaction_count": prepared_count,
+            "producers": producers,
+            "error": "",
+        }
+    except Exception as exc:  # noqa: BLE001 - status must remain available for repair
+        return {
+            "central_manifest": "",
+            "central_manifest_available": False,
+            "publication_id": "",
+            "published_at_utc": "",
+            "published_source_count": 0,
+            "prepared_transaction_count": 0,
+            "producers": [],
+            "error": str(exc),
+        }
+
+
 def _map_tiles_missing_files(builder: Path, config: Path) -> list[str]:
     candidates = [builder, builder.parent / "pmtiles_v3.py", config]
     return [str(path) for path in candidates if not path.is_file()]
@@ -302,11 +379,23 @@ def status(manager_settings: Path) -> dict[str, Any]:
         manager_settings,
     )
     map_tiles_missing = _map_tiles_missing_files(map_tiles_builder, map_tiles_config)
+    publication_directory, publication_script, publication_config = _data_publication_configuration(
+        settings,
+        manager_settings,
+    )
+    publication_missing = [
+        str(path) for path in (publication_script, publication_config) if not path.is_file()
+    ]
     result: dict[str, Any] = {
         "available": not missing,
         "missing_files": missing,
         "map_tiles_available": not map_tiles_missing,
         "map_tiles_missing_files": map_tiles_missing,
+        "data_publication_available": not publication_missing,
+        "data_publication_missing_files": publication_missing,
+        "data_publication_directory": str(publication_directory),
+        "data_publication_script": str(publication_script),
+        "data_publication_settings_file": str(publication_config),
         "manager_settings_file": str(manager_settings.resolve()),
         "state_directory": str(state_directory),
         "log_directory": str(state_directory / "logs"),
@@ -339,6 +428,8 @@ def status(manager_settings: Path) -> dict[str, Any]:
         result["map_tiles_directory"] = str(map_tiles_directory)
         result["map_tiles_builder"] = str(map_tiles_builder)
         result["map_tiles_settings_file"] = str(map_tiles_config)
+    if not publication_missing:
+        result["data_publication"] = _safe_data_publication_summary(publication_config)
     return result
 
 
@@ -389,6 +480,28 @@ def _run_logged(command: list[str], log_file: Any, cwd: Path) -> None:
         raise RuntimeError(f"{Path(command[1] if len(command) > 1 else command[0]).name} exited with code {completed.returncode}.")
 
 
+def _publish_data_versions(
+    python_executable: str,
+    publication_directory: Path,
+    publication_script: Path,
+    publication_config: Path,
+    producer: str,
+    log_file: Any,
+) -> None:
+    _run_logged(
+        [
+            python_executable,
+            str(publication_script),
+            "--config",
+            str(publication_config),
+            "--producer",
+            producer,
+        ],
+        log_file,
+        publication_directory,
+    )
+
+
 def _send_workflow_notification(scripts_directory: Path, status_value: str, details: str, log_file: Any) -> None:
     script = scripts_directory / "send_stm_risk_data_notification.ps1"
     try:
@@ -422,6 +535,13 @@ def run_action(manager_settings: Path, action: str) -> int:
         manager_settings,
     )
     map_tiles_missing = _map_tiles_missing_files(map_tiles_builder, map_tiles_config)
+    publication_directory, publication_script, publication_config = _data_publication_configuration(
+        settings,
+        manager_settings,
+    )
+    publication_missing = [
+        str(path) for path in (publication_script, publication_config) if not path.is_file()
+    ]
     run_clock = datetime.now().astimezone()
     backup_weekday = str(settings.get("sourceBackupWeekday") or "SAT").upper()
     weekly_workflow_due = (
@@ -431,6 +551,8 @@ def run_action(manager_settings: Path, action: str) -> int:
         raise RuntimeError("Required source-backup files are missing: " + ", ".join(missing))
     if (action in {"check", "map_tiles"} or weekly_workflow_due) and map_tiles_missing:
         raise RuntimeError("Required PMTiles files are missing: " + ", ".join(map_tiles_missing))
+    if action not in {"backup", "heartbeat"} and publication_missing:
+        raise RuntimeError("Required data-publication files are missing: " + ", ".join(publication_missing))
     if action != "map_tiles":
         _hydrate_source_credentials(scripts_directory)
 
@@ -472,6 +594,28 @@ def run_action(manager_settings: Path, action: str) -> int:
             print(f"Portal Manager source-backup task: {action}", file=log_file)
             print(f"Started: {started_at}", file=log_file)
             if action == "check":
+                _run_logged(
+                    [
+                        python_executable,
+                        str(publication_script),
+                        "--config",
+                        str(publication_config),
+                        "--recover-prepared",
+                    ],
+                    log_file,
+                    publication_directory,
+                )
+                _run_logged(
+                    [
+                        python_executable,
+                        str(publication_script),
+                        "--config",
+                        str(publication_config),
+                        "--check",
+                    ],
+                    log_file,
+                    publication_directory,
+                )
                 _safe_configuration_summary(scripts_directory)
                 _run_logged(
                     [python_executable, str(scripts_directory / "clone_sqlserver_to_duckdb.py"), "--list"],
@@ -489,7 +633,7 @@ def run_action(manager_settings: Path, action: str) -> int:
                     log_file,
                     map_tiles_directory,
                 )
-                details = "Source and PMTiles configuration are valid."
+                details = "Source, publication, and PMTiles configuration are valid."
             elif action == "map_tiles":
                 _run_logged(
                     [
@@ -500,6 +644,14 @@ def run_action(manager_settings: Path, action: str) -> int:
                     ],
                     log_file,
                     map_tiles_directory,
+                )
+                _publish_data_versions(
+                    python_executable,
+                    publication_directory,
+                    publication_script,
+                    publication_config,
+                    "manager-weekly-sdw-map",
+                    log_file,
                 )
                 details = "Portal PMTiles archives were generated successfully."
             elif action == "backup":
@@ -515,6 +667,14 @@ def run_action(manager_settings: Path, action: str) -> int:
                     log_file,
                     scripts_directory,
                 )
+                _publish_data_versions(
+                    python_executable,
+                    publication_directory,
+                    publication_script,
+                    publication_config,
+                    "manager-daily-mirrors",
+                    log_file,
+                )
                 _run_logged(
                     [
                         python_executable,
@@ -524,9 +684,35 @@ def run_action(manager_settings: Path, action: str) -> int:
                     log_file,
                     scripts_directory,
                 )
+                _run_logged(
+                    [
+                        python_executable,
+                        str(map_tiles_builder),
+                        "--config",
+                        str(map_tiles_config),
+                    ],
+                    log_file,
+                    map_tiles_directory,
+                )
+                _publish_data_versions(
+                    python_executable,
+                    publication_directory,
+                    publication_script,
+                    publication_config,
+                    "manager-weekly-sdw-map",
+                    log_file,
+                )
+                _publish_data_versions(
+                    python_executable,
+                    publication_directory,
+                    publication_script,
+                    publication_config,
+                    "terrain",
+                    log_file,
+                )
                 details = (
-                    "SQL Server source mirrors and the Spatial Data Warehouse mirror "
-                    "were rebuilt successfully."
+                    "SQL Server mirrors, the Spatial Data Warehouse mirror, and Portal map "
+                    "archives were rebuilt and published successfully."
                 )
             elif action == "heartbeat":
                 _run_logged(
@@ -557,6 +743,14 @@ def run_action(manager_settings: Path, action: str) -> int:
                     log_file,
                     scripts_directory,
                 )
+                _publish_data_versions(
+                    python_executable,
+                    publication_directory,
+                    publication_script,
+                    publication_config,
+                    "manager-daily-mirrors",
+                    log_file,
+                )
                 spatial_refresh_performed = False
                 if backup_performed:
                     _run_logged(
@@ -578,6 +772,22 @@ def run_action(manager_settings: Path, action: str) -> int:
                         ],
                         log_file,
                         map_tiles_directory,
+                    )
+                    _publish_data_versions(
+                        python_executable,
+                        publication_directory,
+                        publication_script,
+                        publication_config,
+                        "manager-weekly-sdw-map",
+                        log_file,
+                    )
+                    _publish_data_versions(
+                        python_executable,
+                        publication_directory,
+                        publication_script,
+                        publication_config,
+                        "terrain",
+                        log_file,
                     )
                 if spatial_refresh_performed:
                     details = (

@@ -92,9 +92,11 @@ type ManagementPageProps = {
   showBackAction?: boolean
   showRoleSelector?: boolean
   showSignOutAction?: boolean
+  showSystemCatalogPublication?: boolean
+  onPublishSystemCatalog?: () => Promise<string | void>
 }
 
-type TabKey = 'profile' | 'featured' | 'users' | 'teams' | 'resources' | 'permissions' | 'holidays' | 'dictionaries' | 'audit'
+type TabKey = 'profile' | 'featured' | 'users' | 'teams' | 'resources' | 'permissions' | 'holidays' | 'dictionaries' | 'audit' | 'system-catalog'
 type UserSortKey = 'name' | 'email' | 'employee_id' | 'team' | 'role' | 'status'
 type SortDirection = 'asc' | 'desc'
 type UserFilters = {
@@ -120,7 +122,8 @@ function tabFromQuery(): TabKey {
     tab === 'permissions' ||
     tab === 'holidays' ||
     tab === 'dictionaries' ||
-    tab === 'audit'
+    tab === 'audit' ||
+    tab === 'system-catalog'
   ) {
     return tab
   }
@@ -356,6 +359,8 @@ export default function ManagementPage({
   showBackAction = true,
   showRoleSelector = false,
   showSignOutAction = true,
+  showSystemCatalogPublication = false,
+  onPublishSystemCatalog,
 }: ManagementPageProps) {
   const [token, setToken] = useState(() => consumeManagementSessionTransfer()?.token ?? storedManagementToken())
   const [activeTab, setActiveTab] = useState<TabKey>(() => tabFromQuery())
@@ -384,6 +389,7 @@ export default function ManagementPage({
   const [status, setStatus] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
+  const [publishingSystemCatalog, setPublishingSystemCatalog] = useState(false)
 
   const canManage = canUseManagement(currentUser)
   const visibleTabs = useMemo(
@@ -400,11 +406,28 @@ export default function ManagementPage({
               { key: 'holidays' as const, label: 'Holidays', icon: CalendarDays },
               { key: 'dictionaries' as const, label: 'Dictionaries', icon: Tags },
               { key: 'audit' as const, label: 'Audit', icon: KeyRound },
+              ...(showSystemCatalogPublication && currentUser?.selected_role === 'system_admin'
+                ? [{ key: 'system-catalog' as const, label: 'System Catalog', icon: Save }]
+                : []),
             ]
           : []),
       ],
-    [accountOnly, canManage],
+    [accountOnly, canManage, currentUser?.selected_role, showSystemCatalogPublication],
   )
+
+  async function publishSystemCatalog() {
+    if (!onPublishSystemCatalog || currentUser?.selected_role !== 'system_admin') return
+    setPublishingSystemCatalog(true)
+    setError('')
+    try {
+      const message = await onPublishSystemCatalog()
+      if (message) setStatus(message)
+    } catch (publishError) {
+      setError(publishError instanceof Error ? publishError.message : String(publishError || 'Could not publish the system catalog.'))
+    } finally {
+      setPublishingSystemCatalog(false)
+    }
+  }
 
   useEffect(() => {
     if (status) toast(status)
@@ -1001,9 +1024,44 @@ export default function ManagementPage({
           {canManage && activeTab === 'dictionaries' ? <DictionaryPanel /> : null}
 
           {canManage && activeTab === 'audit' ? <AuditPanel logs={auditLogs} /> : null}
+
+          {canManage && currentUser.selected_role === 'system_admin' && activeTab === 'system-catalog' ? (
+            <SystemCatalogPanel
+              publishing={publishingSystemCatalog}
+              onPublish={() => void publishSystemCatalog()}
+            />
+          ) : null}
         </section>
       </section>
     </main>
+  )
+}
+
+function SystemCatalogPanel({ publishing, onPublish }: {
+  publishing: boolean
+  onPublish: () => void
+}) {
+  return (
+    <section className="management-panel management-system-catalog-panel">
+      <div className="management-panel-heading">
+        <div>
+          <h2>System Catalog</h2>
+          <p>Publish the authoritative Manager catalog as a versioned, read-only Desktop data source.</p>
+        </div>
+        <button className="management-primary-button" type="button" disabled={publishing} onClick={onPublish}>
+          <Save size={16} />
+          {publishing ? 'Publishing...' : 'Publish read-only catalog'}
+        </button>
+      </div>
+      <div className="management-system-catalog-summary">
+        <div><span>Source</span><strong>Manager config/system.db</strong></div>
+        <div><span>Publication</span><strong>system.catalog data version</strong></div>
+        <div><span>Desktop access</span><strong>Read-only at next startup</strong></div>
+      </div>
+      <p className="management-system-catalog-note">
+        No software version is required. The content checksum determines whether a new data version is created.
+      </p>
+    </section>
   )
 }
 

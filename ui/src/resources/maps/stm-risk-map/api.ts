@@ -1,11 +1,13 @@
 import type {
   AttributeFilterFieldsResponse,
   AssetSearchResponse,
+  AssetAssignmentResponse,
   AttributeFilterPayload,
   Bounds,
   DuckDbGeoJsonBatchRequest,
   DuckDbGeoJsonBatchResponse,
   DuckDbGeoJsonFeatureCollection,
+  FeatureDetailsResponse,
   InventoryMetricsResponse,
   Manifest,
   MapStyle,
@@ -79,6 +81,23 @@ export async function fetchDuckDbGeoJsonBatch(
     body: JSON.stringify({ bbox, zoom, requests }),
     cache: "no-store",
   });
+}
+
+export async function fetchPmtilesFeatureDetails(
+  datasetId: string,
+  featureId: string,
+  signal?: AbortSignal,
+): Promise<FeatureDetailsResponse> {
+  const url = new URL(apiPath("/api/map/feature-details"), window.location.origin);
+  url.searchParams.set("dataset_id", datasetId);
+  url.searchParams.set("feature_id", featureId);
+  return fetchJson<FeatureDetailsResponse>(url.href, { signal });
+}
+
+export async function fetchAssetAssignment(assetId: string): Promise<AssetAssignmentResponse> {
+  const url = new URL(apiPath("/api/map/asset-assignment"), window.location.origin);
+  url.searchParams.set("asset_id", assetId);
+  return fetchJson<AssetAssignmentResponse>(url.href);
 }
 
 export async function fetchAttributeFilterFields(targetId: string): Promise<AttributeFilterFieldsResponse> {

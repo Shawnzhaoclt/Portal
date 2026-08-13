@@ -11,6 +11,9 @@
   "logRetentionDays": 14,
   "chunkSize": 50000,
   "publicationProfile": "portal_serving_v2",
+  "dataPublicationScript": "../data-publication/publish_data_versions.py",
+  "dataPublicationSettings": "../data-publication/publication.settings.json",
+  "dataPublicationProducer": "portal-serving-data",
   "conditionRisk": {
     "database": "G:/Strategic Planning/Planning/stm_risk_data/intermediate/amteam/amteam.duckdb",
     "table": "critical_facility_highest_risk_assets_by_facility",

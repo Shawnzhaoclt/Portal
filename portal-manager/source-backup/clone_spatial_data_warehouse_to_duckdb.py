@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import shutil
 from typing import Any
 
 from clone_sqlserver_to_duckdb import (
@@ -195,8 +196,10 @@ def main(argv: list[str] | None = None) -> int:
         print_manifest(ALL_ITEMS, DATABASES)
         return 0
 
+    staging_root = OUTPUT_ROOT / f".spatial-warehouse-next-{os.getpid()}"
+    staging_root.mkdir(parents=True, exist_ok=True)
     failures = run_clone(
-        output_root=OUTPUT_ROOT,
+        output_root=staging_root,
         items=ITEMS,
         continue_on_error=args.continue_on_error,
         odbc_driver=str(CONFIG["odbc_driver"]),
@@ -206,13 +209,19 @@ def main(argv: list[str] | None = None) -> int:
         build_spatial_indexes=True,
     )
     if failures:
+        shutil.rmtree(staging_root, ignore_errors=True)
         return 1
-    database = OUTPUT_ROOT / DATABASES["spatial_data_warehouse"].duckdb_name
+    database = staging_root / DATABASES["spatial_data_warehouse"].duckdb_name
     try:
         _clone_arcgis_layers(database)
     except Exception as exc:
         print(f"  failed: configured ArcGIS spatial layers: {exc}")
+        shutil.rmtree(staging_root, ignore_errors=True)
         return 1
+    live_database = OUTPUT_ROOT / DATABASES["spatial_data_warehouse"].duckdb_name
+    os.replace(database, live_database)
+    shutil.rmtree(staging_root, ignore_errors=True)
+    print(f"  published complete Spatial Data Warehouse mirror: {live_database}")
     return 0
 
 

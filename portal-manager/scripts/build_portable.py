@@ -86,6 +86,9 @@ def main() -> int:
     portable_settings["portalPythonWorker"] = "../runtime/portal-python/portal-python.exe"
     portable_settings["mapTilesDirectory"] = "../map-tiles"
     portable_settings["mapTilesSettingsFile"] = "pmtiles.settings.json"
+    portable_settings["dataPublicationDirectory"] = "../data-publication"
+    portable_settings["dataPublicationScript"] = "publish_data_versions.py"
+    portable_settings["dataPublicationSettingsFile"] = "publication.settings.json"
     (config_directory / "workstation-manager.settings.json").write_text(
         json.dumps(portable_settings, indent=2) + "\n",
         encoding="utf-8",
@@ -188,6 +191,14 @@ def main() -> int:
                 f"The packaged Tippecanoe runtime is incomplete: {runtime_name}"
             )
 
+    data_publication_directory = output_directory / "data-publication"
+    shutil.copytree(
+        PROJECT_ROOT / "data-publication",
+        data_publication_directory,
+        dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "test_*.py"),
+    )
+
     for obsolete_name in (
         "start_sync.bat",
         "stop_sync.bat",
@@ -203,7 +214,7 @@ def main() -> int:
         "==========================\n\n"
         "Start the application by double-clicking:\n\n"
         "  PortalManager.exe\n\n"
-        "The config, coordinator, map-tiles, source-backup, and sync directories must remain beside the executable.\n"
+        "The config, coordinator, data-publication, map-tiles, source-backup, and sync directories must remain beside the executable.\n"
         "config\\system.db is the authoritative Manager administration database.\n",
         encoding="utf-8",
     )

@@ -156,6 +156,12 @@ class PmtilesBuilderTests(unittest.TestCase):
             self.assertEqual(len(manifest["layers"]), 3)
             self.assertEqual(manifest["layers"][0]["featureCount"], 2)
             self.assertEqual(manifest["layers"][0]["properties"], ["label"])
+            self.assertEqual(manifest["layers"][0]["sourceId"], "test-source")
+            self.assertEqual(manifest["layers"][0]["geometryColumn"], "shape")
+            self.assertEqual(manifest["layers"][0]["featureIdField"], "__portal_feature_id")
+            self.assertEqual(manifest["layers"][0]["sourceFeatureIdColumn"], "objectid")
+            self.assertEqual(manifest["layers"][0]["featureIdStrategy"], "source:objectid")
+            self.assertEqual(manifest["layers"][0]["featureHashColumns"], [])
             self.assertEqual(manifest["layers"][1]["featureCount"], 1)
             self.assertEqual(manifest["layers"][2]["featureCount"], 1)
             self.assertEqual(manifest["workerCount"], 2)
@@ -195,6 +201,8 @@ class PmtilesBuilderTests(unittest.TestCase):
             self.assertTrue(
                 all(item["featureIdField"] == "__portal_feature_id" for item in tippecanoe_manifest["layers"])
             )
+            self.assertTrue(all(item["sourceId"] == "test-source" for item in tippecanoe_manifest["layers"]))
+            self.assertTrue(all(item["geometryColumn"] == "shape" for item in tippecanoe_manifest["layers"]))
             tippecanoe_header = read_header(tippecanoe_output)
             self.assertEqual(tippecanoe_header["min_zoom"], 7)
             self.assertEqual(tippecanoe_header["max_zoom"], 8)
@@ -379,7 +387,7 @@ class PmtilesBuilderTests(unittest.TestCase):
         self.assertEqual(
             mappings["culverts"],
             (
-                "${PORTAL_SHARED_DATA_ROOT}/databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.cityworks-spatial/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
                 "Culverts_evw",
             ),
         )
@@ -392,7 +400,7 @@ class PmtilesBuilderTests(unittest.TestCase):
             "PROACTIVE_INV_PV_CW_LN",
         )
         self.assertTrue(
-            all(database.startswith("${PORTAL_SHARED_DATA_ROOT}/") for database, _table in mappings.values())
+            all(database.startswith("${PORTAL_DATA_ROOT}/data/source-cache/unavailable/") for database, _table in mappings.values())
         )
 
 

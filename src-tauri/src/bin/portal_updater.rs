@@ -20,6 +20,10 @@ struct ReleaseManifest {
     version: String,
     update_mode: String,
     payload: ReleasePayload,
+    #[serde(default)]
+    installation_payload: Option<ReleasePayload>,
+    #[serde(default)]
+    preserve_paths: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,12 +62,10 @@ fn run() -> Result<(), String> {
         .map(String::as_str)
         .unwrap_or("portal-release.json");
     let manifest = read_manifest(&release_root, manifest_name)?;
-    if arguments.contains_key("bootstrap") && manifest.update_mode != "full" {
-        return Err("Initial Portal installation requires a full release bundle.".to_string());
-    }
-    install_release(&release_root, &install_root, &manifest)?;
+    let bootstrap = arguments.contains_key("bootstrap");
+    install_release(&release_root, &install_root, &manifest, bootstrap)?;
 
-    if arguments.contains_key("bootstrap") {
+    if bootstrap {
         create_desktop_shortcut(&install_root)?;
     }
     if restart {
@@ -142,31 +144,58 @@ fn read_manifest(release_root: &Path, manifest_name: &str) -> Result<ReleaseMani
     ) {
         return Err("Release manifest has an unsupported updateMode.".to_string());
     }
-    if manifest.payload.sha256.len() != 64
-        || !manifest
-            .payload
+    validate_payload(&manifest.payload, "payload")?;
+    if let Some(payload) = &manifest.installation_payload {
+        validate_payload(payload, "installationPayload")?;
+    }
+    if !manifest.preserve_paths.is_empty() && manifest.preserve_paths != ["data".to_string()] {
+        return Err("Release manifest preservePaths may contain only data.".to_string());
+    }
+    Ok(manifest)
+}
+
+fn validate_payload(payload: &ReleasePayload, field: &str) -> Result<(), String> {
+    if payload.sha256.len() != 64
+        || !payload
             .sha256
             .bytes()
             .all(|value| value.is_ascii_hexdigit())
     {
-        return Err("Release manifest contains an invalid archive SHA-256 value.".to_string());
+        return Err(format!(
+            "Release manifest contains an invalid {field} SHA-256 value."
+        ));
     }
-    let payload_path = Path::new(&manifest.payload.file);
+    let payload_path = Path::new(&payload.file);
     if payload_path.components().count() != 1 || payload_path.file_name().is_none() {
-        return Err("Release manifest payload.file must be a file name, not a path.".to_string());
+        return Err(format!(
+            "Release manifest {field}.file must be a file name, not a path."
+        ));
     }
-    Ok(manifest)
+    Ok(())
 }
 
 fn install_release(
     release_root: &Path,
     install_root: &Path,
     manifest: &ReleaseManifest,
+    bootstrap: bool,
 ) -> Result<(), String> {
     // User-owned state never lives under the replaceable application folder.
     // Create it if needed, but never copy, clear, or replace its contents.
     ensure_user_data_directory(install_root)?;
-    let payload_source = release_root.join(&manifest.payload.file);
+    let (applied_mode, payload) = if bootstrap {
+        match manifest.installation_payload.as_ref() {
+            Some(payload) => ("full", payload),
+            None if manifest.update_mode == "full" => ("full", &manifest.payload),
+            None => return Err(
+                "Initial Portal installation requires installationPayload in portal-release.json."
+                    .to_string(),
+            ),
+        }
+    } else {
+        (manifest.update_mode.as_str(), &manifest.payload)
+    };
+    let payload_source = release_root.join(&payload.file);
     if !payload_source.is_file() {
         return Err(format!(
             "Release payload was not found: {}",
@@ -175,22 +204,30 @@ fn install_release(
     }
     let metadata = fs::metadata(&payload_source)
         .map_err(|error| format!("Could not inspect release payload: {error}"))?;
-    if metadata.len() != manifest.payload.size {
+    if metadata.len() != payload.size {
         return Err("Release payload size does not match portal-release.json.".to_string());
     }
 
-    match manifest.update_mode.as_str() {
+    ensure_update_target_is_not_user_data(install_root, &install_root.join("app"))?;
+    ensure_update_target_is_not_user_data(install_root, &install_root.join("config"))?;
+    match applied_mode {
         "system-db" => install_single_file(
             &payload_source,
             &install_root.join("config").join("system.db"),
-            &manifest.payload.sha256,
+            &payload.sha256,
         ),
         "portal-exe" => install_single_file(
             &payload_source,
             &installed_application_root(install_root).join("Portal.exe"),
-            &manifest.payload.sha256,
+            &payload.sha256,
         ),
-        "full" => install_full_release(&payload_source, install_root, manifest),
+        "full" => install_full_release(
+            &payload_source,
+            install_root,
+            &manifest.version,
+            &payload.sha256,
+            bootstrap,
+        ),
         _ => Err("Release manifest has an unsupported updateMode.".to_string()),
     }?;
 
@@ -198,8 +235,8 @@ fn install_release(
     // the distribution contract and must not shadow the user-owned data directory.
     remove_packaged_application_data(install_root)?;
     ensure_user_data_directory(install_root)?;
-    write_update_state(install_root, manifest)?;
-    if manifest.update_mode == "system-db" {
+    write_update_state(install_root, manifest, applied_mode)?;
+    if applied_mode == "system-db" {
         mark_read_only(&install_root.join("config").join("system.db"));
     }
     Ok(())
@@ -208,13 +245,15 @@ fn install_release(
 fn install_full_release(
     archive_source: &Path,
     install_root: &Path,
-    manifest: &ReleaseManifest,
+    version: &str,
+    expected_sha256: &str,
+    bootstrap: bool,
 ) -> Result<(), String> {
     let token = unique_token();
     let temporary_archive = env::temp_dir().join(format!("Portal-release-{token}.zip"));
     fs::copy(archive_source, &temporary_archive)
         .map_err(|error| format!("Could not copy the Portal release locally: {error}"))?;
-    verify_sha256(&temporary_archive, &manifest.payload.sha256)?;
+    verify_sha256(&temporary_archive, expected_sha256)?;
 
     let parent = install_root
         .parent()
@@ -227,7 +266,7 @@ fn install_full_release(
     extract_zip(&temporary_archive, &staging)?;
     let _ = fs::remove_file(&temporary_archive);
     remove_if_exists(&staging.join("data"))?;
-    validate_release_layout(&staging, &manifest.version)?;
+    validate_release_layout(&staging, version)?;
 
     let config_root = install_root.join("config");
     fs::create_dir_all(&config_root)
@@ -235,14 +274,19 @@ fn install_full_release(
     let staged_config = staging.join("config");
     let settings = config_root.join("portal.settings.json");
     let packaged_settings = staged_config.join("portal.settings.json");
-    if !settings.is_file() && packaged_settings.is_file() {
-        replace_file(&packaged_settings, &settings)?;
+    if packaged_settings.is_file() {
+        if bootstrap {
+            replace_file(&packaged_settings, &settings)?;
+        } else {
+            merge_portal_settings(&settings, &packaged_settings)?;
+        }
     }
     let packaged_system_database = staged_config.join("system.db");
     if packaged_system_database.is_file() {
         replace_file(&packaged_system_database, &config_root.join("system.db"))?;
         mark_read_only(&config_root.join("system.db"));
     }
+    copy_remaining_packaged_config(&staged_config, &config_root)?;
     if staged_config.exists() {
         fs::remove_dir_all(&staged_config)
             .map_err(|error| format!("Could not remove staged Portal configuration: {error}"))?;
@@ -266,6 +310,102 @@ fn install_full_release(
     Ok(())
 }
 
+fn copy_remaining_packaged_config(
+    source_root: &Path,
+    destination_root: &Path,
+) -> Result<(), String> {
+    if !source_root.is_dir() {
+        return Ok(());
+    }
+    let mut pending = vec![source_root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in fs::read_dir(&directory)
+            .map_err(|error| format!("Could not inspect packaged Portal configuration: {error}"))?
+        {
+            let entry = entry.map_err(|error| {
+                format!("Could not inspect a packaged Portal configuration entry: {error}")
+            })?;
+            let source = entry.path();
+            if source.is_dir() {
+                pending.push(source);
+                continue;
+            }
+            let relative = source.strip_prefix(source_root).map_err(|error| {
+                format!("Could not resolve packaged Portal configuration path: {error}")
+            })?;
+            if matches!(
+                relative.to_string_lossy().replace('\\', "/").as_str(),
+                "portal.settings.json" | "system.db"
+            ) {
+                continue;
+            }
+            replace_file(&source, &destination_root.join(relative))?;
+        }
+    }
+    Ok(())
+}
+
+fn merge_managed_settings(
+    installed: &mut serde_json::Value,
+    packaged: &serde_json::Value,
+) -> Result<(), String> {
+    let installed_object = installed
+        .as_object_mut()
+        .ok_or_else(|| "The installed Portal settings must be a JSON object.".to_string())?;
+    let packaged_object = packaged
+        .as_object()
+        .ok_or_else(|| "The packaged Portal settings must be a JSON object.".to_string())?;
+    for key in [
+        "dataCache",
+        "system",
+        "risk",
+        "dataSources",
+        "aifSources",
+        "maps",
+        "externalServices",
+    ] {
+        if let Some(value) = packaged_object.get(key) {
+            installed_object.insert(key.to_string(), value.clone());
+        }
+    }
+    Ok(())
+}
+
+fn merge_portal_settings(installed_path: &Path, packaged_path: &Path) -> Result<(), String> {
+    if !installed_path.is_file() {
+        return replace_file(packaged_path, installed_path);
+    }
+    let installed_text = fs::read_to_string(installed_path).map_err(|error| {
+        format!(
+            "Could not read installed Portal settings at {}: {error}",
+            installed_path.display()
+        )
+    })?;
+    let packaged_text = fs::read_to_string(packaged_path).map_err(|error| {
+        format!(
+            "Could not read packaged Portal settings at {}: {error}",
+            packaged_path.display()
+        )
+    })?;
+    let mut installed: serde_json::Value =
+        serde_json::from_str(installed_text.trim_start_matches('\u{feff}'))
+            .map_err(|error| format!("Installed Portal settings are invalid: {error}"))?;
+    let packaged: serde_json::Value =
+        serde_json::from_str(packaged_text.trim_start_matches('\u{feff}'))
+            .map_err(|error| format!("Packaged Portal settings are invalid: {error}"))?;
+    merge_managed_settings(&mut installed, &packaged)?;
+    let temporary = installed_path.with_file_name(".portal.settings.merged.json");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&installed)
+            .map_err(|error| format!("Could not serialize merged Portal settings: {error}"))?,
+    )
+    .map_err(|error| format!("Could not stage merged Portal settings: {error}"))?;
+    let result = replace_file(&temporary, installed_path);
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
 fn ensure_user_data_directory(install_root: &Path) -> Result<(), String> {
     let data_root = install_root.join("data");
     fs::create_dir_all(&data_root).map_err(|error| {
@@ -274,6 +414,17 @@ fn ensure_user_data_directory(install_root: &Path) -> Result<(), String> {
             data_root.display()
         )
     })
+}
+
+fn ensure_update_target_is_not_user_data(install_root: &Path, target: &Path) -> Result<(), String> {
+    let protected_root = install_root.join("data");
+    if target == protected_root || target.starts_with(&protected_root) {
+        return Err(format!(
+            "Portal updates are not permitted to modify the data-sync folder {}.",
+            protected_root.display()
+        ));
+    }
+    Ok(())
 }
 
 fn remove_packaged_application_data(install_root: &Path) -> Result<(), String> {
@@ -372,7 +523,11 @@ fn mark_read_only(path: &Path) {
     }
 }
 
-fn write_update_state(install_root: &Path, manifest: &ReleaseManifest) -> Result<(), String> {
+fn write_update_state(
+    install_root: &Path,
+    manifest: &ReleaseManifest,
+    applied_mode: &str,
+) -> Result<(), String> {
     let directory = install_root.join("config");
     fs::create_dir_all(&directory)
         .map_err(|error| format!("Could not create Portal configuration directory: {error}"))?;
@@ -380,7 +535,7 @@ fn write_update_state(install_root: &Path, manifest: &ReleaseManifest) -> Result
     let temporary = directory.join(".update-state.next");
     let contents = serde_json::json!({
         "version": manifest.version,
-        "updateMode": manifest.update_mode,
+        "updateMode": applied_mode,
     });
     fs::write(
         &temporary,
@@ -415,6 +570,111 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{
+        copy_remaining_packaged_config, ensure_update_target_is_not_user_data,
+        merge_managed_settings,
+    };
+    use std::{env, fs, process, time::SystemTime};
+
+    #[test]
+    fn managed_settings_are_refreshed_while_user_paths_are_preserved() {
+        let mut installed = serde_json::json!({
+            "shared": {"dataRoot": "G:/custom"},
+            "dataCache": {"enabled": false},
+            "business": {"database": "local.db"}
+        });
+        let packaged = serde_json::json!({
+            "shared": {"dataRoot": "G:/template"},
+            "dataCache": {"enabled": true, "minimumStartupFreeBytes": 16106127360_u64},
+            "dataSources": {"systemCatalog": "system.catalog"},
+            "business": {"database": "template.db"}
+        });
+        merge_managed_settings(&mut installed, &packaged).expect("merge");
+        assert_eq!(
+            installed.pointer("/shared/dataRoot"),
+            Some(&serde_json::json!("G:/custom"))
+        );
+        assert_eq!(
+            installed.pointer("/business/database"),
+            Some(&serde_json::json!("local.db"))
+        );
+        assert_eq!(
+            installed.pointer("/dataCache/enabled"),
+            Some(&serde_json::json!(true))
+        );
+        assert_eq!(
+            installed.pointer("/dataCache/minimumStartupFreeBytes"),
+            Some(&serde_json::json!(16106127360_u64))
+        );
+        assert_eq!(
+            installed.pointer("/dataSources/systemCatalog"),
+            Some(&serde_json::json!("system.catalog"))
+        );
+    }
+
+    #[test]
+    fn remaining_packaged_configuration_replaces_corresponding_files() {
+        let token = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("portal-updater-{token}-{}", process::id()));
+        let source = root.join("source");
+        let destination = root.join("destination");
+        fs::create_dir_all(source.join("nested")).expect("source");
+        fs::create_dir_all(&destination).expect("destination");
+        fs::write(source.join("project.toml"), "new project").expect("project");
+        fs::write(source.join("nested").join("style.json"), "new style").expect("style");
+        fs::write(source.join("portal.settings.json"), "packaged settings").expect("settings");
+        fs::write(source.join("system.db"), "packaged catalog").expect("catalog");
+        fs::write(destination.join("project.toml"), "old project").expect("old project");
+        fs::write(
+            destination.join("portal.settings.json"),
+            "installed settings",
+        )
+        .expect("installed settings");
+        copy_remaining_packaged_config(&source, &destination).expect("copy");
+        assert_eq!(
+            fs::read_to_string(destination.join("project.toml")).expect("project result"),
+            "new project"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("nested").join("style.json"))
+                .expect("style result"),
+            "new style"
+        );
+        assert_eq!(
+            fs::read_to_string(destination.join("portal.settings.json")).expect("settings result"),
+            "installed settings"
+        );
+        assert!(!destination.join("system.db").exists());
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn updater_targets_cannot_enter_the_data_sync_directory() {
+        let install_root = std::path::Path::new("C:/Users/test/AppData/Local/StormWaterPortal");
+        assert!(
+            ensure_update_target_is_not_user_data(install_root, &install_root.join("app")).is_ok()
+        );
+        assert!(
+            ensure_update_target_is_not_user_data(install_root, &install_root.join("config"))
+                .is_ok()
+        );
+        assert!(
+            ensure_update_target_is_not_user_data(install_root, &install_root.join("data"))
+                .is_err()
+        );
+        assert!(ensure_update_target_is_not_user_data(
+            install_root,
+            &install_root.join("data").join("source-cache")
+        )
+        .is_err());
+    }
+}
+
 fn validate_release_layout(root: &Path, expected_version: &str) -> Result<(), String> {
     for path in [
         root.join("Portal.exe"),
@@ -424,6 +684,10 @@ fn validate_release_layout(root: &Path, expected_version: &str) -> Result<(), St
             .join("portal-python")
             .join("portal-python.exe"),
         root.join("runtime").join("PortalUpdater.exe"),
+        root.join("runtime")
+            .join("duckdb")
+            .join("extensions")
+            .join("spatial.duckdb_extension"),
     ] {
         if !path.is_file() {
             return Err(format!(

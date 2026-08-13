@@ -15,6 +15,7 @@ import {
   Download,
   ExternalLink,
   Filter,
+  History,
   Landmark,
   Layers,
   ListOrdered,
@@ -32,7 +33,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
+import { fetchAssetAssignment, fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchPmtilesFeatureDetails, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
 import { clientSetting } from "../../../desktop/settings";
 import { openExternalUrl } from "../../../desktop/runtime";
 import stormwaterLogoUrl from "./assets/stormwater-logo.png";
@@ -59,6 +60,7 @@ import {
 } from "./mapUtils";
 import type {
   AssetSearchResult,
+  AssetAssignmentResponse,
   AttributeFilterField,
   AttributeFilterFieldType,
   AttributeFilterOperator,
@@ -66,6 +68,7 @@ import type {
   AttributeFilterRule,
   Bounds,
   DuckDbGeoJsonFeatureCollection,
+  FeatureDetailsResponse,
   InventoryMetric,
   Manifest,
   MapStyle,
@@ -514,6 +517,8 @@ export default function App() {
   } | null>(null);
   const restoringProtectedViewRef = useRef(false);
   const assetSearchRequestRef = useRef(0);
+  const assetAssignmentRequestRef = useRef(0);
+  const assetAssignmentCacheRef = useRef(new Map<string, { value: AssetAssignmentResponse; fetchedAt: number }>());
   const inventoryMetricsRequestRef = useRef(0);
   const inventoryMetricsRefreshTimeoutRef = useRef<number | null>(null);
   const riskTopListRequestRef = useRef(0);
@@ -588,6 +593,7 @@ export default function App() {
   const [colorScheme, setColorScheme] = useState<ColorScheme>(() => colorSchemeFromUrl());
   const [mapViewMode, setMapViewMode] = useState<MapViewMode>("single");
   const [mapViewMenuOpen, setMapViewMenuOpen] = useState(false);
+  const [primaryMapReadyCounter, setPrimaryMapReadyCounter] = useState(0);
   const [splitMapReadyCounter, setSplitMapReadyCounter] = useState(0);
   const [swipePosition, setSwipePosition] = useState(50);
   const [swipeDragging, setSwipeDragging] = useState(false);
@@ -598,7 +604,7 @@ export default function App() {
   const [map3dEnabled, setMap3dEnabled] = useState(false);
   const [map3dTransitioning, setMap3dTransitioning] = useState(false);
   const [mapDataWarning, setMapDataWarning] = useState("");
-  const [assetSearch, setAssetSearch] = useState("");
+  const [assetSearch, setAssetSearch] = useState(() => new URLSearchParams(window.location.search).get("assetId") || "");
   const [assetSearchResults, setAssetSearchResults] = useState<AssetSearchResult[]>([]);
   const [assetSearchOpen, setAssetSearchOpen] = useState(false);
   const [assetSearchLoading, setAssetSearchLoading] = useState(false);
@@ -638,10 +644,16 @@ export default function App() {
   const [layerFilterEditor, setLayerFilterEditor] = useState<LayerFilterEditorState | null>(null);
   const [currentZoom, setCurrentZoom] = useState(DEFAULT_VIEW.zoom);
   const [selectedFeature, setSelectedFeature] = useState<SelectedFeature | null>(null);
+  const [selectedFeatureAssignment, setSelectedFeatureAssignment] = useState<AssetAssignmentResponse | null>(null);
   const [selectedFeatureOptions, setSelectedFeatureOptions] = useState<IdentifyFeature[]>([]);
   const [selectedFeatureOptionIndex, setSelectedFeatureOptionIndex] = useState(0);
   const [selectedFeatureGeometry, setSelectedFeatureGeometry] = useState<AssetSearchResult["geometry"]>(null);
   const [selectedFeatureStreetViewPoint, setSelectedFeatureStreetViewPoint] = useState<LngLatPair | null>(null);
+  const [selectedFeatureDetailsOpen, setSelectedFeatureDetailsOpen] = useState(false);
+  const [selectedFeatureDetails, setSelectedFeatureDetails] = useState<FeatureDetailsResponse | null>(null);
+  const [selectedFeatureDetailsLoading, setSelectedFeatureDetailsLoading] = useState(false);
+  const [selectedFeatureDetailsError, setSelectedFeatureDetailsError] = useState("");
+  const selectedFeatureDetailsAbortRef = useRef<AbortController | null>(null);
   const [mapBearing, setMapBearing] = useState(0);
   const [northArrowDragging, setNorthArrowDragging] = useState(false);
   const northArrowDragRef = useRef<{
@@ -1624,7 +1636,82 @@ export default function App() {
     setSelectedFeatureGeometry(feature.geometry || null);
   }, [selectedFeatureOptions]);
 
+  useEffect(() => {
+    selectedFeatureDetailsAbortRef.current?.abort();
+    selectedFeatureDetailsAbortRef.current = null;
+    setSelectedFeatureDetailsOpen(false);
+    setSelectedFeatureDetails(null);
+    setSelectedFeatureDetailsLoading(false);
+    setSelectedFeatureDetailsError("");
+    return () => {
+      selectedFeatureDetailsAbortRef.current?.abort();
+    };
+  }, [selectedFeature?.detailLookup?.datasetId, selectedFeature?.detailLookup?.featureId]);
+
+  useEffect(() => {
+    const assetId = selectedFeature?.assetHistory?.assetId?.trim();
+    const requestId = ++assetAssignmentRequestRef.current;
+    setSelectedFeatureAssignment(null);
+    if (!assetId) {
+      return;
+    }
+    const cacheKey = assetId.toUpperCase();
+    const cached = assetAssignmentCacheRef.current.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < 5 * 60 * 1000) {
+      setSelectedFeatureAssignment(cached.value);
+      return;
+    }
+    fetchAssetAssignment(assetId)
+      .then((response) => {
+        if (assetAssignmentRequestRef.current !== requestId) {
+          return;
+        }
+        assetAssignmentCacheRef.current.set(cacheKey, { value: response, fetchedAt: Date.now() });
+        setSelectedFeatureAssignment(response);
+      })
+      .catch(() => {
+        if (assetAssignmentRequestRef.current === requestId) {
+          setSelectedFeatureAssignment(null);
+        }
+      });
+  }, [selectedFeature?.assetHistory?.assetId]);
+
+  const loadSelectedFeatureDetails = useCallback(async () => {
+    const lookup = selectedFeature?.detailLookup;
+    if (!lookup) {
+      return;
+    }
+    setSelectedFeatureDetailsOpen(true);
+    if (
+      selectedFeatureDetails?.dataset_id === lookup.datasetId
+      && selectedFeatureDetails.feature_id === lookup.featureId
+    ) {
+      return;
+    }
+    selectedFeatureDetailsAbortRef.current?.abort();
+    const controller = new AbortController();
+    selectedFeatureDetailsAbortRef.current = controller;
+    setSelectedFeatureDetailsLoading(true);
+    setSelectedFeatureDetailsError("");
+    try {
+      const response = await fetchPmtilesFeatureDetails(lookup.datasetId, lookup.featureId, controller.signal);
+      if (!controller.signal.aborted) {
+        setSelectedFeatureDetails(response);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        setSelectedFeatureDetailsError(error instanceof Error ? error.message : "Could not load full feature details.");
+      }
+    } finally {
+      if (selectedFeatureDetailsAbortRef.current === controller) {
+        selectedFeatureDetailsAbortRef.current = null;
+        setSelectedFeatureDetailsLoading(false);
+      }
+    }
+  }, [selectedFeature?.detailLookup, selectedFeatureDetails]);
+
   const closeSelectedFeatureInspector = useCallback(() => {
+    selectedFeatureDetailsAbortRef.current?.abort();
     setSelectedFeature(null);
     setSelectedFeatureOptions([]);
     setSelectedFeatureOptionIndex(0);
@@ -1698,6 +1785,17 @@ export default function App() {
       toast.error(error instanceof Error ? error.message : "Could not open Google Street View.");
     });
   }, [selectedFeatureStreetViewUrl]);
+  const openSelectedFeatureAssetHistory = useCallback(() => {
+    if (!selectedFeature?.assetHistory) {
+      return;
+    }
+    const query = new URLSearchParams({
+      assetId: selectedFeature.assetHistory.assetId,
+      assetType: selectedFeature.assetHistory.assetType,
+      returnTo: "map",
+    });
+    window.location.assign(`/asset-history?${query}`);
+  }, [selectedFeature]);
 
   const zoomToSearchResult = useCallback((result: AssetSearchResult) => {
     const map = mapRef.current;
@@ -1739,6 +1837,26 @@ export default function App() {
     },
     [flashSearchResult, zoomToSearchResult],
   );
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedAssetId = params.get("assetId")?.trim();
+    const requestedAssetType = params.get("assetType")?.trim().toLowerCase();
+    if (!requestedAssetId || !assetSearchResults.length || selectedFeature || primaryMapReadyCounter === 0) {
+      return;
+    }
+    const exactResults = assetSearchResults.filter((result) =>
+      [result.label, result.match_value, ...Object.values(result.properties || {})]
+        .some((value) => String(value ?? "").trim().toLowerCase() === requestedAssetId.toLowerCase()),
+    );
+    const exact = exactResults.find((result) => {
+      const resultType = result.kind.trim().toLowerCase();
+      return resultType === requestedAssetType || (requestedAssetType === "channel" && resultType === "drainage");
+    }) || exactResults[0];
+    if (exact) {
+      selectAssetSearchResult(exact);
+    }
+  }, [assetSearchResults, primaryMapReadyCounter, selectAssetSearchResult, selectedFeature]);
 
   const zoomToRiskTopListItem = useCallback((item: RiskTopListItem) => {
     const map = mapRef.current;
@@ -2312,6 +2430,7 @@ export default function App() {
         scheduleInventoryMetricsRefresh(0);
         scheduleRiskTopListRefresh(0);
         scheduleRiskHistogramRefresh(0);
+        setPrimaryMapReadyCounter((counter) => counter + 1);
       });
       map.on("rotate", updateBearing);
       map.on("zoom", refreshCurrentZoom);
@@ -3398,19 +3517,19 @@ export default function App() {
         {selectedFeature ? (
           <aside
             className={`absolute bottom-3 top-3 z-30 grid w-[390px] max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_18px_48px_rgba(0,0,0,.3)] backdrop-blur-xl transition-[right] duration-200 ${selectedFeatureOptions.length > 1 ? "grid-rows-[52px_auto_auto_minmax(0,1fr)]" : "grid-rows-[52px_auto_minmax(0,1fr)]"} ${selectedFeaturePanelOffset}`}
-            aria-label="Feature details"
+            aria-label="Selected feature"
           >
             <header className="flex items-center justify-between gap-3 border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-4">
               <div className="min-w-0">
-                <strong className="block truncate text-[14px] font-semibold text-[var(--panel-text)]">Feature details</strong>
+                <strong className="block truncate text-[14px] font-semibold text-[var(--panel-text)]">Selected feature</strong>
                 <span className="block text-[10px] text-[var(--panel-muted)]">Map selection</span>
               </div>
               <button
                 type="button"
                 className="grid h-8 w-8 shrink-0 place-items-center rounded-sm text-[var(--panel-muted)] transition hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
                 onClick={closeSelectedFeatureInspector}
-                title="Close feature details"
-                aria-label="Close feature details"
+                title="Close selected feature"
+                aria-label="Close selected feature"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -3462,31 +3581,62 @@ export default function App() {
             ) : null}
 
             <div className="grid gap-3 border-b border-[var(--panel-border)] px-4 py-3.5">
-              <FeatureSummary feature={selectedFeature} />
-              <div className="grid grid-cols-2 gap-2">
+              <FeatureSummary feature={selectedFeature} assignment={selectedFeatureAssignment} />
+              <div className="grid grid-cols-2 gap-1.5">
                 <button
                   type="button"
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-sm border border-[var(--accent)] bg-[var(--accent)] px-3 text-[11px] font-semibold text-white transition hover:brightness-95 disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-[var(--panel-toolbar-bg)] disabled:text-[var(--panel-disabled)]"
-                  onClick={flashSelectedFeature}
-                  disabled={!selectedFeatureGeometry}
+                  className={`inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border px-1.5 text-[10px] font-semibold transition disabled:cursor-not-allowed disabled:border-[var(--panel-border)] disabled:bg-[var(--panel-toolbar-bg)] disabled:text-[var(--panel-disabled)] ${selectedFeatureDetailsOpen ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--panel-border)] bg-[var(--control-bg)] text-[var(--control-text)] hover:border-[var(--accent)] hover:bg-[var(--row-hover)]"}`}
+                  onClick={() => void loadSelectedFeatureDetails()}
+                  disabled={!selectedFeature.detailLookup}
+                  title={selectedFeature.detailLookup ? "Load all source attributes" : "Full details are available for PMTiles features"}
                 >
-                  <Activity className="h-4 w-4" />
-                  Flash feature
+                  {selectedFeatureDetailsLoading ? <LoaderCircle className="h-3.5 w-3.5 shrink-0 animate-spin" /> : <ListOrdered className="h-3.5 w-3.5 shrink-0" />}
+                  Details
                 </button>
                 <button
                   type="button"
-                  className="inline-flex h-9 items-center justify-center gap-2 rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-3 text-[11px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
+                  className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-1.5 text-[10px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
+                  onClick={flashSelectedFeature}
+                  disabled={!selectedFeatureGeometry}
+                >
+                  <Activity className="h-3.5 w-3.5 shrink-0" />
+                  Flash
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-1.5 text-[10px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
                   onClick={openSelectedFeatureStreetView}
                   disabled={!selectedFeatureStreetViewUrl}
                 >
-                  <ExternalLink className="h-4 w-4" />
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" />
                   Street View
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-1.5 text-[10px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
+                  onClick={openSelectedFeatureAssetHistory}
+                  disabled={!selectedFeature.assetHistory}
+                  title={selectedFeature.assetHistory ? "Open all related activity for this asset" : "Asset history is available for core storm assets"}
+                >
+                  <History className="h-3.5 w-3.5 shrink-0" />
+                  Asset history
                 </button>
               </div>
             </div>
 
             <div className="min-h-0 overflow-auto px-4 py-3.5">
-              <FeatureDetails feature={selectedFeature} />
+              {selectedFeatureDetailsOpen ? (
+                <FullFeatureDetails
+                  key={`${selectedFeature.detailLookup?.datasetId || "none"}:${selectedFeature.detailLookup?.featureId || "none"}`}
+                  details={selectedFeatureDetails}
+                  error={selectedFeatureDetailsError}
+                  loading={selectedFeatureDetailsLoading}
+                  onBack={() => setSelectedFeatureDetailsOpen(false)}
+                  onRetry={() => void loadSelectedFeatureDetails()}
+                />
+              ) : (
+                <FeatureDetails feature={selectedFeature} />
+              )}
             </div>
           </aside>
         ) : null}
@@ -5509,7 +5659,13 @@ function NorthArrowControl({
   );
 }
 
-function FeatureSummary({ feature }: { feature: SelectedFeature }) {
+function FeatureSummary({
+  feature,
+  assignment,
+}: {
+  feature: SelectedFeature;
+  assignment: AssetAssignmentResponse | null;
+}) {
   const [copied, setCopied] = useState(false);
   const featureId = feature.properties.find(([key]) => key.toLowerCase() === "feature_id")?.[1] || "";
 
@@ -5554,6 +5710,19 @@ function FeatureSummary({ feature }: { feature: SelectedFeature }) {
           </button>
         </div>
       ) : null}
+      {assignment ? (
+        <div className="flex items-center justify-between gap-3 rounded-sm border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-3 py-2.5">
+          <div className="min-w-0">
+            <span className="block text-[9px] font-semibold uppercase tracking-[.1em] text-[var(--panel-muted)]">Assignment</span>
+            <strong className="mt-0.5 block truncate text-[13px] font-semibold text-[var(--panel-text)]" title={assignment.asset_id}>{assignment.asset_id}</strong>
+          </div>
+          <span
+            className={`inline-flex shrink-0 items-center rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-[.04em] ${assignment.status === "assigned" ? "border-[#83b899] bg-[#eaf7ef] text-[#166136]" : assignment.status === "unassigned" ? "border-[#d3ae68] bg-[#fff6df] text-[#765000]" : "border-[#d29a96] bg-[#fff0ef] text-[#98251f]"}`}
+          >
+            {assignment.status === "assigned" ? "Assigned" : assignment.status === "unassigned" ? "Unassigned" : "Data unavailable"}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -5580,6 +5749,117 @@ function FeatureDetails({ feature }: { feature: SelectedFeature }) {
       )}
     </div>
   );
+}
+
+function FullFeatureDetails({
+  details,
+  error,
+  loading,
+  onBack,
+  onRetry,
+}: {
+  details: FeatureDetailsResponse | null;
+  error: string;
+  loading: boolean;
+  onBack: () => void;
+  onRetry: () => void;
+}) {
+  const [filter, setFilter] = useState("");
+  const normalizedFilter = filter.trim().toLocaleLowerCase();
+  const fields = (details?.fields || []).filter((field) => {
+    if (!normalizedFilter) {
+      return true;
+    }
+    const value = field.binary_omitted ? "binary data omitted" : detailedPropertyValue(field.value);
+    return field.name.toLocaleLowerCase().includes(normalizedFilter)
+      || field.data_type.toLocaleLowerCase().includes(normalizedFilter)
+      || value.toLocaleLowerCase().includes(normalizedFilter);
+  });
+
+  return (
+    <div className="grid gap-3">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="m-0 text-[12px] font-semibold text-[var(--panel-text)]">Full source attributes</h3>
+          {details ? (
+            <span className="mt-1 block truncate text-[9px] font-medium text-[var(--panel-muted)]" title={details.table}>
+              {details.table} · {details.field_count} fields · {details.elapsed_ms.toLocaleString()} ms
+            </span>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="shrink-0 text-[10px] font-semibold text-[var(--accent)] hover:underline"
+          onClick={onBack}
+        >
+          Map summary
+        </button>
+      </div>
+
+      {loading && !details ? (
+        <div className="grid place-items-center gap-2 rounded-sm border border-dashed border-[var(--panel-border)] px-3 py-10 text-center text-[11px] font-medium text-[var(--panel-muted)]">
+          <LoaderCircle className="h-5 w-5 animate-spin text-[var(--accent)]" />
+          Loading source attributes…
+        </div>
+      ) : null}
+
+      {error ? (
+        <div className="grid gap-3 rounded-sm border border-[#d98b86] bg-[#fff1ef] px-3 py-3 text-[11px] leading-relaxed text-[#9e241d]">
+          <span>{error}</span>
+          <button
+            type="button"
+            className="h-8 justify-self-start rounded-sm border border-[#b8322a] bg-white px-3 text-[10px] font-semibold text-[#9e241d] hover:bg-[#fff8f7]"
+            onClick={onRetry}
+          >
+            Retry
+          </button>
+        </div>
+      ) : null}
+
+      {details ? (
+        <>
+          <label className="flex h-9 items-center gap-2 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2.5 focus-within:border-[var(--accent)]">
+            <Search className="h-3.5 w-3.5 shrink-0 text-[var(--panel-muted)]" />
+            <input
+              type="search"
+              className="h-full min-w-0 flex-1 border-0 bg-transparent p-0 text-[11px] text-[var(--panel-text)] outline-none placeholder:text-[var(--panel-muted)] [&::-webkit-search-cancel-button]:appearance-none [&::-webkit-search-decoration]:appearance-none"
+              value={filter}
+              onChange={(event) => setFilter(event.target.value)}
+              placeholder="Find a field or value"
+              aria-label="Find a source field or value"
+            />
+          </label>
+          <div className="flex items-center justify-between gap-3 text-[9px] font-medium text-[var(--panel-muted)]">
+            <span>{fields.length.toLocaleString()} shown</span>
+            <span className="truncate" title={details.geometry.type}>{details.geometry.type || "Geometry available"}</span>
+          </div>
+          {fields.length ? (
+            <dl className="m-0 grid border-t border-[var(--panel-border)]">
+              {fields.map((field) => (
+                <div key={field.name} className="grid grid-cols-[minmax(112px,42%)_minmax(0,1fr)] gap-3 border-b border-[var(--panel-border)] py-2.5 last:border-b-0">
+                  <dt className="min-w-0 [overflow-wrap:anywhere] text-[10px] font-medium text-[var(--panel-muted)]" title={`${field.name} (${field.data_type})`}>
+                    {field.name}
+                  </dt>
+                  <dd className="m-0 min-w-0 select-text break-words text-[11px] font-medium leading-relaxed text-[var(--panel-text)]">
+                    {field.binary_omitted ? "[binary data omitted]" : detailedPropertyValue(field.value)}
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            <p className="m-0 rounded-sm border border-dashed border-[var(--panel-border)] px-3 py-5 text-center text-[11px] font-medium text-[var(--panel-muted)]">No matching source fields</p>
+          )}
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+function detailedPropertyValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") {
+    return "—";
+  }
+  return formatPropertyValue(value);
 }
 
 async function copyTextToClipboard(value: string): Promise<void> {
@@ -5615,8 +5895,15 @@ function identifyFeatureFromMapFeature(
   const featureLabel = featureDisplayLabel(feature.properties || {}, originalIndex);
   const sourceLayer = typeof feature.sourceLayer === "string" ? feature.sourceLayer : layer?.["source-layer"] || "";
   const featureId = feature.id === undefined || feature.id === null ? "" : String(feature.id);
+  const portalFeatureId = feature.properties?.__portal_feature_id;
+  const detailFeatureId = portalFeatureId === null || portalFeatureId === undefined ? "" : String(portalFeatureId).trim();
+  const isDirectDuckDbLayer = Boolean(layer?.metadata?.duckdb_geojson_source);
   return {
     ...selectedFeature,
+    detailLookup: sourceLayer && detailFeatureId && !isDirectDuckDbLayer
+      ? { datasetId: sourceLayer, featureId: detailFeatureId }
+      : undefined,
+    assetHistory: assetHistoryContext(sourceLayer, feature.properties || {}),
     featureLabel,
     featureSubtitle: sourceLayer || selectedFeature.layerType,
     geometry: mapFeatureGeometry(feature),
@@ -5638,6 +5925,8 @@ function selectedFeatureFromIdentifyFeature(feature: IdentifyFeature): SelectedF
     layerLabel: feature.layerLabel,
     layerType: feature.layerType,
     properties: feature.properties,
+    detailLookup: feature.detailLookup,
+    assetHistory: feature.assetHistory,
   };
 }
 
@@ -5650,7 +5939,34 @@ function selectedFeatureFromSearchResult(result: AssetSearchResult): SelectedFea
     layerLabel: result.layer_name,
     layerType: result.geometry_type || result.kind,
     properties: [matchEntry, ...properties.filter(([key]) => key !== result.match_field)],
+    assetHistory: assetHistoryContext(result.table_name || result.dataset_id, result.properties || {}),
   };
+}
+
+function assetHistoryContext(
+  sourceLayer: string,
+  properties: Record<string, unknown>,
+): SelectedFeature["assetHistory"] {
+  const normalizedLayer = String(sourceLayer || "").trim().toLowerCase();
+  const layerTypes: Array<[string[], 'structure' | 'pipe' | 'channel']> = [
+    [["stormstructure_pt", "stormstructure_1_pt", "active_structures"], "structure"],
+    [["stormpipes_ln", "stormpipes_1_ln", "active_pipes"], "pipe"],
+    [["stormdrainage_ln", "stormdrainage_1_ln", "active_drainages"], "channel"],
+  ];
+  const assetType = layerTypes.find(([aliases]) => aliases.some((alias) => normalizedLayer.includes(alias)))?.[1];
+  if (!assetType) {
+    return undefined;
+  }
+  const propertyLookup = new Map(Object.entries(properties).map(([key, value]) => [key.toLowerCase(), value]));
+  const candidates = [
+    propertyLookup.get("itpipe_assetid"),
+    propertyLookup.get("itpipes_asset_id"),
+    propertyLookup.get("entityuid"),
+    propertyLookup.get("entity_uid"),
+    propertyLookup.get(assetType === "structure" ? "node_id" : assetType === "pipe" ? "pipe_id" : "chan_id"),
+  ];
+  const assetId = candidates.map((value) => String(value ?? "").trim()).find(Boolean);
+  return assetId ? { assetId, assetType } : undefined;
 }
 
 function selectedFeatureFromRiskTopListItem(item: RiskTopListItem): SelectedFeature {

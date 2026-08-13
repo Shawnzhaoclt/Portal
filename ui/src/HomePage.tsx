@@ -56,8 +56,14 @@ import {
 import ThemeToggle from './ThemeToggle'
 import type { AppTheme } from './theme'
 import './HomePage.css'
-import { getDesktopContext, isDesktopRuntime } from './desktop/runtime'
+import {
+  getDataCacheStatus,
+  getDesktopContext,
+  isDesktopRuntime,
+  type DataCacheStatus,
+} from './desktop/runtime'
 import { appConfirm } from './components/messageDialogService'
+import { formatDateTime } from './lib/dateTime'
 import {
   clearPortalTestAccess,
   savePortalTestAccess,
@@ -99,6 +105,8 @@ const THUMBNAIL_ASSETS = import.meta.glob([
   './assets/portal-thumbnails/proactive-team-cctv-review-dark.png',
   './assets/portal-thumbnails/stm-risk-map.png',
   './assets/portal-thumbnails/stm-risk-map-dark.png',
+  './assets/portal-thumbnails/storm-water-asset-history.png',
+  './assets/portal-thumbnails/storm-water-asset-history-dark.png',
   './assets/portal-thumbnails/weekly-time-reporting.png',
   './assets/portal-thumbnails/weekly-time-reporting-dark.png',
 ], {
@@ -672,6 +680,13 @@ function roleText(role: PortalRole) {
   return 'User'
 }
 
+function formatDataBytes(bytes: number) {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
+}
+
 function isManagementRole(role: PortalRole) {
   return role === 'admin' || role === 'system_admin'
 }
@@ -803,12 +818,16 @@ function AboutPortalDialog({
   loading,
   error,
   desktopRuntime,
+  dataCacheStatus,
+  dataCacheError,
   onClose,
 }: {
   version: string
   loading: boolean
   error: string
   desktopRuntime: boolean
+  dataCacheStatus: DataCacheStatus | null
+  dataCacheError: string
   onClose: () => void
 }) {
   useEffect(() => {
@@ -848,6 +867,44 @@ function AboutPortalDialog({
           </div>
         </div>
         {error ? <div className="home-test-access-error" role="alert">{error}</div> : null}
+        {desktopRuntime ? (
+          <section className="home-about-data-sources" aria-label="Local data sources">
+            <div className="home-about-data-summary">
+              <div>
+                <span>Data sources</span>
+                <strong>{dataCacheError || dataCacheStatus?.lastError
+                  ? 'Update needs attention'
+                  : dataCacheStatus?.updating
+                    ? 'Updating in background'
+                    : dataCacheStatus?.offline
+                      ? 'Freshness not checked — offline'
+                      : dataCacheStatus
+                        ? 'Data is current'
+                        : 'Checking data status'}</strong>
+              </div>
+              <div><span>Active</span><strong>{dataCacheStatus?.activeSources ?? '—'}</strong></div>
+              <div><span>Local cache</span><strong>{dataCacheStatus ? formatDataBytes(dataCacheStatus.totalCacheBytes) : '—'}</strong></div>
+            </div>
+            {dataCacheError || dataCacheStatus?.lastError ? <div className="home-test-access-error" role="alert">{dataCacheError || dataCacheStatus?.lastError}</div> : null}
+            {dataCacheStatus?.sources?.length ? (
+              <div className="home-about-data-table" role="region" aria-label="Active local data versions">
+                <table>
+                  <thead><tr><th>Source</th><th>Cycle</th><th>Active</th><th>Available</th><th>Validated</th><th>Size</th></tr></thead>
+                  <tbody>{dataCacheStatus.sources.map((source) => (
+                    <tr key={source.id}>
+                      <td><strong>{source.displayName}</strong><small>{source.id}</small></td>
+                      <td>{source.updateClass || 'event-driven'}</td>
+                      <td title={source.activeVersion}>{source.activeVersion}</td>
+                      <td title={source.remoteVersion}>{source.remoteVersion === source.activeVersion ? 'Current' : source.remoteVersion || 'Not checked'}</td>
+                      <td>{formatDateTime(source.validatedAtEpoch ? source.validatedAtEpoch * 1_000 : null)}</td>
+                      <td>{formatDataBytes(source.sizeBytes)}</td>
+                    </tr>
+                  ))}</tbody>
+                </table>
+              </div>
+            ) : null}
+          </section>
+        ) : null}
         <p>Charlotte-Mecklenburg Storm Water Services desktop portal for business data, operational resources, and review workflows.</p>
         <div className="home-test-access-actions">
           <button type="button" autoFocus onClick={onClose}>Close</button>
@@ -982,6 +1039,8 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [applicationVersion, setApplicationVersion] = useState('')
   const [applicationVersionLoading, setApplicationVersionLoading] = useState(false)
   const [applicationVersionError, setApplicationVersionError] = useState('')
+  const [dataCacheStatus, setDataCacheStatus] = useState<DataCacheStatus | null>(null)
+  const [dataCacheError, setDataCacheError] = useState('')
 
   useEffect(() => {
     if (!desktopRuntime) return
@@ -999,6 +1058,28 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
         if (!cancelled) setApplicationVersionLoading(false)
       })
     return () => { cancelled = true }
+  }, [desktopRuntime])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    let cancelled = false
+    const refresh = () => {
+      getDataCacheStatus()
+        .then((status) => {
+          if (cancelled) return
+          setDataCacheStatus(status)
+          setDataCacheError('')
+        })
+        .catch((error) => {
+          if (!cancelled) setDataCacheError(error instanceof Error ? error.message : 'Could not read local data status.')
+        })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 3000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
   }, [desktopRuntime])
 
   useEffect(() => {
@@ -1516,6 +1597,8 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
           loading={applicationVersionLoading}
           error={applicationVersionError}
           desktopRuntime={desktopRuntime}
+          dataCacheStatus={dataCacheStatus}
+          dataCacheError={dataCacheError}
           onClose={() => setAboutOpen(false)}
         />
       ) : null}

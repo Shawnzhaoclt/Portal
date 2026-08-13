@@ -156,9 +156,12 @@ G:\Strategic Planning\Planning\stm_risk_data\intermediate
 Current registered sources include:
 
 - `amteam\amteam.duckdb`
+- `citypipes\citypipes.db`
 - `cityworks\cityworks.db`
+- `hydraulics\hydraulics.db`
 - `inventory\inventory.db`
 - `itpipes\itpipes.db`
+- `planning\planning.db`
 - `proactive\proactive.duckdb`
 - `prioritypipes\prioritypipes.db`
 - `riskranking\riskranking.db`
@@ -182,22 +185,65 @@ databases_local\portal\versions\portal_sources_<version>.sqlite3
 ```
 
 The central manifest registers the currently published immutable SQLite version as a
-logical source. Portal Desktop downloads that version into the same managed local
-cache used for the other source data.
+logical source. This source is the one direct-network exception to the Desktop cache:
+
+- the published database remains below 100 MB and is rebuilt approximately every five
+  minutes;
+- Desktop reads `portal_sources.current.json` directly from the shared drive and opens
+  the referenced immutable SQLite version read-only;
+- every database operation resolves the pointer manifest again, so a running Desktop
+  session can use a newly published snapshot without restarting;
+- an already-open request may finish against its original immutable snapshot, while
+  the next request uses the newly active version;
+- if the shared drive is unavailable, resources backed by `portal.serving` report that
+  their live serving data is unavailable. They do not use a stale cached copy.
+
+The Manager must publish a new version completely and atomically replace the pointer
+manifest only after validation. It retains enough previous immutable versions for
+requests that started immediately before a five-minute publication switch.
 
 ### 4.6 `system.db`
 
 `system.db` is event-driven rather than daily or weekly:
 
 - Portal Manager owns the authoritative writable database.
-- Manager publishes a verified read-only Desktop copy.
-- The release manifest carries its content version, checksum, schema fingerprint, and
+- A System Admin publishes it from **Portal Administration > System Catalog**.
+- Publication requires no software version or manually entered data version.
+- Manager publishes a verified read-only Desktop copy through the same central data
+  publication manifest used by DuckDB and PMTiles sources.
+- The data publisher generates the immutable content version from publication time and
+  checksum; unchanged content retains the existing version.
+- The data manifest carries its content version, checksum, schema fingerprint, and
   compatibility information.
 - Desktop must activate a required `system.db` update before user authentication.
 - Desktop must not replace `system.db` silently after authentication in the same
   session.
-- A packaged, compatible bootstrap copy remains available for installation and
-  recovery, subject to the release compatibility rules.
+- A packaged, compatible copy remains available for installation and recovery in
+  the single software release manifest.
+- Portal software releases remain separate: executable and full-package releases use
+  semantic software versions, while `system.db` publication does not update the
+  software release manifest.
+
+### 4.6 Unified software release manifest
+
+Portal software has one semantic version sourced from the built package `VERSION`
+file. Portal Manager does not maintain separate package, current-release, and
+bootstrap version numbers. It publishes one atomic `portal-release.json` containing:
+
+- `version`: the single software version;
+- `updateMode`: `portal-exe` or `full`, indicating what an existing installation
+  replaces;
+- `payload`: the verified update artifact used by existing installations;
+- `installationPayload`: a verified complete ZIP used for installation, repair, and
+  recovery;
+- `preservePaths: ["data"]`: a declarative record of the protected data-sync folder.
+
+The complete installation ZIP is produced for every release. The publisher excludes
+the top-level `data` directory, and the updater independently refuses any target under
+`%LOCALAPPDATA%\StormWaterPortal\data`. A full update may replace
+`%LOCALAPPDATA%\StormWaterPortal\app` and managed configuration, but it must never
+delete, overwrite, roll back, or package data-sync content. The manifest is committed
+only after both referenced artifacts and their SHA-256 values have been generated.
 
 ## 5. Central Configuration
 
@@ -214,16 +260,51 @@ not physical G-drive paths.
     "remoteManifest": "${PORTAL_SHARED_DATA_ROOT}/databases_local/portal-data.current.json",
     "localRoot": "${PORTAL_DATA_ROOT}/data/source-cache",
     "checkPolicy": "startup-only",
+    "directNetworkSourceIds": ["portal.serving"],
     "gracePeriodDays": 7,
     "maximumConcurrentDownloads": 1,
     "retainActiveVersions": 1,
-    "resumePartialDownloads": true
+    "resumePartialDownloads": true,
+    "minimumStartupFreeBytes": 16106127360,
+    "diskSafetyReserveBytes": 1073741824,
+    "stagingRecoveryHours": 72
   }
 }
 ```
 
 `${PORTAL_SHARED_DATA_ROOT}` is defined once by the application configuration. Source
 scripts and resources must not embed the full G-drive path in code.
+
+Cache-backed Desktop settings declare a logical source ID for every DuckDB,
+`system.db`, PMTiles, COG, and terrain source. Their optional physical fallback values
+are confined to `${PORTAL_DATA_ROOT}/data/source-cache`; they must never point to
+`${PORTAL_SHARED_DATA_ROOT}`. The shared root remains valid for the central publication
+manifest, explicitly network-owned coordination data, and the single
+`portal.serving` direct-network exception. The portable build validates this rule,
+rejects any other direct-network source, and fails if a cache-backed database or
+PMTiles setting reintroduces a shared-drive fallback.
+
+`dataSources.portalSources` retains logical ID `portal.serving`, declares
+`accessMode: direct-network`, and points to:
+
+```text
+${PORTAL_SHARED_DATA_ROOT}/databases_local/portal/portal_sources.current.json
+```
+
+The same ID appears in `dataCache.directNetworkSourceIds`, which prevents the generic
+cache manager from downloading or reporting this source as a locally active version.
+
+Before reading the remote manifest or starting authentication, Portal checks the drive
+containing `${PORTAL_DATA_ROOT}`. Startup is blocked when less than 15 GB is free, and
+the splash screen tells the user to free disk space before retrying. Per-download disk
+checks continue to reserve the configured safety margin in addition to this startup
+minimum.
+
+`Download-Portal.bat` is an explicit bootstrap refresh. If the local installation
+already exists, every corresponding packaged application and configuration file is
+overwritten from the verified full bundle. User-owned files below
+`%LOCALAPPDATA%\StormWaterPortal\data`, including `stormwater.db` and cached source
+versions, are outside the package and remain intact.
 
 ### 5.2 Remote publication manifest
 
@@ -658,7 +739,7 @@ resolve(source_id) -> {
 }
 ```
 
-The resolver:
+For cache-backed sources, the resolver:
 
 - reads only the active local cache manifest;
 - validates that the path remains inside the managed cache;
@@ -667,6 +748,18 @@ The resolver:
 - supplies local DuckDB/SQLite paths to Rust and Python;
 - never returns the remote G-drive path as a runtime fallback;
 - exposes source status for diagnostics and the UI.
+
+`portal.serving` does not use this local resolver. The authoritative Desktop
+configuration sets `PORTAL_SOURCES_MANIFEST` to the shared-drive pointer manifest.
+The SQLite snapshot helper reads that manifest for each operation and opens its current
+immutable database with `mode=ro` and `immutable=1`.
+
+In Desktop mode, resolved cache paths overwrite inherited process or machine
+environment variables for cache-backed sources. This prevents an obsolete environment
+variable from redirecting a resource to a former G-drive database. PMTiles and terrain
+requests resolve the active local manifest by logical source/file identity and return a
+source-unavailable response if no verified local version exists; they do not open the
+configured remote publication file directly.
 
 Existing resource settings keep logical table and layer mappings, but physical database
 and archive paths move to the central source registry.
@@ -836,7 +929,12 @@ accepts a producer ID, release group, and producer-owned output definition.
 Portal Manager provides administrative visibility and publication controls:
 
 - show source groups, versions, last publication, validation, and failures;
-- publish the authoritative Desktop `system.db` release;
+- provide a System Admin-only **System Catalog** page that publishes the authoritative
+  `system.db` as the logical `system.catalog` data source;
+- generate the catalog data version automatically and never request a software or
+  manually authored version number;
+- copy and verify the read-only Desktop bootstrap catalog independently of the
+  software release workflow;
 - validate central manifest and source availability;
 - expose scheduled workflow results;
 - never manually edit generated version IDs.
@@ -909,7 +1007,8 @@ React:
 4. Add STM Risk Step 1100 after Step 1000 and publish the configured
    `stm-risk-intermediate` fragment.
 5. Integrate producer-fragment publication with terrain, Portal serving SQLite, and
-   Manager `system.db` workflows.
+   the Manager **System Catalog** action. Remove `system.db` from semantic software
+   release update types.
 6. Add Portal Manager source-publication status, fragment ownership, incomplete
    transaction recovery, and validation.
 7. Implement the Tauri `DataCacheManager`, local manifest, staging, validation,
@@ -987,14 +1086,19 @@ The design is complete when all of the following are verified:
 7. A newer release within grace downloads sequentially in the background.
 8. Downloads show accurate byte and overall progress and never expose partial files.
 9. Activation groups switch atomically.
-10. Every resource reads the latest active local version through the central resolver.
+10. Every cache-backed resource reads the latest active local version through the
+    central resolver; `portal.serving` reads the latest direct-network version through
+    its atomic pointer manifest.
 11. Open resources remain pinned to their original source snapshot until refresh or
    close.
-12. Valid local data supports startup when the G drive is unavailable.
-13. No resource silently falls back to a direct G-drive runtime path.
+12. Valid local data supports startup when the G drive is unavailable; only resources
+    requiring live `portal.serving` data are unavailable while disconnected.
+13. No cache-backed resource silently falls back to a direct G-drive runtime path, and
+    `portal.serving` is the only permitted direct-network exception.
 14. Only the newest active version remains after leases and deferred cleanup finish.
-15. `system.db` is published and consumed read-only; `stormwater.db` remains local and
-    writable.
+15. `system.db` is published from the Manager System Catalog page without a software
+    version, registered as `system.catalog`, and consumed read-only; `stormwater.db`
+    remains local and writable.
 16. The Manager task publishes an independent daily mirror release on every successful
     run.
 17. The weekly SDW DuckDB and four vector PMTiles archives always publish and activate
@@ -1010,7 +1114,8 @@ The design is complete when all of the following are verified:
 
 ## 23. Final Architectural Decision
 
-Portal uses a **manifest-driven, startup-checked, local immutable source-data cache**.
+Portal uses a **manifest-driven, startup-checked, local immutable source-data cache**
+with one explicit direct-network source.
 The existing fixed-name G-drive data products remain authoritative and continue to be
 maintained by their scheduled Python workflows. Publication metadata assigns immutable
 content versions without forcing those source files to move or be renamed. Each
@@ -1019,7 +1124,9 @@ fragment. A shared Portal utility merges those fragments into the central Deskto
 manifest under a short transaction lock. Portal Manager publishes independent daily
 mirror and Saturday SDW/map releases, while STM Risk publishes its intermediate-data
 release in Step 1100 only after Step 1000 succeeds. Desktop downloads validated
-versions to its local data folder, activates them atomically, and serves every resource
-through one logical resolver. This provides local performance, offline resilience,
-controlled freshness, recoverable concurrent publication, and consistent multi-file
-releases without changing ownership of the established data pipelines.
+cache-backed versions to its local data folder and activates them atomically. The
+sub-100-MB, five-minute `portal.serving` publication remains on the shared drive and is
+resolved through its atomic pointer manifest for each operation. This provides local
+performance for large data, current serving-table results, controlled freshness,
+recoverable concurrent publication, and consistent multi-file releases without
+changing ownership of the established data pipelines.

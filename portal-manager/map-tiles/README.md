@@ -20,6 +20,10 @@ Every published feature includes the queryable string property
 (`OBJECTID`, numbered `OBJECTID_*`, `FID`, or `OID`) and never from a business
 identifier. If a source view has no unique internal row ID, the builder emits a
 deterministic publication hash and records that strategy in the manifest.
+Each layer manifest also records its configured source ID, source table, geometry
+column, source internal-ID column, and hash inputs. Portal Desktop uses this trusted
+metadata for its on-demand second-stage feature-details lookup against the matching
+active local DuckDB; paths and table names never come from the browser.
 
 The source DuckDB is never copied to local storage. Only disposable conversion
 files are written under the configured local temporary directory. If the packaged

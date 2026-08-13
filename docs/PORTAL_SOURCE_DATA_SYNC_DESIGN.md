@@ -155,7 +155,22 @@ older query implementation.
 The active snapshot is never edited in place. A failed run leaves both the active
 database and manifest unchanged.
 
-## 5.1 Manager Schedule Configuration
+### 5.1 Desktop consumption
+
+`portal.serving` is the only Portal Desktop data source read directly from the shared
+drive. Its verified immutable database is less than 100 MB and is republished on the
+configured short interval, normally every five minutes. Desktop resolves
+`portal_sources.current.json` for each serving-data operation and opens the referenced
+SQLite version read-only. It does not copy this source into the general local data
+cache. Large DuckDB, PMTiles, terrain, and system-catalog sources continue to use the
+versioned local cache.
+
+The manifest replacement remains atomic. A request that already opened the previous
+immutable database may finish normally; the next request resolves and opens the new
+version. Shared-drive loss affects only resources that require this live serving
+database and must be reported explicitly rather than masked by stale data.
+
+## 5.2 Manager Schedule Configuration
 
 The Manager Source Data page exposes the scheduler's `schedule.intervalMinutes`
 setting as a validated interval control. Administrators may select any whole-minute

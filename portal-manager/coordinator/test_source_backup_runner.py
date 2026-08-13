@@ -105,6 +105,16 @@ class SourceBackupRunnerTests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
+        self.data_publication = self.root / "data-publication"
+        self.data_publication.mkdir()
+        (self.data_publication / "publish_data_versions.py").write_text(
+            "print('published data versions')\n",
+            encoding="utf-8",
+        )
+        (self.data_publication / "publication.settings.json").write_text(
+            json.dumps({"sharedDataRoot": str(self.root), "producers": {}}),
+            encoding="utf-8",
+        )
         self.settings = self.root / "workstation-manager.settings.json"
         self.settings.write_text(
             json.dumps(
@@ -114,6 +124,9 @@ class SourceBackupRunnerTests(unittest.TestCase):
                     "sourceBackupWeekday": "SAT",
                     "mapTilesDirectory": str(self.map_tiles),
                     "mapTilesSettingsFile": "pmtiles.settings.json",
+                    "dataPublicationDirectory": str(self.data_publication),
+                    "dataPublicationScript": "publish_data_versions.py",
+                    "dataPublicationSettingsFile": "publication.settings.json",
                 }
             ),
             encoding="utf-8",
@@ -193,8 +206,11 @@ class SourceBackupRunnerTests(unittest.TestCase):
             [
                 "backup_duckdb_files.py",
                 "clone_sqlserver_to_duckdb.py",
+                "publish_data_versions.py",
                 "clone_spatial_data_warehouse_to_duckdb.py",
                 "build_pmtiles_from_duckdb.py",
+                "publish_data_versions.py",
+                "publish_data_versions.py",
             ],
         )
         self.assertEqual(result["runs"][0]["status"], "succeeded")

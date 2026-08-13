@@ -229,6 +229,51 @@
   gap: 10px;
 }
 
+.management-system-catalog-panel .management-panel-heading > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.management-system-catalog-panel .management-panel-heading h2,
+.management-system-catalog-panel .management-panel-heading p,
+.management-system-catalog-note {
+  margin: 0;
+}
+
+.management-system-catalog-panel .management-panel-heading p,
+.management-system-catalog-note {
+  color: #586a7d;
+}
+
+.management-system-catalog-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid #d6dee8;
+}
+
+.management-system-catalog-summary > div {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-right: 1px solid #d6dee8;
+}
+
+.management-system-catalog-summary > div:last-child {
+  border-right: 0;
+}
+
+.management-system-catalog-summary span {
+  color: #687586;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.management-system-catalog-note {
+  padding: 14px 16px;
+}
+
 .management-status,
 .management-error,
 .management-warning {
@@ -1662,8 +1707,14 @@
 
   .holiday-calendar-toolbar,
   .holiday-calendar-summary,
-  .holiday-entry-form {
+  .holiday-entry-form,
+  .management-system-catalog-summary {
     grid-template-columns: 1fr;
+  }
+
+  .management-system-catalog-summary > div {
+    border-right: 0;
+    border-bottom: 1px solid #d6dee8;
   }
 
   .holiday-calendar-actions {

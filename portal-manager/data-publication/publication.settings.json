@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "sharedDataRoot": "G:/Strategic Planning/Planning/stm_risk_data",
+  "centralManifest": "databases_local/portal-data.current.json",
+  "publicationsDirectory": "databases_local/publications",
+  "compatibility": {
+    "minimumAppVersion": "0.1.0"
+  },
+  "producers": {
+    "manager-daily-mirrors": {
+      "fragment": "manager-daily-mirrors.current.json",
+      "sources": [
+        {"id":"mirror.virt-sde-stm","displayName":"STM inventory mirror","path":"databases_local/virt_sde_01_stm.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":20,"readOnly":true},
+        {"id":"mirror.virt-sdw-stm","displayName":"STM warehouse mirror","path":"databases_local/virt_sdw_01_stm.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":21,"readOnly":true},
+        {"id":"mirror.virt-sdw-sdw","displayName":"Spatial warehouse mirror","path":"databases_local/virt_sdw_01_sdw.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":22,"readOnly":true},
+        {"id":"mirror.virt-sdw-sdw-tableau","displayName":"Tableau warehouse mirror","path":"databases_local/virt_sdw_01_sdw_tableau.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":23,"readOnly":true},
+        {"id":"mirror.cityworks-workorder","displayName":"Cityworks work-order mirror","path":"databases_local/myrs_cwdbprd_1_swpt_cityworks_db.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":24,"readOnly":true},
+        {"id":"mirror.cityworks-spatial","displayName":"Cityworks spatial mirror","path":"databases_local/myrs_cwdbprd_1_stw_cityworks_sd.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":25,"readOnly":true},
+        {"id":"mirror.itpipes","displayName":"ITPipes production mirror","path":"databases_local/itpipes_stormwater_prod.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"manager-daily-mirrors","desktopEnabled":true,"priority":26,"readOnly":true}
+      ]
+    },
+    "manager-weekly-sdw-map": {
+      "fragment": "manager-weekly-sdw-map.current.json",
+      "sources": [
+        {"id":"mirror.sdw-spatial","displayName":"Spatial Data Warehouse map mirror","path":"databases_local/virt_sdw_01_sdw_spatial_warehouse.duckdb","format":"duckdb","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":30,"readOnly":true},
+        {"id":"map.core-storm","displayName":"Core storm map archive","path":"databases_local/tiles/portal_core_storm.pmtiles","format":"pmtiles-vector","sidecar":"portal_core_storm.pmtiles.manifest.json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":31,"readOnly":true},
+        {"id":"map.property-surfaces","displayName":"Property and surfaces map archive","path":"databases_local/tiles/portal_property_surfaces.pmtiles","format":"pmtiles-vector","sidecar":"portal_property_surfaces.pmtiles.manifest.json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":32,"readOnly":true},
+        {"id":"map.planning-projects","displayName":"Planning and projects map archive","path":"databases_local/tiles/portal_planning_projects.pmtiles","format":"pmtiles-vector","sidecar":"portal_planning_projects.pmtiles.manifest.json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":33,"readOnly":true},
+        {"id":"map.transport-reference","displayName":"Transportation and reference map archive","path":"databases_local/tiles/portal_transport_reference.pmtiles","format":"pmtiles-vector","sidecar":"portal_transport_reference.pmtiles.manifest.json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":34,"readOnly":true},
+        {"id":"map.core-storm.manifest","displayName":"Core storm map manifest","path":"databases_local/tiles/portal_core_storm.pmtiles.manifest.json","format":"json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":35,"readOnly":true,"sidecarFor":"map.core-storm"},
+        {"id":"map.property-surfaces.manifest","displayName":"Property map manifest","path":"databases_local/tiles/portal_property_surfaces.pmtiles.manifest.json","format":"json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":36,"readOnly":true,"sidecarFor":"map.property-surfaces"},
+        {"id":"map.planning-projects.manifest","displayName":"Planning map manifest","path":"databases_local/tiles/portal_planning_projects.pmtiles.manifest.json","format":"json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":37,"readOnly":true,"sidecarFor":"map.planning-projects"},
+        {"id":"map.transport-reference.manifest","displayName":"Transportation map manifest","path":"databases_local/tiles/portal_transport_reference.pmtiles.manifest.json","format":"json","updateClass":"weekly-saturday","activationGroup":"weekly-sdw-map","desktopEnabled":true,"priority":38,"readOnly":true,"sidecarFor":"map.transport-reference"}
+      ]
+    },
+    "stm-risk-intermediate": {
+      "fragment": "stm-risk-intermediate.current.json",
+      "sources": [
+        {"id":"intermediate.amteam","displayName":"Asset Management team data","path":"intermediate/amteam/amteam.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":50,"readOnly":true},
+        {"id":"intermediate.citypipes","displayName":"City pipes model data","path":"intermediate/citypipes/citypipes.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":51,"readOnly":true},
+        {"id":"intermediate.cityworks","displayName":"Cityworks risk data","path":"intermediate/cityworks/cityworks.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":52,"readOnly":true},
+        {"id":"intermediate.hydraulics","displayName":"Hydraulics model data","path":"intermediate/hydraulics/hydraulics.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":53,"readOnly":true},
+        {"id":"intermediate.inventory","displayName":"Inventory model data","path":"intermediate/inventory/inventory.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":54,"readOnly":true},
+        {"id":"intermediate.itpipes","displayName":"ITPipes risk data","path":"intermediate/itpipes/itpipes.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":55,"readOnly":true},
+        {"id":"intermediate.planning","displayName":"Planning model data","path":"intermediate/planning/planning.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":56,"readOnly":true},
+        {"id":"intermediate.prioritypipes","displayName":"Priority pipes model data","path":"intermediate/prioritypipes/prioritypipes.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":57,"readOnly":true},
+        {"id":"intermediate.proactive","displayName":"Proactive team data","path":"intermediate/proactive/proactive.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":58,"readOnly":true},
+        {"id":"intermediate.riskranking","displayName":"Risk ranking data","path":"intermediate/riskranking/riskranking.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":59,"readOnly":true}
+      ]
+    },
+    "portal-serving-data": {
+      "fragment": "portal-serving-data.current.json",
+      "sources": [
+        {"id":"portal.serving","displayName":"Portal serving database","pathManifest":"databases_local/portal/portal_sources.current.json","pathField":"database","format":"sqlite","updateClass":"event-driven","activationGroup":"portal-serving-data","desktopEnabled":true,"priority":10,"readOnly":true}
+      ]
+    },
+    "system-catalog": {
+      "fragment": "system-catalog.current.json",
+      "sources": [
+        {"id":"system.catalog","displayName":"Portal system catalog","path":"databases_local/system/system.db","format":"sqlite","updateClass":"event-driven","activationGroup":"system-catalog","desktopEnabled":true,"requiredAtStartup":true,"priority":1,"readOnly":true}
+      ]
+    },
+    "terrain": {
+      "fragment": "terrain.current.json",
+      "sources": [
+        {"id":"terrain.dem","displayName":"Mecklenburg elevation COG","path":"databases_local/tiles/mecklenburg_dem.tif","format":"cog","updateClass":"multi-year","activationGroup":"terrain","desktopEnabled":true,"priority":40,"readOnly":true},
+        {"id":"terrain.pmtiles","displayName":"Mecklenburg terrain archive","path":"databases_local/tiles/mecklenburg_terrain.pmtiles","format":"pmtiles-terrain","updateClass":"multi-year","activationGroup":"terrain","desktopEnabled":true,"priority":41,"readOnly":true}
+      ]
+    }
+  }
+}

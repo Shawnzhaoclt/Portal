@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sqlite3
+import subprocess
 import sys
 import time
 import uuid
@@ -1014,6 +1015,31 @@ def publish_database(
             print(f"WARNING: Unable to remove old snapshot {expired}: {error}", file=sys.stderr)
 
 
+def publish_desktop_data_version(config: dict[str, Any], config_path: Path) -> None:
+    script_value = str(config.get("dataPublicationScript") or "").strip()
+    settings_value = str(config.get("dataPublicationSettings") or "").strip()
+    if not script_value or not settings_value:
+        raise RuntimeError(
+            "dataPublicationScript and dataPublicationSettings are required for serving-data publication."
+        )
+    script_path = resolved_path(script_value, config_path)
+    settings_path = resolved_path(settings_value, config_path)
+    command = [
+        sys.executable,
+        str(script_path),
+        "--config",
+        str(settings_path),
+        "--producer",
+        str(config.get("dataPublicationProducer") or "portal-serving-data"),
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    if completed.returncode != 0:
+        detail = (completed.stderr or completed.stdout or "Data publication failed.").strip()
+        raise RuntimeError(detail)
+    if completed.stdout.strip():
+        print(completed.stdout.strip())
+
+
 def run(args: argparse.Namespace) -> Path:
     config_path = args.config.expanduser().resolve()
     config = load_config(config_path)
@@ -1104,6 +1130,8 @@ def run(args: argparse.Namespace) -> Path:
             if not integrity or str(integrity[0]).casefold() != "ok":
                 raise RuntimeError(f"SQLite integrity check failed: {integrity}")
         publish_database(staging_path, final_path, manifest_path, keep_versions, dataset_results)
+        if not args.output_db:
+            publish_desktop_data_version(config, config_path)
     except Exception:
         staging_path.unlink(missing_ok=True)
         raise

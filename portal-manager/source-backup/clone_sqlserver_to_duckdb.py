@@ -7,9 +7,11 @@ tables used by the pv-stm 001_MAIN.bat batch chain.
 Runtime settings and database connections are loaded from
 ``clone_sqlserver_to_duckdb.json`` beside this script.
 
-Selected local DuckDB files are deleted and recreated before cloning so each run
-is a clean clone of the remote sources. The DuckDB spatial extension is loaded,
-and SQL Server geometry/geography columns are stored as DuckDB GEOMETRY columns.
+Each selected database group is rebuilt in a sibling staging database, validated,
+and atomically promoted over the fixed authoritative DuckDB path. A failed rebuild
+leaves the previous authoritative database untouched. The DuckDB spatial extension
+is loaded, and SQL Server geometry/geography columns are stored as DuckDB GEOMETRY
+columns.
 
 This script reads from SQL Server only. It does not write back to SQL Server.
 """
@@ -194,15 +196,28 @@ def _is_relative_to(path: Path, parent: Path) -> bool:
 
 def _reset_duckdb(output_root: Path, duckdb_name: str) -> Path:
     output_root.mkdir(parents=True, exist_ok=True)
-    db_path = output_root / duckdb_name
-    if db_path.suffix.lower() != ".duckdb" or not _is_relative_to(db_path, output_root):
-        raise RuntimeError(f"Refusing to delete unsafe DuckDB path: {db_path}")
+    live_path = output_root / duckdb_name
+    if live_path.suffix.lower() != ".duckdb" or not _is_relative_to(live_path, output_root):
+        raise RuntimeError(f"Refusing to stage unsafe DuckDB path: {live_path}")
+    db_path = live_path.with_name(f".{live_path.stem}.next-{os.getpid()}.duckdb")
 
     for candidate in [db_path, db_path.with_suffix(db_path.suffix + ".wal")]:
         if candidate.exists():
-            print(f"  reset_duckdb: removing existing {candidate}")
+            print(f"  reset_duckdb: removing abandoned staging file {candidate}")
             candidate.unlink()
     return db_path
+
+
+def _publish_staged_duckdb(staging_path: Path, live_path: Path, duckdb: Any) -> None:
+    with duckdb.connect(str(staging_path), read_only=True) as connection:
+        table_count = connection.execute(
+            "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'main'"
+        ).fetchone()[0]
+        if not table_count:
+            raise RuntimeError(f"Staged DuckDB contains no tables: {staging_path}")
+    os.replace(staging_path, live_path)
+    staging_path.with_suffix(staging_path.suffix + ".wal").unlink(missing_ok=True)
+    print(f"  published: {live_path} ({table_count} tables)")
 
 
 def _reset_filegdb(output_root: Path, gdb_path: Path) -> None:
@@ -690,6 +705,7 @@ def run_clone(
         try:
             with engine.connect() as sql_conn:
                 db_path = _reset_duckdb(output_root, database.duckdb_name)
+                live_path = output_root / database.duckdb_name
                 with duckdb.connect(str(db_path)) as duck_conn:
                     _install_load_spatial(duck_conn)
                     for item in grouped_items:
@@ -708,9 +724,15 @@ def run_clone(
                             group_failed = True
                             print(f"  failed: {item.qualified_name}: {exc}")
                             if not continue_on_error:
-                                return failures
+                                break
                 if not group_failed:
-                    cloned_db_paths.append(db_path)
+                    _publish_staged_duckdb(db_path, live_path, duckdb)
+                    cloned_db_paths.append(live_path)
+                else:
+                    db_path.unlink(missing_ok=True)
+                    db_path.with_suffix(db_path.suffix + ".wal").unlink(missing_ok=True)
+                    if not continue_on_error:
+                        return failures
         finally:
             engine.dispose()
 

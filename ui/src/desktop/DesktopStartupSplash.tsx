@@ -8,6 +8,7 @@ import {
   MAINTENANCE_START_HOUR,
 } from './maintenance'
 import './DesktopStartupSplash.css'
+import type { DataCacheProgress } from './runtime'
 
 const STARTUP_MESSAGES = [
   'Checking shared data',
@@ -17,6 +18,7 @@ const STARTUP_MESSAGES = [
 ]
 
 type DesktopStartupSplashProps = {
+  dataCacheProgress?: DataCacheProgress
   error?: string
   message?: string
   maintenance?: boolean
@@ -24,7 +26,20 @@ type DesktopStartupSplashProps = {
   onRetry?: () => void
 }
 
-export default function DesktopStartupSplash({ error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
+function formatBytes(value: number) {
+  if (value < 1024) return `${value} B`
+  if (value < 1024 ** 2) return `${(value / 1024).toFixed(1)} KB`
+  if (value < 1024 ** 3) return `${(value / 1024 ** 2).toFixed(1)} MB`
+  return `${(value / 1024 ** 3).toFixed(2)} GB`
+}
+
+function formatEta(seconds: number | null) {
+  if (seconds === null) return ''
+  if (seconds < 60) return `${seconds}s remaining`
+  return `${Math.ceil(seconds / 60)} min remaining`
+}
+
+export default function DesktopStartupSplash({ dataCacheProgress, error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
   const [maintenanceSecondsRemaining, setMaintenanceSecondsRemaining] = useState(MAINTENANCE_SPLASH_DURATION_SECONDS)
   const maintenanceStart = formatLocalClock(MAINTENANCE_START_HOUR * 60)
@@ -87,10 +102,24 @@ export default function DesktopStartupSplash({ error, message, maintenance = fal
           <>
             <LoaderCircle className="desktop-startup-spinner" aria-hidden="true" />
             <h2>Starting Portal</h2>
-            <p>{message ?? `${STARTUP_MESSAGES[messageIndex]}...`}</p>
-            <div className="desktop-startup-progress" aria-hidden="true">
-              <span />
-            </div>
+            <p>{dataCacheProgress?.message ?? message ?? `${STARTUP_MESSAGES[messageIndex]}...`}</p>
+            {dataCacheProgress ? (
+              <div className="desktop-cache-progress" aria-label={`Downloaded ${dataCacheProgress.completedBytes} of ${dataCacheProgress.totalBytes} bytes`}>
+                <div className="desktop-cache-progress-track">
+                  <span style={{ width: `${dataCacheProgress.totalBytes > 0 ? Math.min(100, dataCacheProgress.completedBytes / dataCacheProgress.totalBytes * 100) : 0}%` }} />
+                </div>
+                <div className="desktop-cache-progress-detail">
+                  <span>{dataCacheProgress.completedSources} of {dataCacheProgress.totalSources} files</span>
+                  <span>{formatBytes(dataCacheProgress.completedBytes)} of {formatBytes(dataCacheProgress.totalBytes)}</span>
+                  <span>{dataCacheProgress.bytesPerSecond > 0 ? `${formatBytes(dataCacheProgress.bytesPerSecond)}/s` : ''}</span>
+                  <span>{formatEta(dataCacheProgress.etaSeconds)}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="desktop-startup-progress" aria-hidden="true">
+                <span />
+              </div>
+            )}
           </>
         )}
       </section>

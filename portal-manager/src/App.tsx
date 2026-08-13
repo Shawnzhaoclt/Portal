@@ -260,10 +260,9 @@ type SchemaCatalog = {
 type PortalReleaseStatus = {
   portableRoot: string;
   releaseRoot: string;
-  packageVersion: string;
-  currentReleaseVersion?: string | null;
+  releaseVersion: string;
+  published: boolean;
   currentUpdateMode?: string | null;
-  bootstrapVersion?: string | null;
   portalExe: string;
   systemDb: string;
   desktopSystemDb: string;
@@ -443,6 +442,24 @@ type SourceBackupStatus = {
   state: Partial<SourceBackupRun> & { pid?: number };
   runs: SourceBackupRun[];
   archives: SourceBackupArchive[];
+  data_publication_available?: boolean;
+  data_publication_missing_files?: string[];
+  data_publication?: {
+    central_manifest: string;
+    central_manifest_available: boolean;
+    publication_id: string;
+    published_at_utc: string;
+    published_source_count: number;
+    prepared_transaction_count: number;
+    error: string;
+    producers: Array<{
+      producer: string;
+      producer_release_id: string;
+      published_at_utc: string;
+      source_count: number;
+      transaction_state: string;
+    }>;
+  };
 };
 
 type ConflictRecord = {
@@ -1274,31 +1291,31 @@ function RepositoryWorkspace({
 function ReleaseWorkspace({
   status,
   updateMode,
-  releaseVersion,
   busy,
   progress,
   success,
   setUpdateMode,
-  setReleaseVersion,
   publish,
 }: {
   status: PortalReleaseStatus | null;
-  updateMode: "system-db" | "portal-exe" | "full";
-  releaseVersion: string;
+  updateMode: "portal-exe" | "full";
   busy: boolean;
   progress: string;
   success: string;
-  setUpdateMode: (value: "system-db" | "portal-exe" | "full") => void;
-  setReleaseVersion: (value: string) => void;
+  setUpdateMode: (value: "portal-exe" | "full") => void;
   publish: () => void;
 }) {
-  const targeted = updateMode !== "full";
+  const publishedScope = status?.currentUpdateMode === "portal-exe"
+    ? "Portal.exe only"
+    : status?.currentUpdateMode === "full"
+      ? "Complete application"
+      : "-";
   return (
     <section className="release-workspace">
       <section className="metrics release-metrics" aria-label="Portal release status">
-        <div><span>PACKAGE VERSION</span><strong>{status?.packageVersion ?? "-"}</strong></div>
-        <div><span>CURRENT RELEASE</span><strong>{status?.currentReleaseVersion ?? "Not published"}</strong></div>
-        <div><span>BOOTSTRAP BUNDLE</span><strong>{status?.bootstrapVersion ?? "Not published"}</strong></div>
+        <div><span>RELEASE VERSION</span><strong>{status?.releaseVersion ?? "-"}</strong></div>
+        <div><span>PUBLICATION</span><strong>{status?.published ? "Published" : "Not published"}</strong></div>
+        <div><span>UPDATE SCOPE</span><strong>{publishedScope}</strong></div>
       </section>
 
       <section className="release-details">
@@ -1312,28 +1329,19 @@ function ReleaseWorkspace({
       <section className="release-controls">
         <div>
           <p className="eyebrow">PUBLISH UPDATE</p>
-          <h3>Select the exact update type</h3>
-          <p>Every publication refreshes the Desktop system.db from the authoritative Manager copy and makes the distributed copy read-only. A full release is required for the Python runtime, multiple files, or structural changes.</p>
+          <h3>Select what installed clients must replace</h3>
+          <p>Every release publishes one manifest and a complete installation package. Existing clients use the selected update scope. The data-sync folder is always preserved.</p>
         </div>
         <label>
-          Update type
+          Update scope
           <select value={updateMode} onChange={(event) => setUpdateMode(event.target.value as typeof updateMode)}>
-            <option value="system-db">System database only</option>
             <option value="portal-exe">Portal executable only</option>
-            <option value="full">Full portable folder</option>
+            <option value="full">Complete application</option>
           </select>
-        </label>
-        <label>
-          Release version
-          <input
-            value={releaseVersion}
-            placeholder={status?.packageVersion ?? "0.0.0"}
-            onChange={(event) => setReleaseVersion(event.target.value)}
-          />
         </label>
         <button
           className="primary-button"
-          disabled={busy || !status || (targeted && !releaseVersion.trim())}
+          disabled={busy || !status}
           onClick={publish}
         >
           <PackageCheck size={17} />
@@ -1729,6 +1737,13 @@ function SourceBackupWorkspace({
         <div><span>RETENTION</span><strong>{status?.retention_days ? `${status.retention_days} days` : "-"}</strong></div>
         <div><span>LATEST ARCHIVE</span><strong>{latestArchive ? formatTimestamp(latestArchive.modified_at) : "None"}</strong></div>
       </section>
+      <section className={`source-publication-summary ${status?.data_publication?.error || status?.data_publication?.prepared_transaction_count ? "attention" : ""}`}>
+        <div><span>DESKTOP DATA MANIFEST</span><strong>{status?.data_publication?.central_manifest_available ? "Published" : "Not published"}</strong></div>
+        <div><span>REGISTERED SOURCES</span><strong>{status?.data_publication?.published_source_count ?? "-"}</strong></div>
+        <div><span>LAST PUBLICATION</span><strong>{status?.data_publication?.published_at_utc ? formatTimestamp(status.data_publication.published_at_utc) : "-"}</strong></div>
+        <div><span>TRANSACTIONS</span><strong>{status?.data_publication?.prepared_transaction_count ? `${status.data_publication.prepared_transaction_count} needs recovery` : "Committed"}</strong></div>
+        {status?.data_publication?.error ? <p>{status.data_publication.error}</p> : null}
+      </section>
       <section className="source-backup-schedules">
         <article className="retention-controls scheduled-task-controls">
           <div className="retention-readout"><span>Daily workflow</span><strong>{status?.workflow_schedule?.state || "Checking"}</strong></div>
@@ -1910,8 +1925,7 @@ export function App() {
   const [repositoryNetworkRoot, setRepositoryNetworkRoot] = useState("");
   const [configuredRepositoryRoot, setConfiguredRepositoryRoot] = useState("");
   const [releaseStatus, setReleaseStatus] = useState<PortalReleaseStatus | null>(null);
-  const [releaseMode, setReleaseMode] = useState<"system-db" | "portal-exe" | "full">("full");
-  const [releaseVersion, setReleaseVersion] = useState("");
+  const [releaseMode, setReleaseMode] = useState<"portal-exe" | "full">("full");
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseProgress, setReleaseProgress] = useState("");
   const [releaseSuccess, setReleaseSuccess] = useState("");
@@ -2024,7 +2038,6 @@ export function App() {
     try {
       const response = await invoke<PortalReleaseStatus>("portal_release_status");
       setReleaseStatus(response);
-      setReleaseVersion((current) => current || response.packageVersion);
       setError("");
     } catch (reason) {
       setError(String(reason));
@@ -2529,10 +2542,9 @@ export function App() {
   };
 
   const publishRelease = async () => {
-    const version = releaseVersion.trim() || undefined;
-    const label = releaseMode === "system-db" ? "system database only" : releaseMode === "portal-exe" ? "Portal executable only" : "the full portable folder";
+    const label = releaseMode === "portal-exe" ? "Portal.exe only" : "the complete application";
     if (!(await appConfirm(
-      `Publish ${label} as release ${version ?? releaseStatus?.packageVersion ?? ""}?`,
+      `Publish release ${releaseStatus?.releaseVersion ?? ""} with update scope ${label}?`,
       { title: "Publish Portal release", kind: "warning", confirmLabel: "Publish release" },
     ))) {
       return;
@@ -2543,11 +2555,9 @@ export function App() {
     try {
       const response = await invoke<PortalReleaseStatus>("publish_portal_release", {
         updateMode: releaseMode,
-        releaseVersion: version,
       });
       setReleaseStatus(response);
-      setReleaseVersion(response.currentReleaseVersion ?? response.packageVersion);
-      setReleaseSuccess(`${response.currentUpdateMode ?? releaseMode} release ${response.currentReleaseVersion ?? response.packageVersion} is available at ${response.releaseRoot}.`);
+      setReleaseSuccess(`Release ${response.releaseVersion} is available at ${response.releaseRoot}.`);
       setError("");
     } catch (reason) {
       setError(String(reason));
@@ -2741,8 +2751,6 @@ export function App() {
           <ReleaseWorkspace
             busy={releaseBusy}
             progress={releaseProgress}
-            releaseVersion={releaseVersion}
-            setReleaseVersion={setReleaseVersion}
             setUpdateMode={setReleaseMode}
             status={releaseStatus}
             success={releaseSuccess}

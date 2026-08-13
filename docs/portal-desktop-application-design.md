@@ -777,6 +777,24 @@ Manager generates a deterministic internal hash from the source row and geometry
 The manifest records the source internal-ID column or generated strategy so the
 Desktop can resolve a selected tile feature back to the authoritative DuckDB row.
 
+Map identify follows a two-stage workflow. The first stage uses only the rendered
+PMTiles feature and opens the inspector immediately with the layer, geometry type,
+`feature_id`, and tile-published summary attributes. The second stage begins only
+when the user selects **Details**. It sends the trusted source-layer ID and reserved
+feature ID to the resource backend, which resolves the active PMTiles manifest and
+the matching active local DuckDB version. The backend then performs a parameterized,
+read-only lookup using the recorded internal-ID column or deterministic hash strategy.
+
+The full-details response includes every source field, including null values, except
+raw geometry values and binary payloads. Geometry metadata is returned separately;
+binary fields are identified as omitted. The inspector provides loading, retry, field
+search, and a return to the lightweight map summary. It must never accept a database
+path or table name from the browser, silently query a stale shared source, or fall
+back to a different data version when the active local source cannot be resolved.
+The Details action is available only for PMTiles features that contain
+`__portal_feature_id`; direct DuckDB GeoJSON layers already carry their query result
+and do not use this second lookup.
+
 Publication uses a staging location, validates every archive and manifest, then
 atomically switches the active version. The prior version remains available for
 rollback. Direct DuckDB source mappings are validated separately and are not inferred

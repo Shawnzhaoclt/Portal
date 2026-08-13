@@ -9,7 +9,7 @@ if not exist "%RELEASE_ROOT%\PortalUpdater.exe" (
   exit /b 1
 )
 
-"%RELEASE_ROOT%\PortalUpdater.exe" --bootstrap --manifest "portal-bootstrap.json" --release-root "%RELEASE_ROOT%" --restart
+"%RELEASE_ROOT%\PortalUpdater.exe" --bootstrap --manifest "portal-release.json" --release-root "%RELEASE_ROOT%" --restart
 if errorlevel 1 (
   echo.
   echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.

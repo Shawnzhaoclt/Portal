@@ -1,5 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
+import { listen } from '@tauri-apps/api/event'
 import { Toaster } from 'sonner'
 import './index.css'
 import { AppMessageDialogProvider } from './components/AppMessageDialog'
@@ -13,7 +14,9 @@ import {
   exitDesktopApplication,
   installPortalUpdate,
   isDesktopRuntime,
+  startDataCache,
   startDesktopSession,
+  type DataCacheProgress,
 } from './desktop/runtime'
 import { initializeClientSettings } from './desktop/settings'
 import {
@@ -43,6 +46,14 @@ function renderStartupError(error: unknown) {
         onExit={() => void exitDesktopApplication()}
         onRetry={() => window.location.reload()}
       />
+    </StrictMode>,
+  )
+}
+
+function renderDataCacheProgress(progress: DataCacheProgress) {
+  root.render(
+    <StrictMode>
+      <DesktopStartupSplash dataCacheProgress={progress} />
     </StrictMode>,
   )
 }
@@ -104,6 +115,14 @@ async function bootstrap() {
       const activeSessionRole = sessionManagementRole()
       clearManagementToken()
       await initializeClientSettings()
+      const unlisten = await listen<DataCacheProgress>('portal-data-cache-progress', (event) => {
+        if (!event.payload.background) renderDataCacheProgress(event.payload)
+      })
+      try {
+        await startDataCache()
+      } finally {
+        unlisten()
+      }
       const startup = await startDesktopSession<PortalUser>()
       const session = startup.session
       if (!session.token) throw new Error('Desktop sign-in did not return a Portal session token.')

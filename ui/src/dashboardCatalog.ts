@@ -50,6 +50,7 @@ export const CRITICAL_ASSET_TRACKING_ROUTE = '/dashboard_critical_asset_tracking
 export const GIS_FACILITY_ROUTE = '/map_critical_asset_facility'
 export const GIS_HISTORY_ROUTE = '/map_critical_asset_history'
 export const STM_RISK_MAP_ROUTE = '/map_stm_risk'
+export const STORM_WATER_ASSET_HISTORY_ROUTE = '/asset-history'
 export const PLANNING_PENDING_AIF_QA_ROUTE = '/tab_planning_pending_aif_qa'
 export const ADMIN_MANAGEMENT_ROUTE = '/admin_management'
 export const ACCOUNT_ROUTE = '/account'

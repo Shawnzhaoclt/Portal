@@ -79,6 +79,47 @@ export type SelectedFeature = {
   layerLabel: string;
   layerType: string;
   properties: Array<[string, string]>;
+  detailLookup?: {
+    datasetId: string;
+    featureId: string;
+  };
+  assetHistory?: {
+    assetId: string;
+    assetType: 'structure' | 'pipe' | 'channel';
+  };
+};
+
+export type FeatureDetailField = {
+  name: string;
+  data_type: string;
+  value: unknown;
+  binary_omitted?: boolean;
+};
+
+export type FeatureDetailsResponse = {
+  ok: boolean;
+  dataset_id: string;
+  feature_id: string;
+  archive: string;
+  archive_version: string;
+  source_id: string;
+  table: string;
+  feature_id_strategy: string;
+  geometry: {
+    column: string;
+    type: string;
+  };
+  fields: FeatureDetailField[];
+  field_count: number;
+  elapsed_ms: number;
+};
+
+export type AssetAssignmentResponse = {
+  asset_id: string;
+  status: 'assigned' | 'unassigned' | 'data_unavailable';
+  available: boolean;
+  source_version?: string;
+  published_at?: string | null;
 };
 
 export type AssetSearchResult = {

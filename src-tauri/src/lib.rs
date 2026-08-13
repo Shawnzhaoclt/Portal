@@ -14,6 +14,7 @@ use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, Stat
 use tauri::Manager;
 
 mod business_sync;
+mod data_cache;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::{ffi::OsStrExt, process::CommandExt};
@@ -605,7 +606,10 @@ fn configured_setting_string(
         })
 }
 
-fn expand_portal_setting_path(raw_path: &str, settings: &serde_json::Value) -> Result<PathBuf, String> {
+fn expand_portal_setting_path(
+    raw_path: &str,
+    settings: &serde_json::Value,
+) -> Result<PathBuf, String> {
     let application_root = installation_root()?.display().to_string();
     let data_root = local_data_root()?.display().to_string();
     let shared_root = configured_shared_data_root(settings)?.display().to_string();
@@ -648,12 +652,9 @@ fn validate_archive_name(name: &str) -> Result<(), String> {
 
 fn build_map_archive_registry() -> Result<MapArchiveRegistry, String> {
     let settings = load_client_settings()?;
-    let pmtiles_root = configured_setting_string(
-        &settings,
-        "/maps/pmtilesRoot",
-        "PORTAL_MAP_PMTILES_ROOT",
-    )
-    .ok_or_else(|| "Portal settings do not define maps.pmtilesRoot.".to_string())?;
+    let pmtiles_root =
+        configured_setting_string(&settings, "/maps/pmtilesRoot", "PORTAL_MAP_PMTILES_ROOT")
+            .ok_or_else(|| "Portal settings do not define maps.pmtilesRoot.".to_string())?;
     let pmtiles_root = expand_portal_setting_path(&pmtiles_root, &settings)?;
     let legacy_root = configured_setting_string(
         &settings,
@@ -662,14 +663,11 @@ fn build_map_archive_registry() -> Result<MapArchiveRegistry, String> {
     )
     .map(|value| expand_portal_setting_path(&value, &settings))
     .transpose()?;
-    let terrain_root = configured_setting_string(
-        &settings,
-        "/maps/terrainRoot",
-        "PORTAL_MAP_TERRAIN_ROOT",
-    )
-    .map(|value| expand_portal_setting_path(&value, &settings))
-    .transpose()?
-    .unwrap_or_else(|| pmtiles_root.clone());
+    let terrain_root =
+        configured_setting_string(&settings, "/maps/terrainRoot", "PORTAL_MAP_TERRAIN_ROOT")
+            .map(|value| expand_portal_setting_path(&value, &settings))
+            .transpose()?
+            .unwrap_or_else(|| pmtiles_root.clone());
 
     let mut archives = HashMap::new();
     if let Some(thematic) = settings
@@ -728,22 +726,52 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
             .expect("valid PMTiles protocol error response")
     };
     if request.method() != "GET" && request.method() != "HEAD" {
-        return Some(error_response(405, "PMTiles supports GET and HEAD only.".to_string()));
+        return Some(error_response(
+            405,
+            "PMTiles supports GET and HEAD only.".to_string(),
+        ));
     }
     if archive_name.is_empty()
         || Path::new(archive_name).components().count() != 1
-        || Path::new(archive_name).extension().and_then(|value| value.to_str()) != Some("pmtiles")
+        || Path::new(archive_name)
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("pmtiles")
     {
-        return Some(error_response(404, "PMTiles archive is not registered.".to_string()));
+        return Some(error_response(
+            404,
+            "PMTiles archive is not registered.".to_string(),
+        ));
     }
-    let registry = match map_archive_registry() {
-        Ok(registry) => registry,
-        Err(error) => return Some(error_response(500, error)),
-    };
-    let Some(path) = registry.archives.get(archive_name) else {
-        return Some(error_response(404, "PMTiles archive is not registered.".to_string()));
-    };
-    let metadata = match fs::metadata(path) {
+    let requested_version = request.uri().query().and_then(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .find_map(|(key, value)| (key == "v" && !value.is_empty()).then(|| value.into_owned()))
+    });
+    let path =
+        match data_cache::resolve_file_name_version(archive_name, requested_version.as_deref()) {
+            Ok(Some(path)) => path,
+            Ok(None) if data_cache::is_enabled() => {
+                return Some(error_response(
+                    404,
+                    format!("No active local version is available for {archive_name}."),
+                ))
+            }
+            Ok(None) => {
+                let registry = match map_archive_registry() {
+                    Ok(registry) => registry,
+                    Err(error) => return Some(error_response(500, error)),
+                };
+                let Some(path) = registry.archives.get(archive_name) else {
+                    return Some(error_response(
+                        404,
+                        "PMTiles archive is not registered.".to_string(),
+                    ));
+                };
+                path.clone()
+            }
+            Err(error) => return Some(error_response(500, error)),
+        };
+    let metadata = match fs::metadata(&path) {
         Ok(metadata) if metadata.is_file() => metadata,
         Ok(_) => {
             return Some(error_response(
@@ -754,7 +782,10 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
         Err(error) => {
             return Some(error_response(
                 404,
-                format!("PMTiles archive was not found: {} ({error})", path.display()),
+                format!(
+                    "PMTiles archive was not found: {} ({error})",
+                    path.display()
+                ),
             ))
         }
     };
@@ -769,7 +800,10 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
         modified.as_secs(),
         modified.subsec_nanos()
     );
-    if request.headers().get(header::IF_NONE_MATCH).and_then(|value| value.to_str().ok())
+    if request
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
         == Some(etag.as_str())
         && request.headers().get(header::RANGE).is_none()
     {
@@ -780,10 +814,10 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
                 .expect("valid PMTiles not-modified response"),
         );
     }
-    let immutable = request
-        .uri()
-        .query()
-        .is_some_and(|query| url::form_urlencoded::parse(query.as_bytes()).any(|(key, value)| key == "v" && !value.is_empty()));
+    let immutable = request.uri().query().is_some_and(|query| {
+        url::form_urlencoded::parse(query.as_bytes())
+            .any(|(key, value)| key == "v" && !value.is_empty())
+    });
     let cache_control = if immutable {
         "public, max-age=31536000, immutable"
     } else {
@@ -799,7 +833,11 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
     // of reading a multi-hundred-megabyte archive into one protocol buffer.
     let (start, end, status) = file_response_range(range_header, file_size, true);
     let length = if file_size == 0 { 0 } else { end - start + 1 };
-    let response_length = if request.method() == "HEAD" { file_size } else { length };
+    let response_length = if request.method() == "HEAD" {
+        file_size
+    } else {
+        length
+    };
     let mut builder = response_builder(status, Some("application/octet-stream"), None)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CACHE_CONTROL, cache_control)
@@ -823,7 +861,7 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
                 .expect("valid PMTiles HEAD response"),
         );
     }
-    let mut file = match File::open(path) {
+    let mut file = match File::open(&path) {
         Ok(file) => file,
         Err(error) => {
             return Some(error_response(
@@ -845,11 +883,7 @@ fn pmtiles_protocol_response(request: &HttpRequest<Vec<u8>>) -> Option<HttpRespo
             format!("Could not read PMTiles archive {}: {error}", path.display()),
         ));
     }
-    Some(
-        builder
-            .body(bytes)
-            .expect("valid PMTiles range response"),
-    )
+    Some(builder.body(bytes).expect("valid PMTiles range response"))
 }
 
 fn local_protocol_response(request: HttpRequest<Vec<u8>>) -> HttpResponse<Vec<u8>> {
@@ -1395,21 +1429,9 @@ fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-fn verify_shared_data_root(shared_root: &Path) -> Result<(), String> {
-    if !shared_root.is_dir() || fs::read_dir(shared_root).is_err() {
-        return Err(format!(
-            "The Portal shared data location is not accessible at:\n\n{}\n\nCheck that the configured shared drive is connected and accessible, then start Portal again.",
-            shared_root.display()
-        ));
-    }
-    Ok(())
-}
-
 fn startup_preflight() -> Result<DesktopStartupSession, String> {
     let settings = load_client_settings()?;
     let shared_root = configured_shared_data_root(&settings)?;
-    let shared_root_check = shared_root.clone();
-    let shared_check = thread::spawn(move || verify_shared_data_root(&shared_root_check));
 
     let windows_identity = windows_identity()?;
     env::set_var("PORTAL_WINDOWS_EMAIL", &windows_identity.email);
@@ -1426,9 +1448,6 @@ fn startup_preflight() -> Result<DesktopStartupSession, String> {
             "body": null
         }),
     );
-    shared_check
-        .join()
-        .map_err(|_| "The shared data availability check stopped unexpectedly.".to_string())??;
     let response = login_result?;
     let status = response
         .get("status")
@@ -1466,6 +1485,22 @@ async fn desktop_startup_session() -> Result<DesktopStartupSession, String> {
     tauri::async_runtime::spawn_blocking(startup_preflight)
         .await
         .map_err(|error| format!("Portal startup task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn data_cache_startup(
+    app: tauri::AppHandle,
+) -> Result<data_cache::DataCacheStartupResult, String> {
+    tauri::async_runtime::spawn_blocking(move || data_cache::startup(app))
+        .await
+        .map_err(|error| format!("Portal data-cache startup task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn data_cache_status() -> Result<data_cache::DataCacheStatus, String> {
+    tauri::async_runtime::spawn_blocking(data_cache::status)
+        .await
+        .map_err(|error| format!("Portal data-cache status task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -1835,6 +1870,8 @@ pub fn run() {
             local_protocol_response(request)
         })
         .invoke_handler(tauri::generate_handler![
+            data_cache_startup,
+            data_cache_status,
             desktop_startup_session,
             exit_application,
             check_portal_update,

@@ -7,6 +7,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from portal.app.core.source_cache import resolve_source
+
 _TOKEN = re.compile(r"\$\{([A-Z][A-Z0-9_]*)\}")
 
 _AIF_SOURCE_ENVIRONMENT_KEYS = frozenset(
@@ -31,6 +33,19 @@ _MAP_SOURCE_ENVIRONMENT_KEYS = frozenset(
         "PORTAL_MAP_TERRAIN_ROOT",
         "PORTAL_MAP_TERRAIN_ARCHIVE",
         "PORTAL_MAP_REPORTS_ROOT",
+    }
+)
+
+_DESKTOP_CONFIGURED_SOURCE_ENVIRONMENT_KEYS = frozenset(
+    {
+        "PORTAL_AMTEAM_DUCKDB",
+        "PORTAL_INVENTORY_DUCKDB",
+        "PORTAL_CITY_PIPES_DUCKDB",
+        "PORTAL_SOURCES_MANIFEST",
+        "PORTAL_ITPIPES_DUCKDB",
+        "PORTAL_ITPIPES_MERGED_DUCKDB",
+        "PORTAL_GIS_FACILITY_DUCKDB",
+        "PORTAL_SDW_DUCKDB",
     }
 )
 
@@ -105,7 +120,11 @@ def configured_map_duckdb_geojson_layers() -> dict[str, dict[str, Any]]:
             raise RuntimeError(f"maps.duckdbGeoJsonLayers[{index}] must be an object.")
         layer = dict(raw_layer)
         layer_id = str(layer.get("id") or "").strip().lower()
-        database = str(layer.get("database") or "").strip()
+        database = resolve_source(
+            str(layer.get("databaseSourceId") or ""),
+            str(layer.get("database") or ""),
+            label=f"map layer {layer_id}",
+        )
         table = str(layer.get("table") or "").strip()
         if not layer_id or not database or not table:
             raise RuntimeError(
@@ -132,27 +151,115 @@ def configured_map_duckdb_geojson_layers() -> dict[str, dict[str, Any]]:
     return configured
 
 
+def configured_pmtiles_detail_sources() -> dict[str, dict[str, str]]:
+    config = load_desktop_config()
+    maps = config.get("maps")
+    raw_sources = maps.get("pmtilesDetailSources") if isinstance(maps, dict) else None
+    if not isinstance(raw_sources, dict):
+        raise RuntimeError("maps.pmtilesDetailSources must be an object in portal.settings.json.")
+
+    configured: dict[str, dict[str, str]] = {}
+    for raw_id, raw_source in raw_sources.items():
+        source_id = str(raw_id or "").strip().lower()
+        if not source_id or not isinstance(raw_source, dict):
+            raise RuntimeError("Each maps.pmtilesDetailSources entry must have an ID and object value.")
+        database_source_id = str(raw_source.get("databaseSourceId") or "").strip()
+        database_fallback = str(raw_source.get("database") or "").strip()
+        database = resolve_source(
+            database_source_id,
+            database_fallback,
+            label=f"PMTiles detail source {source_id}",
+        )
+        if not database_source_id or not database:
+            raise RuntimeError(
+                f"PMTiles detail source {source_id} must define databaseSourceId and database."
+            )
+        configured[source_id] = {
+            "id": source_id,
+            "databaseSourceId": database_source_id,
+            "database": database,
+            "databaseFileName": Path(database_fallback).name,
+        }
+    return configured
+
+
+def configured_asset_history() -> dict[str, Any]:
+    """Resolve the read-only sources and schema contract for Asset History."""
+
+    config = load_desktop_config()
+    raw = config.get("assetHistory")
+    if not isinstance(raw, dict):
+        raise RuntimeError("assetHistory must be configured in portal.settings.json.")
+
+    result = _expanded(dict(raw))
+    sources = result.get("sources")
+    if not isinstance(sources, dict):
+        raise RuntimeError("assetHistory.sources must be an object in portal.settings.json.")
+    for key in ("inventory", "step401", "cityworks", "cityworksRisk", "itpipesIntermediate", "itpipesProduction", "priorityPipes"):
+        source = sources.get(key)
+        if not isinstance(source, dict):
+            raise RuntimeError(f"assetHistory.sources.{key} must be an object.")
+        source_id = str(source.get("sourceId") or "").strip()
+        fallback = str(source.get("database") or "").strip()
+        if not source_id or not fallback:
+            raise RuntimeError(
+                f"assetHistory.sources.{key} must define sourceId and database."
+            )
+        source["sourceId"] = source_id
+        source["database"] = resolve_source(
+            source_id,
+            fallback,
+            label=f"Asset History {key} source",
+        )
+    return result
+
+
 def configure_environment() -> dict[str, Any]:
     config = load_desktop_config()
+    desktop_mode = os.getenv("PORTAL_DESKTOP_MODE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    source_value = lambda source_id, fallback, label: resolve_source(source_id, fallback, label=label)
+    portal_sources_access_mode = _value(
+        config,
+        "dataSources",
+        "portalSources",
+        "accessMode",
+    ).casefold()
+    portal_sources_manifest = _value(
+        config,
+        "dataSources",
+        "portalSources",
+        "manifest",
+    )
+    if portal_sources_access_mode != "direct-network":
+        portal_sources_manifest = source_value(
+            _value(config, "dataSources", "portalSources", "sourceId"),
+            portal_sources_manifest,
+            "Portal serving database",
+        )
     mappings = {
-        "PORTAL_SYSTEM_DB": _value(config, "system", "database"),
+        "PORTAL_SYSTEM_DB": os.getenv("PORTAL_SYSTEM_DB", "").strip() or source_value(_value(config, "system", "sourceId"), _value(config, "system", "database"), "Portal system catalog"),
         "PORTAL_BUSINESS_DB": _value(config, "business", "database"),
-        "PORTAL_AMTEAM_DUCKDB": _value(config, "risk", "databases", "assetRisk"),
-        "PORTAL_INVENTORY_DUCKDB": _value(config, "risk", "databases", "inventory"),
-        "PORTAL_CITY_PIPES_DUCKDB": _value(config, "risk", "databases", "cityPipes"),
-        "PORTAL_SOURCES_MANIFEST": _value(config, "dataSources", "portalSources", "manifest"),
-        "PORTAL_ITPIPES_DUCKDB": _value(config, "dataSources", "itpipes", "database"),
-        "PORTAL_ITPIPES_MERGED_DUCKDB": _value(config, "dataSources", "itpipesMerged", "database"),
-        "PORTAL_AIF_ITPIPES_INTERMEDIATE_DATABASE": _value(config, "aifSources", "itpipesIntermediateDatabase"),
-        "PORTAL_AIF_CITYWORKS_INTERMEDIATE_DATABASE": _value(config, "aifSources", "cityworksIntermediateDatabase"),
-        "PORTAL_AIF_ITPIPES_PRODUCTION_DATABASE": _value(config, "aifSources", "itpipesProductionDatabase"),
+        "PORTAL_AMTEAM_DUCKDB": source_value(_value(config, "risk", "databaseSourceIds", "assetRisk"), _value(config, "risk", "databases", "assetRisk"), "asset risk database"),
+        "PORTAL_INVENTORY_DUCKDB": source_value(_value(config, "risk", "databaseSourceIds", "inventory"), _value(config, "risk", "databases", "inventory"), "inventory database"),
+        "PORTAL_CITY_PIPES_DUCKDB": source_value(_value(config, "risk", "databaseSourceIds", "cityPipes"), _value(config, "risk", "databases", "cityPipes"), "city pipes database"),
+        "PORTAL_SOURCES_MANIFEST": portal_sources_manifest,
+        "PORTAL_ITPIPES_DUCKDB": source_value(_value(config, "dataSources", "itpipes", "sourceId"), _value(config, "dataSources", "itpipes", "database"), "ITPipes production database"),
+        "PORTAL_ITPIPES_MERGED_DUCKDB": source_value(_value(config, "dataSources", "itpipesMerged", "sourceId"), _value(config, "dataSources", "itpipesMerged", "database"), "ITPipes intermediate database"),
+        "PORTAL_AIF_ITPIPES_INTERMEDIATE_DATABASE": source_value(_value(config, "aifSources", "itpipesIntermediateSourceId"), _value(config, "aifSources", "itpipesIntermediateDatabase"), "AIF ITPipes intermediate database"),
+        "PORTAL_AIF_CITYWORKS_INTERMEDIATE_DATABASE": source_value(_value(config, "aifSources", "cityworksIntermediateSourceId"), _value(config, "aifSources", "cityworksIntermediateDatabase"), "AIF Cityworks intermediate database"),
+        "PORTAL_AIF_ITPIPES_PRODUCTION_DATABASE": source_value(_value(config, "aifSources", "itpipesProductionSourceId"), _value(config, "aifSources", "itpipesProductionDatabase"), "AIF ITPipes production database"),
         "PORTAL_AIF_ITPIPES_DEFECTS_TABLE": _value(config, "aifSources", "itpipesDefectsTable"),
         "PORTAL_AIF_ITPIPES_MAXIMUM_CONDITION_TABLE": _value(config, "aifSources", "itpipesMaximumConditionTable"),
         "PORTAL_AIF_CITYWORKS_HISTORY_TABLE": _value(config, "aifSources", "cityworksInspectionHistoryTable"),
         "PORTAL_AIF_ITPIPES_INSPECTION_TABLE": _value(config, "aifSources", "itpipesInspectionTable"),
         "PORTAL_AIF_ITPIPES_OBSERVATION_TABLE": _value(config, "aifSources", "itpipesObservationTable"),
-        "PORTAL_GIS_FACILITY_DUCKDB": _value(config, "dataSources", "gisFacility", "database"),
-        "PORTAL_SDW_DUCKDB": _value(config, "dataSources", "spatialDataWarehouse", "database"),
+        "PORTAL_GIS_FACILITY_DUCKDB": source_value(_value(config, "dataSources", "gisFacility", "sourceId"), _value(config, "dataSources", "gisFacility", "database"), "GIS facility database"),
+        "PORTAL_SDW_DUCKDB": source_value(_value(config, "dataSources", "spatialDataWarehouse", "sourceId"), _value(config, "dataSources", "spatialDataWarehouse", "database"), "spatial data warehouse"),
         "PORTAL_MAP_PMTILES_ROOT": _value(config, "maps", "pmtilesRoot"),
         "PORTAL_MAP_LEGACY_PMTILES_ROOT": _value(config, "maps", "legacyPmtilesRoot"),
         "PORTAL_MAP_LEGACY_ARCHIVE": _value(config, "maps", "legacyMapArchive"),
@@ -177,16 +284,24 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_AMTEAM_MEDIA_ROOT": _value(config, "application", "pipeVideoRoot"),
         "PORTAL_CITYWORKS_INSPECTION_URL_TEMPLATE": _value(config, "externalServices", "cityworks", "inspectionUrlTemplate"),
         "PORTAL_CITYWORKS_WORKORDER_URL_TEMPLATE": _value(config, "externalServices", "cityworks", "workOrderUrlTemplate"),
+        "PORTAL_CITYWORKS_REQUEST_URL_TEMPLATE": _value(config, "externalServices", "cityworks", "requestUrlTemplate"),
         "PORTAL_CITYWORKS_INVESTIGATION_URL_TEMPLATE": _value(config, "externalServices", "cityworks", "investigationUrlTemplate"),
         "PORTAL_EXPORT_ROOT": _value(config, "application", "exportRoot"),
         "PORTAL_LOG_ROOT": _value(config, "application", "logRoot"),
         "PORTAL_TEMP_ROOT": _value(config, "application", "tempRoot"),
     }
     for name, value in mappings.items():
-        if name in _AIF_SOURCE_ENVIRONMENT_KEYS or name in _MAP_SOURCE_ENVIRONMENT_KEYS:
+        if (
+            name in _AIF_SOURCE_ENVIRONMENT_KEYS
+            or name in _MAP_SOURCE_ENVIRONMENT_KEYS
+            or (desktop_mode and name in _DESKTOP_CONFIGURED_SOURCE_ENVIRONMENT_KEYS)
+        ):
             # The packaged, Manager-owned Portal settings are authoritative for
-            # AIF and map source routing. Do not allow a stale .env or machine
-            # variable to redirect an authoritative configured source.
+            # AIF and map source routing. In Desktop mode, registered sources
+            # normally resolve through the local cache. portal.serving is the
+            # explicit direct-network exception because its immutable SQLite
+            # snapshot is republished every five minutes. Never allow a stale
+            # .env or machine variable to override the configured access mode.
             if value:
                 os.environ[name] = value
             else:

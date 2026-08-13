@@ -53,6 +53,12 @@ struct ManagerSettings {
     source_backup_workflow_task_name: Option<String>,
     #[serde(default)]
     source_backup_heartbeat_task_name: Option<String>,
+    #[serde(default)]
+    data_publication_directory: Option<String>,
+    #[serde(default)]
+    data_publication_script: Option<String>,
+    #[serde(default)]
+    data_publication_settings_file: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -138,6 +144,7 @@ struct PortalReleasePaths {
     system_db: PathBuf,
     desktop_system_db: PathBuf,
     updater: PathBuf,
+    remover: PathBuf,
     version_file: PathBuf,
 }
 
@@ -146,10 +153,9 @@ struct PortalReleasePaths {
 struct PortalReleaseStatus {
     portable_root: String,
     release_root: String,
-    package_version: String,
-    current_release_version: Option<String>,
+    release_version: String,
+    published: bool,
     current_update_mode: Option<String>,
-    bootstrap_version: Option<String>,
     portal_exe: String,
     system_db: String,
     desktop_system_db: String,
@@ -262,14 +268,19 @@ fn parse_clock(value: Option<&str>, fallback: u16) -> u16 {
 fn required_clock(value: &str, label: &str) -> Result<String, String> {
     let minutes = parse_clock(Some(value), u16::MAX);
     if minutes == u16::MAX {
-        return Err(format!("{label} must use HH:MM format with a valid 24-hour time."));
+        return Err(format!(
+            "{label} must use HH:MM format with a valid 24-hour time."
+        ));
     }
     Ok(format!("{:02}:{:02}", minutes / 60, minutes % 60))
 }
 
 fn required_weekday(value: &str, label: &str) -> Result<String, String> {
     let weekday = value.trim().to_uppercase();
-    if matches!(weekday.as_str(), "SUN" | "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT") {
+    if matches!(
+        weekday.as_str(),
+        "SUN" | "MON" | "TUE" | "WED" | "THU" | "FRI" | "SAT"
+    ) {
         Ok(weekday)
     } else {
         Err(format!("{label} must be a valid weekday."))
@@ -373,9 +384,9 @@ fn source_backup_paths() -> Result<SourceBackupPaths, String> {
     let settings_path = configuration_path()?;
     let settings: ManagerSettings = serde_json::from_value(read_json(&settings_path)?)
         .map_err(|error| format!("Invalid workstation manager settings: {error}"))?;
-    let config_directory = settings_path
-        .parent()
-        .ok_or_else(|| "The workstation manager settings path has no parent directory.".to_string())?;
+    let config_directory = settings_path.parent().ok_or_else(|| {
+        "The workstation manager settings path has no parent directory.".to_string()
+    })?;
     let scripts_directory = settings
         .source_backup_directory
         .as_deref()
@@ -409,10 +420,7 @@ fn source_backup_paths() -> Result<SourceBackupPaths, String> {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "SUN".to_string())
             .to_uppercase(),
-        heartbeat_minute: parse_clock(
-            settings.source_backup_heartbeat_time.as_deref(),
-            20 * 60,
-        ),
+        heartbeat_minute: parse_clock(settings.source_backup_heartbeat_time.as_deref(), 20 * 60),
         workflow_task_name: normalize_managed_task_name(
             settings.source_backup_workflow_task_name,
             "Source Backup Workflow",
@@ -422,6 +430,61 @@ fn source_backup_paths() -> Result<SourceBackupPaths, String> {
             "Machine Heartbeat",
         ),
     })
+}
+
+fn publish_system_catalog(system_database: &Path) -> Result<Value, String> {
+    let settings_path = configuration_path()?;
+    let settings: ManagerSettings = serde_json::from_value(read_json(&settings_path)?)
+        .map_err(|error| format!("Invalid workstation manager settings: {error}"))?;
+    let config_directory = settings_path.parent().ok_or_else(|| {
+        "The workstation manager settings path has no parent directory.".to_string()
+    })?;
+    let publication_directory = settings
+        .data_publication_directory
+        .as_deref()
+        .map(|value| resolve_configured_path(value, config_directory))
+        .unwrap_or_else(|| config_directory.join(r"..\data-publication"));
+    let publication_script = resolve_configured_path(
+        settings
+            .data_publication_script
+            .as_deref()
+            .unwrap_or("publish_data_versions.py"),
+        &publication_directory,
+    );
+    let publication_settings = resolve_configured_path(
+        settings
+            .data_publication_settings_file
+            .as_deref()
+            .unwrap_or("publication.settings.json"),
+        &publication_directory,
+    );
+    for required in [&publication_script, &publication_settings] {
+        if !required.is_file() {
+            return Err(format!(
+                "The Portal data-publication file was not found: {}",
+                required.display()
+            ));
+        }
+    }
+    let python_executable = expand_environment_tokens(
+        &settings
+            .source_backup_python_executable
+            .or(settings.python_executable)
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "python.exe".to_string()),
+    );
+    let arguments = vec![
+        publication_script.display().to_string(),
+        "--config".to_string(),
+        publication_settings.display().to_string(),
+        "--producer".to_string(),
+        "system-catalog".to_string(),
+        "--stage-source".to_string(),
+        format!("system.catalog={}", system_database.display()),
+    ];
+    let output = run_hidden(&python_executable, &arguments)?;
+    serde_json::from_str(output.trim())
+        .map_err(|error| format!("The system catalog publisher returned invalid output: {error}"))
 }
 
 fn windows_user_email() -> Result<String, String> {
@@ -823,12 +886,14 @@ fn portal_release_paths() -> Result<PortalReleasePaths, String> {
         system_db: manager_system_db,
         desktop_system_db,
         updater: portable_root.join("runtime").join("PortalUpdater.exe"),
+        remover: portable_root.join("Remove-Portal.bat"),
         version_file: portable_root.join("VERSION"),
     };
     for required in [
         &paths.portal_exe,
         &paths.system_db,
         &paths.updater,
+        &paths.remover,
         &paths.version_file,
     ] {
         if !required.is_file() {
@@ -947,9 +1012,10 @@ fn manifest_string(path: &Path, name: &str) -> Option<String> {
 
 fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
     let paths = portal_release_paths()?;
-    let package_version = release_version_from_file(&paths.version_file)?;
+    let release_version = release_version_from_file(&paths.version_file)?;
     let current_manifest = paths.release_root.join("portal-release.json");
-    let bootstrap_manifest = paths.release_root.join("portal-bootstrap.json");
+    let published_version = manifest_string(&current_manifest, "version");
+    let published = published_version.as_deref() == Some(release_version.as_str());
     let manager_system_db_writable = !fs::metadata(&paths.system_db)
         .map_err(|error| format!("Could not inspect the authoritative system.db: {error}"))?
         .permissions()
@@ -964,10 +1030,11 @@ fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
     Ok(PortalReleaseStatus {
         portable_root: paths.portable_root.display().to_string(),
         release_root: paths.release_root.display().to_string(),
-        package_version,
-        current_release_version: manifest_string(&current_manifest, "version"),
-        current_update_mode: manifest_string(&current_manifest, "updateMode"),
-        bootstrap_version: manifest_string(&bootstrap_manifest, "version"),
+        release_version,
+        published,
+        current_update_mode: published
+            .then(|| manifest_string(&current_manifest, "updateMode"))
+            .flatten(),
         portal_exe: paths.portal_exe.display().to_string(),
         system_db: paths.system_db.display().to_string(),
         desktop_system_db: paths.desktop_system_db.display().to_string(),
@@ -1021,6 +1088,7 @@ fn create_release_zip(source: &Path, archive: &Path) -> Result<(), String> {
     let status = Command::new("tar.exe")
         .args(["-a", "-c", "-f"])
         .arg(&temporary)
+        .args(["--exclude=data", "--exclude=./data"])
         .arg("-C")
         .arg(source)
         .arg(".")
@@ -1040,7 +1108,17 @@ fn create_release_zip(source: &Path, archive: &Path) -> Result<(), String> {
 }
 
 fn installer_batch() -> &'static str {
-    "@echo off\r\nsetlocal\r\nset \"RELEASE_ROOT=%~dp0\"\r\nif \"%RELEASE_ROOT:~-1%\"==\"\\\" set \"RELEASE_ROOT=%RELEASE_ROOT:~0,-1%\"\r\n\r\nif not exist \"%RELEASE_ROOT%\\PortalUpdater.exe\" (\r\n  echo PortalUpdater.exe was not found beside this downloader.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\n\"%RELEASE_ROOT%\\PortalUpdater.exe\" --bootstrap --manifest \"portal-bootstrap.json\" --release-root \"%RELEASE_ROOT%\" --restart\r\nif errorlevel 1 (\r\n  echo.\r\n  echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\necho.\r\necho Storm Water Asset Intelligence Portal is ready to use.\r\necho A Desktop shortcut has been created and Portal is starting.\r\nmsg \"%USERNAME%\" \"Storm Water Asset Intelligence Portal is ready to use.\" >nul 2>&1\r\n"
+    "@echo off\r\nsetlocal\r\nset \"RELEASE_ROOT=%~dp0\"\r\nif \"%RELEASE_ROOT:~-1%\"==\"\\\" set \"RELEASE_ROOT=%RELEASE_ROOT:~0,-1%\"\r\n\r\nif not exist \"%RELEASE_ROOT%\\PortalUpdater.exe\" (\r\n  echo PortalUpdater.exe was not found beside this downloader.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\n\"%RELEASE_ROOT%\\PortalUpdater.exe\" --bootstrap --manifest \"portal-release.json\" --release-root \"%RELEASE_ROOT%\" --restart\r\nif errorlevel 1 (\r\n  echo.\r\n  echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\necho.\r\necho Storm Water Asset Intelligence Portal is ready to use.\r\necho A Desktop shortcut has been created and Portal is starting.\r\nmsg \"%USERNAME%\" \"Storm Water Asset Intelligence Portal is ready to use.\" >nul 2>&1\r\n"
+}
+
+fn release_payload(path: &Path) -> Result<Value, String> {
+    Ok(serde_json::json!({
+        "file": path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+        "sha256": file_sha256(path)?,
+        "size": fs::metadata(path)
+            .map_err(|error| format!("Could not inspect release payload: {error}"))?
+            .len(),
+    }))
 }
 
 fn emit_release_progress(app: &AppHandle, message: &str) {
@@ -1050,72 +1128,50 @@ fn emit_release_progress(app: &AppHandle, message: &str) {
 fn publish_portal_release_value(
     app: &AppHandle,
     update_mode: &str,
-    requested_version: Option<String>,
 ) -> Result<PortalReleaseStatus, String> {
     emit_release_progress(
         app,
         "Validating the Portal package and release configuration.",
     );
-    if !matches!(update_mode, "system-db" | "portal-exe" | "full") {
-        return Err("Update type must be system-db, portal-exe, or full.".to_string());
+    if !matches!(update_mode, "portal-exe" | "full") {
+        return Err("Update type must be portal-exe or full.".to_string());
     }
     require_manager_system_admin()?;
-    // Close the persistent worker before copying system.db so any SQLite
-    // journal state is flushed and the published file is self-contained.
-    close_portal_python_worker()?;
     let paths = portal_release_paths()?;
-    let package_version = release_version_from_file(&paths.version_file)?;
-    let version = requested_version
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&package_version)
-        .to_string();
+    let version = release_version_from_file(&paths.version_file)?;
     if !is_semantic_version(&version) {
         return Err("Release version must use semantic version format, such as 0.2.1.".to_string());
-    }
-    if update_mode == "full" && version != package_version {
-        return Err(format!(
-            "A full release must use the packaged VERSION ({package_version}). Rebuild Portal before publishing this version."
-        ));
     }
     emit_release_progress(app, "Preparing the shared release directory.");
     fs::create_dir_all(&paths.release_root)
         .map_err(|error| format!("Could not create shared release folder: {error}"))?;
-    if let Some(current) =
-        manifest_string(&paths.release_root.join("portal-release.json"), "version")
-    {
-        if !version_is_newer(&version, &current) {
+    let current_manifest_path = paths.release_root.join("portal-release.json");
+    if let Some(current) = manifest_string(&current_manifest_path, "version") {
+        let unified_manifest = read_json(&current_manifest_path)
+            .ok()
+            .is_some_and(|value| value.get("installationPayload").is_some());
+        if unified_manifest && !version_is_newer(&version, &current) {
             return Err(format!(
                 "Release version {version} must be newer than the current shared release {current}."
             ));
         }
     }
 
+    // Every software release includes one complete installation/recovery artifact.
+    // Existing clients may still apply the smaller executable-only update artifact.
+    close_portal_python_worker()?;
+    emit_release_progress(app, "Refreshing the read-only installation catalog.");
+    synchronize_manager_system_database_to_desktop(&paths)?;
     emit_release_progress(
         app,
-        "Refreshing the read-only Desktop system database from the authoritative Manager copy.",
+        "Creating the complete installation package. This can take a few minutes.",
     );
-    synchronize_manager_system_database_to_desktop(&paths)?;
+    let installation_artifact = paths
+        .release_root
+        .join(format!("Portal-Desktop-{version}.zip"));
+    create_release_zip(&paths.portable_root, &installation_artifact)?;
 
-    let payload = match update_mode {
-        "system-db" => {
-            emit_release_progress(
-                app,
-                "Copying the system database to the shared release folder.",
-            );
-            let destination = paths.release_root.join(format!("system-{version}.db"));
-            fs::copy(&paths.desktop_system_db, &destination)
-                .map_err(|error| format!("Could not publish system.db: {error}"))?;
-            set_system_database_writable(&destination, false)?;
-            if file_sha256(&destination)? != file_sha256(&paths.system_db)? {
-                return Err(
-                    "The published system database does not match the authoritative Manager copy."
-                        .to_string(),
-                );
-            }
-            destination
-        }
+    let update_artifact = match update_mode {
         "portal-exe" => {
             emit_release_progress(app, "Copying Portal.exe to the shared release folder.");
             let destination = paths.release_root.join(format!("Portal-{version}.exe"));
@@ -1123,46 +1179,29 @@ fn publish_portal_release_value(
                 .map_err(|error| format!("Could not publish Portal.exe: {error}"))?;
             destination
         }
-        "full" => {
-            emit_release_progress(
-                app,
-                "Creating the full portable ZIP. This can take a few minutes.",
-            );
-            let destination = paths
-                .release_root
-                .join(format!("Portal-Desktop-{version}.zip"));
-            create_release_zip(&paths.portable_root, &destination)?;
-            destination
-        }
+        "full" => installation_artifact.clone(),
         _ => unreachable!(),
     };
     emit_release_progress(
         app,
         "Verifying the release payload and calculating its checksum.",
     );
-    let payload_size = fs::metadata(&payload)
-        .map_err(|error| format!("Could not inspect release payload: {error}"))?
-        .len();
+    let update_payload = release_payload(&update_artifact)?;
+    let installation_payload = release_payload(&installation_artifact)?;
     let manifest = serde_json::json!({
         "schemaVersion": 1,
         "version": version,
         "updateMode": update_mode,
-        "payload": {
-            "file": payload.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
-            "sha256": file_sha256(&payload)?,
-            "size": payload_size,
-        },
+        "payload": update_payload,
+        "installationPayload": installation_payload,
+        "preservePaths": ["data"],
         "publishedAtUnixSeconds": StdSystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
     });
-    emit_release_progress(app, "Publishing the release manifest.");
-    write_json_replace(&paths.release_root.join("portal-release.json"), &manifest)?;
-    if update_mode == "full" {
-        emit_release_progress(app, "Refreshing the first-time installation bundle.");
-        write_json_replace(&paths.release_root.join("portal-bootstrap.json"), &manifest)?;
-    }
     emit_release_progress(app, "Refreshing the Portal updater and installer.");
     fs::copy(&paths.updater, paths.release_root.join("PortalUpdater.exe"))
         .map_err(|error| format!("Could not publish PortalUpdater.exe: {error}"))?;
+    fs::copy(&paths.remover, paths.release_root.join("Remove-Portal.bat"))
+        .map_err(|error| format!("Could not publish Remove-Portal.bat: {error}"))?;
     let legacy_installer = paths.release_root.join("Install-Portal.bat");
     if legacy_installer.exists() {
         fs::remove_file(&legacy_installer)
@@ -1173,6 +1212,14 @@ fn publish_portal_release_value(
         installer_batch(),
     )
     .map_err(|error| format!("Could not publish Download-Portal.bat: {error}"))?;
+    emit_release_progress(app, "Publishing the release manifest.");
+    write_json_replace(&paths.release_root.join("portal-release.json"), &manifest)?;
+    let legacy_bootstrap_manifest = paths.release_root.join("portal-bootstrap.json");
+    if legacy_bootstrap_manifest.exists() {
+        fs::remove_file(&legacy_bootstrap_manifest).map_err(|error| {
+            format!("Could not remove the legacy Portal bootstrap manifest: {error}")
+        })?;
+    }
     emit_release_progress(app, "Release published successfully.");
     portal_release_status_value()
 }
@@ -1273,7 +1320,9 @@ fn run_hidden(command: &str, arguments: &[String]) -> Result<String, String> {
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).to_string())
     } else {
-        let details = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let details = if stderr.is_empty() { stdout } else { stderr };
         Err(if details.is_empty() {
             format!("{command} exited with {}.", output.status)
         } else {
@@ -2108,10 +2157,7 @@ fn update_source_sync_interval(
         .get_mut("schedule")
         .and_then(Value::as_object_mut)
         .ok_or_else(|| "The source-sync settings do not contain a schedule object.".to_string())?;
-    schedule.insert(
-        "intervalMinutes".to_string(),
-        Value::from(interval_minutes),
-    );
+    schedule.insert("intervalMinutes".to_string(), Value::from(interval_minutes));
     write_json_replace(&paths.sync_settings, &settings)
         .map_err(|error| format!("Could not save source-sync settings: {error}"))?;
 
@@ -2324,7 +2370,10 @@ fn source_backup_status() -> Result<Value, String> {
     );
     object.insert(
         "daily_schedule".to_string(),
-        Value::String(format!("Daily {} local time", format_clock(paths.daily_minute))),
+        Value::String(format!(
+            "Daily {} local time",
+            format_clock(paths.daily_minute)
+        )),
     );
     object.insert(
         "weekly_backup_schedule".to_string(),
@@ -2408,10 +2457,7 @@ fn quote_task_argument(value: &str) -> String {
     }
 }
 
-fn register_source_backup_task(
-    paths: &SourceBackupPaths,
-    schedule: &str,
-) -> Result<(), String> {
+fn register_source_backup_task(paths: &SourceBackupPaths, schedule: &str) -> Result<(), String> {
     let (task_name, action, schedule_kind, day, minute) = match schedule {
         "workflow" => (
             &paths.workflow_task_name,
@@ -2519,10 +2565,22 @@ fn save_source_backup_schedule(
     let object = settings
         .as_object_mut()
         .ok_or_else(|| "The workstation manager settings must be a JSON object.".to_string())?;
-    object.insert("sourceBackupDailyTime".to_string(), Value::String(workflow_time));
-    object.insert("sourceBackupWeekday".to_string(), Value::String(backup_weekday));
-    object.insert("sourceBackupHeartbeatDay".to_string(), Value::String(heartbeat_day));
-    object.insert("sourceBackupHeartbeatTime".to_string(), Value::String(heartbeat_time));
+    object.insert(
+        "sourceBackupDailyTime".to_string(),
+        Value::String(workflow_time),
+    );
+    object.insert(
+        "sourceBackupWeekday".to_string(),
+        Value::String(backup_weekday),
+    );
+    object.insert(
+        "sourceBackupHeartbeatDay".to_string(),
+        Value::String(heartbeat_day),
+    );
+    object.insert(
+        "sourceBackupHeartbeatTime".to_string(),
+        Value::String(heartbeat_time),
+    );
     write_json_replace(&paths.manager_settings, &settings)
         .map_err(|error| format!("Could not save source-backup schedule settings: {error}"))?;
 
@@ -2592,12 +2650,27 @@ fn portal_release_status() -> Result<PortalReleaseStatus, String> {
 }
 
 #[tauri::command]
+fn publish_system_catalog_data() -> Result<Value, String> {
+    require_manager_system_admin()?;
+    // Flush pending catalog writes before copying the authoritative database.
+    close_portal_python_worker()?;
+    let paths = portal_release_paths()?;
+    synchronize_manager_system_database_to_desktop(&paths)?;
+    let publication = publish_system_catalog(&paths.system_db)?;
+    Ok(serde_json::json!({
+        "status": "succeeded",
+        "message": "The read-only system catalog was published as Portal data.",
+        "publication": publication,
+        "desktopSystemDatabase": paths.desktop_system_db.display().to_string()
+    }))
+}
+
+#[tauri::command]
 fn publish_portal_release(
     app: AppHandle,
     update_mode: String,
-    release_version: Option<String>,
 ) -> Result<PortalReleaseStatus, String> {
-    publish_portal_release_value(&app, &update_mode, release_version)
+    publish_portal_release_value(&app, &update_mode)
 }
 
 #[tauri::command]
@@ -2925,6 +2998,7 @@ pub fn run() {
             bootstrap_repository,
             browse_repository_folder,
             portal_release_status,
+            publish_system_catalog_data,
             publish_portal_release,
             schema_status,
             schema_catalog,
@@ -2972,10 +3046,10 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        display_timestamp, set_system_database_writable,
+        create_release_zip, display_timestamp, set_system_database_writable,
         synchronize_manager_system_database_to_desktop, PortalReleasePaths,
     };
-    use std::{env, fs, process, time::SystemTime};
+    use std::{env, fs, process, process::Command, time::SystemTime};
 
     #[test]
     fn desktop_release_database_is_refreshed_and_made_read_only() {
@@ -3003,7 +3077,11 @@ mod tests {
             portal_exe: root.join("desktop").join("Portal.exe"),
             system_db: manager_database.clone(),
             desktop_system_db: desktop_database.clone(),
-            updater: root.join("desktop").join("runtime").join("PortalUpdater.exe"),
+            updater: root
+                .join("desktop")
+                .join("runtime")
+                .join("PortalUpdater.exe"),
+            remover: root.join("desktop").join("Remove-Portal.bat"),
             version_file: root.join("desktop").join("VERSION"),
         };
 
@@ -3027,12 +3105,51 @@ mod tests {
     }
 
     #[test]
+    fn complete_release_archive_excludes_the_data_sync_directory() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!(
+            "portal-manager-archive-test-{}-{unique}",
+            process::id()
+        ));
+        let source = root.join("source");
+        let archive = root.join("Portal-Desktop-test.zip");
+        fs::create_dir_all(source.join("data")).expect("data directory");
+        fs::create_dir_all(source.join("config")).expect("config directory");
+        fs::write(source.join("Portal.exe"), b"portal").expect("application file");
+        fs::write(source.join("config").join("system.db"), b"catalog")
+            .expect("catalog file");
+        fs::write(source.join("data").join("keep-me.db"), b"user data")
+            .expect("data file");
+
+        create_release_zip(&source, &archive).expect("release archive");
+        let listing = Command::new("tar.exe")
+            .args(["-t", "-f"])
+            .arg(&archive)
+            .output()
+            .expect("archive listing");
+        assert!(listing.status.success());
+        let entries = String::from_utf8_lossy(&listing.stdout).replace('\\', "/");
+        assert!(entries.contains("Portal.exe"));
+        assert!(entries.contains("config/system.db"));
+        assert!(!entries.contains("data/"));
+        assert!(!entries.contains("keep-me.db"));
+
+        fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
     fn synchronization_timestamps_remain_parseable_for_os_formatting() {
         assert_eq!(
             display_timestamp(Some("2026-08-06T16:10:20.831727-04:00")),
             "2026-08-06T16:10:20.831727-04:00"
         );
-        assert_eq!(display_timestamp(Some("2026-08-06T16:10:20Z")), "2026-08-06T16:10:20Z");
+        assert_eq!(
+            display_timestamp(Some("2026-08-06T16:10:20Z")),
+            "2026-08-06T16:10:20Z"
+        );
         assert_eq!(display_timestamp(None), "-");
     }
 }
