@@ -23,6 +23,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 
 const PROGRESS_EVENT: &str = "portal-data-cache-progress";
+const UPDATED_EVENT: &str = "portal-data-cache-updated";
 const COPY_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const PUBLICATION_LOCK_WAIT: Duration = Duration::from_secs(8);
 const PUBLICATION_LOCK_POLL: Duration = Duration::from_millis(250);
@@ -182,6 +183,14 @@ pub struct DataCacheStartupResult {
     publication_id: String,
     local_manifest: String,
     message: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DataCacheUpdateCompleted {
+    publication_id: String,
+    updated_source_count: usize,
+    updated_source_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -509,7 +518,7 @@ fn compare_versions(left: &str, right: &str) -> std::cmp::Ordering {
 }
 
 fn source_is_compatible(source: &RemoteSource) -> bool {
-    let current = env!("CARGO_PKG_VERSION");
+    let current = option_env!("PORTAL_PACKAGE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"));
     (source.minimum_app_version.is_empty()
         || compare_versions(current, &source.minimum_app_version) != std::cmp::Ordering::Less)
         && (source.maximum_app_version.is_empty()
@@ -1227,7 +1236,12 @@ pub fn startup(app: AppHandle) -> Result<DataCacheStartupResult, String> {
         let background_config = config.clone();
         let background_remote = remote.clone();
         let background_local = local.clone();
+        let updated_source_ids = background
+            .iter()
+            .flat_map(|group| group.sources.iter().map(|source| source.id.clone()))
+            .collect::<Vec<_>>();
         thread::spawn(move || {
+            let mut completed_update = None;
             let lock = CACHE_RUN_LOCK.get_or_init(|| Mutex::new(()));
             if let Ok(_guard) = lock.lock() {
                 if let Err(error) = synchronize_groups(
@@ -1263,9 +1277,17 @@ pub fn startup(app: AppHandle) -> Result<DataCacheStartupResult, String> {
                     let mut completed = load_local_manifest(&background_config);
                     completed.last_error.clear();
                     let _ = write_json_atomic(&local_manifest_path(&background_config), &completed);
+                    completed_update = Some(DataCacheUpdateCompleted {
+                        publication_id: background_remote.publication_id.clone(),
+                        updated_source_count: updated_source_ids.len(),
+                        updated_source_ids,
+                    });
                 }
             }
             BACKGROUND_UPDATE_ACTIVE.store(false, Ordering::Release);
+            if let Some(completed) = completed_update {
+                let _ = background_app.emit(UPDATED_EVENT, completed);
+            }
         });
     }
     Ok(DataCacheStartupResult {

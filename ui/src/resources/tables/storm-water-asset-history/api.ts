@@ -38,7 +38,7 @@ export type AssetSummaryResponse = {
 }
 
 export type HistoryRecord = {
-  kind: 'service_request' | 'investigation' | 'inspection' | 'work_order'
+  kind: 'asset' | 'service_request' | 'investigation' | 'inspection' | 'work_order'
   record_id: string
   event_date?: string | null
   status?: string | null
@@ -129,9 +129,10 @@ export async function loadAssetRecords(assetType: AssetType, assetId: string, pa
   return portalRequestJson<RecordsResponse>(`${ROOT}/assets/${assetType}/${encodeURIComponent(assetId)}/records?${query}`)
 }
 
-export async function loadRecordDetail(kind: string, recordId: string, workZoneId = '') {
+export async function loadRecordDetail(kind: string, recordId: string, workZoneId = '', assetType?: AssetType | null) {
   const query = new URLSearchParams()
   if (workZoneId) query.set('work_zone_id', workZoneId)
+  if (kind === 'asset' && assetType) query.set('asset_type', assetType)
   const suffix = query.size ? `?${query}` : ''
   return portalRequestJson<RecordDetail>(`${ROOT}/records/${kind}/${encodeURIComponent(recordId)}${suffix}`)
 }

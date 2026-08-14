@@ -9,6 +9,36 @@ from collections.abc import Callable
 from typing import Any
 
 
+_DLL_DIRECTORY_HANDLES: list[Any] = []
+
+
+def _configure_packaged_geospatial_runtime() -> None:
+    """Expose the bundled GDAL/PROJ runtime before Portal routes are imported."""
+    if not getattr(sys, "frozen", False):
+        return
+
+    runtime_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
+    dll_directories = (runtime_root, runtime_root / "Library" / "bin")
+    existing_path = os.environ.get("PATH", "")
+    os.environ["PATH"] = os.pathsep.join(
+        [str(path) for path in dll_directories if path.is_dir()] + ([existing_path] if existing_path else [])
+    )
+    if hasattr(os, "add_dll_directory"):
+        for path in dll_directories:
+            if path.is_dir():
+                _DLL_DIRECTORY_HANDLES.append(os.add_dll_directory(str(path)))
+
+    gdal_data = runtime_root / "Library" / "share" / "gdal"
+    proj_data = runtime_root / "Library" / "share" / "proj"
+    if gdal_data.is_dir():
+        os.environ.setdefault("GDAL_DATA", str(gdal_data))
+    if proj_data.is_dir():
+        os.environ.setdefault("PROJ_DATA", str(proj_data))
+
+
+_configure_packaged_geospatial_runtime()
+
+
 PYTHON_ROOT = Path(__file__).resolve().parents[2]
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
@@ -18,11 +48,35 @@ JobHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 def health_job(_: dict[str, Any]) -> dict[str, Any]:
+    geospatial_runtime: dict[str, Any]
+    try:
+        import pyproj
+        import rasterio
+        import shapely
+        from pyproj import Transformer
+        from shapely.geometry import LineString, mapping
+        from shapely.ops import transform
+
+        # Exercise the exact imports used by terrain_profile._sample_profile.
+        _ = (Transformer, LineString, mapping, transform)
+        geospatial_runtime = {
+            "ok": True,
+            "pyprojVersion": pyproj.__version__,
+            "rasterioVersion": rasterio.__version__,
+            "shapelyVersion": shapely.__version__,
+        }
+    except Exception as error:
+        geospatial_runtime = {
+            "ok": False,
+            "errorType": type(error).__name__,
+            "error": str(error),
+        }
     return {
         "ok": True,
         "worker": "portal-python",
         "pythonVersion": sys.version.split()[0],
         "executable": sys.executable,
+        "geospatialRuntime": geospatial_runtime,
     }
 
 

@@ -38,9 +38,9 @@ class AssetHistorySourceTests(unittest.TestCase):
                 "priorityPipes": {"sourceId": "intermediate.prioritypipes", "database": str(self.priority_pipes)},
             },
             "inventoryTables": {
-                "structure": {"table": "STORMSTRUCTURE_1_PT", "idField": "ITPIPE_ASSETID", "entityType": "STRUCTURES"},
-                "pipe": {"table": "STORMPIPES_1_LN", "idField": "ITPIPE_ASSETID", "entityType": "PIPES"},
-                "channel": {"table": "STORMDRAINAGE_1_LN", "idField": "ITPIPE_ASSETID", "entityType": "CHANNELS"},
+                "structure": {"table": "STORMSTRUCTURE_1_PT", "idField": "ITPIPE_ASSETID", "entityType": "STRUCTURES", "constructionDateField": "CONST_DATE"},
+                "pipe": {"table": "STORMPIPES_1_LN", "idField": "ITPIPE_ASSETID", "entityType": "PIPES", "constructionDateField": "CONST_DATE"},
+                "channel": {"table": "STORMDRAINAGE_1_LN", "idField": "ITPIPE_ASSETID", "entityType": "CHANNELS", "constructionDateField": "CONST_DATE"},
             },
             "step401Tables": {
                 "cityworksUnassigned": "t_0001_UR_AC_CWOnly_All_Unassigned",
@@ -76,8 +76,8 @@ class AssetHistorySourceTests(unittest.TestCase):
     def _build_inventory(self) -> None:
         connection = duckdb.connect(str(self.inventory))
         for table in ("STORMSTRUCTURE_1_PT", "STORMPIPES_1_LN", "STORMDRAINAGE_1_LN"):
-            connection.execute(f'CREATE TABLE "{table}" (ITPIPE_ASSETID VARCHAR, Active VARCHAR, Location VARCHAR, MATERIAL VARCHAR, US_ASSETID VARCHAR, DS_ASSETID VARCHAR)')
-        connection.execute("INSERT INTO STORMPIPES_1_LN VALUES ('P_100', 'Active', 'Test Road', 'RCP', 'S_1', 'S_2')")
+            connection.execute(f'CREATE TABLE "{table}" (ITPIPE_ASSETID VARCHAR, Active VARCHAR, Location VARCHAR, MATERIAL VARCHAR, DIAMETER DOUBLE, PI_SHAPE VARCHAR, US_ID VARCHAR, US_INVERT DOUBLE, DS_ID VARCHAR, DS_INVERT DOUBLE, CONST_DATE TIMESTAMP, ConstDateSource VARCHAR)')
+        connection.execute("INSERT INTO STORMPIPES_1_LN VALUES ('P_100', 'Active', 'Test Road', 'RCP', 24, 'Circular', 'S_1', 681.25, 'S_2', 679.75, '2001-02-03', 'As-built')")
         connection.close()
 
     def _build_step401(self) -> None:
@@ -204,6 +204,22 @@ class AssetHistorySourceTests(unittest.TestCase):
         self.assertEqual(["70", "71"], result["branches"]["itpipes"]["context"]["mlo_id"])
         self.assertEqual("assigned", source.binary_assignment_status(result))
 
+    def test_batch_assignment_uses_assigned_precedence(self) -> None:
+        result = source.assignment_statuses(["P_100", "P_200"])
+        self.assertEqual("assigned", result["statuses"]["P_100"])
+        self.assertEqual("not_evaluated", result["statuses"]["P_200"])
+
+    def test_related_risk_scores_use_maximum_available_published_scores(self) -> None:
+        scores, warnings = source.related_risk_scores_for_assets([("pipe", "P_100")])
+
+        self.assertEqual([], warnings)
+        self.assertEqual({
+            "condition_risk": 25.0,
+            "flood_risk": 5.67,
+            "clogging_risk": 8.91,
+            "risk": 38.54,
+        }, scores[("pipe", "P_100")])
+
     def test_binary_assignment_uses_assigned_precedence(self) -> None:
         self.assertEqual("assigned", source.binary_assignment_status({"branches": {"cityworks": {"state": "unassigned"}, "itpipes": {"state": "assigned"}}}))
         self.assertEqual("unassigned", source.binary_assignment_status({"branches": {"cityworks": {"state": "unassigned"}, "itpipes": {"state": "not_evaluated"}}}))
@@ -220,6 +236,16 @@ class AssetHistorySourceTests(unittest.TestCase):
         self.assertEqual(1, len(result["work_orders"]))
         self.assertEqual({"1000", "1001", "1002", "1003", "1004"}, {row["record_id"] for row in result["service_requests"]})
 
+    def test_batch_history_matches_single_asset_relationships(self) -> None:
+        single = source.activity_history("pipe", "P_100")
+        batch = source.activity_history_for_assets([("pipe", "P_100")])
+        for key in single:
+            self.assertEqual(
+                {row["record_id"] for row in single[key]},
+                {row["record_id"] for row in batch[key]},
+            )
+            self.assertTrue(all(row["asset_id"] == "P_100" and row["asset_type"] == "pipe" for row in batch[key]))
+
     def test_timeline_expands_lifecycle_dates_and_collapses_matching_timestamps(self) -> None:
         events = source.timeline_events(source.activity_history("pipe", "P_100"))
         self.assertEqual(13, len(events))
@@ -232,11 +258,27 @@ class AssetHistorySourceTests(unittest.TestCase):
         self.assertEqual(["INITIATEDATE", "ACTUALSTARTDATE"], work_order_start["event_fields"])
         self.assertTrue(work_order_start["event_key"].startswith("work_order:300:"))
 
+    def test_timeline_includes_configured_inventory_construction_date(self) -> None:
+        asset = source.asset_summary("pipe", "P_100")
+        events = source.timeline_events(source.activity_history("pipe", "P_100"), asset)
+        construction = next(event for event in events if event["kind"] == "asset")
+        self.assertEqual("2001-02-03T00:00:00", construction["event_date"])
+        self.assertEqual("Constructed", construction["event_name"])
+        self.assertEqual("CONST_DATE", construction["event_field"])
+        self.assertEqual("Inventory record", construction["relationship"])
+
     def test_search_and_summary_use_inventory_only(self) -> None:
         self.assertEqual("P_100", source.search_assets("P_10")[0]["asset_id"])
         result = source.asset_summary("pipe", "P_100")
         self.assertEqual("PIPES", result["entity_type"])
         self.assertEqual("RCP", result["summary"]["MATERIAL"])
+        self.assertEqual("2001-02-03", result["summary"]["CONST_DATE"])
+        self.assertEqual("Circular", result["summary"]["PI_SHAPE"])
+        self.assertEqual("S_1", result["summary"]["US_ID"])
+        self.assertEqual(681.25, result["summary"]["US_INVERT"])
+        self.assertEqual("S_2", result["summary"]["DS_ID"])
+        self.assertEqual(679.75, result["summary"]["DS_INVERT"])
+        self.assertEqual("As-built", result["summary"]["ConstDateSource"])
 
     def test_itpipes_defects_use_merged_risks_and_production_inspection_context(self) -> None:
         self.assertEqual(3, source.itpipes_defect_count("P_100"))
@@ -252,6 +294,28 @@ class AssetHistorySourceTests(unittest.TestCase):
         self.assertEqual(25.0, result[0]["condition_risk"])
         self.assertFalse(result[0]["is_continuous"])
         self.assertEqual("Defect source detail", result[0]["source_attributes"]["Detail_Only"])
+        self.assertEqual(["80", "70", "71"], [row["mlo_id"] for row in source.itpipes_defects_for_assets(["P_100"])])
+
+    def test_latest_itpipes_inspection_returns_only_its_positive_risk_defects(self) -> None:
+        result = source.latest_itpipes_inspection_defects("P_100")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("8", result["mli_id"])
+        self.assertEqual("Downstream", result["inspection_direction"])
+        self.assertEqual(["80"], [row["mlo_id"] for row in result["defects"]])
+
+    def test_latest_itpipes_inspection_does_not_fall_back_when_it_has_no_positive_defects(self) -> None:
+        connection = duckdb.connect(str(self.itpipes_production))
+        connection.execute("INSERT INTO MLI VALUES (10, 100, '2026-05-01 08:00:00', 'Downstream')")
+        connection.close()
+
+        result = source.latest_itpipes_inspection_defects("P_100")
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual("10", result["mli_id"])
+        self.assertEqual([], result["defects"])
 
     def test_priority_pipe_risk_uses_published_scored_table(self) -> None:
         self.assertEqual(1, source.priority_pipe_risk_count("P_100"))
@@ -264,6 +328,7 @@ class AssetHistorySourceTests(unittest.TestCase):
         self.assertEqual(8.2, result[0]["cof_score"])
         self.assertEqual(38.54, result[0]["risk"])
         self.assertEqual("Risk source detail", result[0]["source_attributes"]["Detail_Only"])
+        self.assertEqual(1, len(source.priority_pipe_risk_for_assets(["P_100"])))
 
     def test_non_cityworks_details_return_all_source_fields(self) -> None:
         defect = source.record_detail("itpipes_defect", "80")

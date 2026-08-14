@@ -1,5 +1,6 @@
 import { type ChangeEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as echarts from "echarts";
+import { lineString, nearestPointOnLine, point } from "@turf/turf";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSONFeature, type MapMouseEvent, type MapOptions } from "maplibre-gl";
 import { toast } from "sonner";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -7,6 +8,7 @@ import "./MapTilesViewer.css";
 import { formatDateTime } from "../../../lib/dateTime";
 import {
   Activity,
+  Database,
   Check,
   ChevronLeft,
   ChevronRight,
@@ -25,8 +27,10 @@ import {
   Moon,
   Plus,
   BarChart3,
+  ChartArea,
   Route,
   Search,
+  ShieldAlert,
   Sun,
   Trash2,
   Type,
@@ -34,6 +38,23 @@ import {
   X,
 } from "lucide-react";
 import { fetchAssetAssignment, fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchPmtilesFeatureDetails, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
+import AssetDataExtractPanel from "./AssetDataExtractPanel";
+import type { AssetExtractArea, AssetExtractPreview } from "./assetExtract";
+import TerrainProfilePanel from "./TerrainProfilePanel";
+import FailureConsequencePanel from "./FailureConsequencePanel";
+import {
+  fetchFailureConsequence,
+  type FailureConsequenceResult,
+  type FailureDefect,
+  type FailureScenario,
+} from "./failureConsequence";
+import {
+  fetchTerrainProfile,
+  reverseTerrainProfile,
+  type TerrainProfileMode,
+  type TerrainProfileRequest,
+  type TerrainProfileResult,
+} from "./terrainProfile";
 import { clientSetting } from "../../../desktop/settings";
 import { openExternalUrl } from "../../../desktop/runtime";
 import stormwaterLogoUrl from "./assets/stormwater-logo.png";
@@ -125,6 +146,7 @@ type BasemapOption = {
 type LngLatPair = [number, number];
 type DrawGeometry =
   | { type: "Polygon"; coordinates: LngLatPair[][] }
+  | { type: "MultiPolygon"; coordinates: LngLatPair[][][] }
   | { type: "LineString"; coordinates: LngLatPair[] }
   | { type: "Point"; coordinates: LngLatPair };
 type DrawGeoJsonFeature = {
@@ -376,6 +398,39 @@ const DRAW_SELECTED_LINE_LAYER_ID = "user-drawings-selected-line";
 const DRAW_DRAFT_FILL_LAYER_ID = "user-drawings-draft-fill";
 const DRAW_DRAFT_LINE_LAYER_ID = "user-drawings-draft-line";
 const DRAW_DRAFT_POINT_LAYER_ID = "user-drawings-draft-point";
+const ASSET_EXTRACT_SOURCE_ID = "asset-extract-preview";
+const ASSET_EXTRACT_STRUCTURE_LAYER_ID = `${ASSET_EXTRACT_SOURCE_ID}-structures`;
+const ASSET_EXTRACT_PIPE_LAYER_ID = `${ASSET_EXTRACT_SOURCE_ID}-pipes`;
+const ASSET_EXTRACT_CHANNEL_LAYER_ID = `${ASSET_EXTRACT_SOURCE_ID}-channels`;
+const TERRAIN_PROFILE_SOURCE_ID = "terrain-profile-path";
+const TERRAIN_PROFILE_LINE_LAYER_ID = `${TERRAIN_PROFILE_SOURCE_ID}-line`;
+const TERRAIN_PROFILE_ENDPOINT_LAYER_ID = `${TERRAIN_PROFILE_SOURCE_ID}-endpoints`;
+const TERRAIN_PROFILE_HOVER_SOURCE_ID = "terrain-profile-hover";
+const TERRAIN_PROFILE_HOVER_LAYER_ID = `${TERRAIN_PROFILE_HOVER_SOURCE_ID}-point`;
+const FAILURE_CONSEQUENCE_SOURCE_ID = "failure-consequence-analysis";
+const FAILURE_CONSEQUENCE_LAYER_IDS = {
+  clipMask: `${FAILURE_CONSEQUENCE_SOURCE_ID}-clip-mask`,
+  clipBoundary: `${FAILURE_CONSEQUENCE_SOURCE_ID}-clip-boundary`,
+  analysisVolume: `${FAILURE_CONSEQUENCE_SOURCE_ID}-analysis-volume`,
+  impactFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-fill`,
+  impactLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-line`,
+  impactPoint: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-point`,
+  impact3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-3d`,
+  impactPoint3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-point-3d`,
+  influenceFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-influence-fill`,
+  influenceLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-influence-line`,
+  influencePoint: `${FAILURE_CONSEQUENCE_SOURCE_ID}-influence-point`,
+  influence3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-influence-3d`,
+  zoiFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-zoi-fill`,
+  zoiLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-zoi-line`,
+  scenarioZoiFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-scenario-zoi-fill`,
+  scenarioZoiLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-scenario-zoi-line`,
+  assetLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-asset-line`,
+  assetPoint: `${FAILURE_CONSEQUENCE_SOURCE_ID}-asset-point`,
+  defects: `${FAILURE_CONSEQUENCE_SOURCE_ID}-defects`,
+  defects3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-defects-3d`,
+  simulated: `${FAILURE_CONSEQUENCE_SOURCE_ID}-simulated`,
+} as const;
 const SEARCH_HIGHLIGHT_SOURCE_ID = "asset-search-highlight";
 const SEARCH_HIGHLIGHT_LAYER_IDS = [
   "asset-search-highlight-fill",
@@ -568,6 +623,22 @@ export default function App() {
   const drawModeActiveRef = useRef(false);
   const selectedDrawIdRef = useRef<string | null>(null);
   const drawToolRef = useRef<DrawTool>("select");
+  const assetExtractOpenRef = useRef(false);
+  const assetExtractPreviewRef = useRef<AssetExtractPreview | null>(null);
+  const terrainProfileOpenRef = useRef(false);
+  const terrainProfileModeRef = useRef<TerrainProfileMode>("draw");
+  const terrainProfileDrawPointsRef = useRef<LngLatPair[]>([]);
+  const terrainProfileDraftPointRef = useRef<LngLatPair | null>(null);
+  const terrainProfileResultRef = useRef<TerrainProfileResult | null>(null);
+  const terrainProfileHoverIndexRef = useRef<number | null>(null);
+  const terrainProfileRequestAbortRef = useRef<AbortController | null>(null);
+  const terrainProfileClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
+  const failureConsequenceOpenRef = useRef(false);
+  const failureConsequenceSimulatingRef = useRef(false);
+  const failureConsequenceResultRef = useRef<FailureConsequenceResult | null>(null);
+  const failureConsequenceMapRef = useRef<MapLibreMap | null>(null);
+  const failureConsequence3dRef = useRef(false);
+  const failureConsequenceAbortRef = useRef<AbortController | null>(null);
   const polygonClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const swipeDragRef = useRef<{ pointerId: number } | null>(null);
   const mapPdfSelectionDragRef = useRef<MapPdfSelectionDragState | null>(null);
@@ -601,6 +672,20 @@ export default function App() {
   const [drawTool, setDrawTool] = useState<DrawTool>("select");
   const [drawFeatures, setDrawFeatures] = useState<DrawGeoJsonFeature[]>([]);
   const [selectedDrawId, setSelectedDrawId] = useState<string | null>(null);
+  const [assetExtractOpen, setAssetExtractOpen] = useState(false);
+  const [assetExtractPreview, setAssetExtractPreview] = useState<AssetExtractPreview | null>(null);
+  const [terrainProfileOpen, setTerrainProfileOpen] = useState(false);
+  const [terrainProfileMode, setTerrainProfileMode] = useState<TerrainProfileMode>("draw");
+  const [terrainProfileResult, setTerrainProfileResult] = useState<TerrainProfileResult | null>(null);
+  const [terrainProfileLoading, setTerrainProfileLoading] = useState(false);
+  const [terrainProfileError, setTerrainProfileError] = useState("");
+  const [terrainProfileHoverIndex, setTerrainProfileHoverIndex] = useState<number | null>(null);
+  const [failureConsequenceOpen, setFailureConsequenceOpen] = useState(false);
+  const [failureConsequenceResult, setFailureConsequenceResult] = useState<FailureConsequenceResult | null>(null);
+  const [failureConsequenceLoading, setFailureConsequenceLoading] = useState(false);
+  const [failureConsequenceError, setFailureConsequenceError] = useState("");
+  const [failureConsequenceSimulating, setFailureConsequenceSimulating] = useState(false);
+  const [failureConsequence3d, setFailureConsequence3d] = useState(false);
   const [map3dEnabled, setMap3dEnabled] = useState(false);
   const [map3dTransitioning, setMap3dTransitioning] = useState(false);
   const [mapDataWarning, setMapDataWarning] = useState("");
@@ -775,6 +860,60 @@ export default function App() {
       }
     });
   }, [drawModeActive, drawTool]);
+
+  useEffect(() => {
+    terrainProfileOpenRef.current = terrainProfileOpen;
+    terrainProfileModeRef.current = terrainProfileMode;
+    const profileDrawing = terrainProfileOpen && terrainProfileMode === "draw";
+    [mapRef.current, splitMapRef.current].forEach((map) => {
+      if (!map) return;
+      if (profileDrawing) map.doubleClickZoom.disable();
+      else if (!drawModeActiveRef.current || drawToolRef.current !== "polygon") map.doubleClickZoom.enable();
+      map.getCanvas().style.cursor = terrainProfileOpen ? (profileDrawing ? "crosshair" : "pointer") : "";
+    });
+    if (!terrainProfileOpen) {
+      terrainProfileDrawPointsRef.current = [];
+      terrainProfileDraftPointRef.current = null;
+      terrainProfileClickRef.current = null;
+    }
+  }, [terrainProfileMode, terrainProfileOpen]);
+
+  useEffect(() => {
+    terrainProfileResultRef.current = terrainProfileResult;
+    terrainProfileHoverIndexRef.current = terrainProfileHoverIndex;
+    updateTerrainProfileGraphicsOnMaps(
+      [mapRef.current, splitMapRef.current],
+      terrainProfileResult,
+      terrainProfileDrawPointsRef.current,
+      terrainProfileDraftPointRef.current,
+      terrainProfileHoverIndex,
+    );
+  }, [primaryMapReadyCounter, splitMapReadyCounter, terrainProfileHoverIndex, terrainProfileResult]);
+
+  useEffect(() => {
+    failureConsequenceOpenRef.current = failureConsequenceOpen;
+    failureConsequenceSimulatingRef.current = failureConsequenceSimulating;
+    [mapRef.current, splitMapRef.current].forEach((map) => {
+      if (!map) return;
+      map.getCanvas().style.cursor = failureConsequenceOpen
+        ? failureConsequenceSimulating ? "crosshair" : "pointer"
+        : terrainProfileOpenRef.current ? "pointer" : "";
+    });
+  }, [failureConsequenceOpen, failureConsequenceSimulating]);
+
+  useEffect(() => {
+    failureConsequenceResultRef.current = failureConsequenceResult;
+    updateFailureConsequenceGraphicsOnMaps(
+      [failureConsequenceMapRef.current],
+      failureConsequenceResult,
+      failureConsequence3d,
+    );
+  }, [failureConsequence3d, failureConsequenceResult]);
+
+  useEffect(() => {
+    assetExtractPreviewRef.current = assetExtractPreview;
+    updateAssetExtractPreviewOnMaps([mapRef.current, splitMapRef.current], assetExtractPreview);
+  }, [assetExtractPreview, primaryMapReadyCounter, splitMapReadyCounter]);
 
   useEffect(() => {
     layerVisibilityRef.current = layerVisibility;
@@ -1369,9 +1508,169 @@ export default function App() {
     lastValidCameraRef.current = null;
   }, []);
 
+  const clearTerrainProfile = useCallback(() => {
+    terrainProfileRequestAbortRef.current?.abort();
+    terrainProfileRequestAbortRef.current = null;
+    terrainProfileDrawPointsRef.current = [];
+    terrainProfileDraftPointRef.current = null;
+    terrainProfileResultRef.current = null;
+    terrainProfileHoverIndexRef.current = null;
+    terrainProfileClickRef.current = null;
+    setTerrainProfileResult(null);
+    setTerrainProfileHoverIndex(null);
+    setTerrainProfileLoading(false);
+    setTerrainProfileError("");
+    updateTerrainProfileGraphicsOnMaps([mapRef.current, splitMapRef.current], null, [], null, null);
+  }, []);
+
+  const closeTerrainProfile = useCallback(() => {
+    clearTerrainProfile();
+    terrainProfileOpenRef.current = false;
+    setTerrainProfileOpen(false);
+  }, [clearTerrainProfile]);
+
+  const requestTerrainProfile = useCallback(async (payload: TerrainProfileRequest) => {
+    terrainProfileRequestAbortRef.current?.abort();
+    const controller = new AbortController();
+    terrainProfileRequestAbortRef.current = controller;
+    setTerrainProfileLoading(true);
+    setTerrainProfileError("");
+    setTerrainProfileHoverIndex(null);
+    try {
+      const result = await fetchTerrainProfile(payload, controller.signal);
+      if (controller.signal.aborted) return;
+      terrainProfileResultRef.current = result;
+      terrainProfileDrawPointsRef.current = [];
+      terrainProfileDraftPointRef.current = null;
+      setTerrainProfileResult(result);
+      updateTerrainProfileGraphicsOnMaps([mapRef.current, splitMapRef.current], result, [], null, null);
+    } catch (profileError) {
+      if (controller.signal.aborted) return;
+      const message = profileError instanceof Error ? profileError.message : "Could not generate the terrain profile.";
+      setTerrainProfileError(message);
+      toast.error(message);
+    } finally {
+      if (terrainProfileRequestAbortRef.current === controller) {
+        terrainProfileRequestAbortRef.current = null;
+        setTerrainProfileLoading(false);
+      }
+    }
+  }, []);
+  const finishTerrainProfileDraw = useCallback((finalPoint?: LngLatPair) => {
+    const raw = finalPoint ? [...terrainProfileDrawPointsRef.current, finalPoint] : terrainProfileDrawPointsRef.current;
+    const points = removeNearbyDuplicatePoints(raw);
+    terrainProfileClickRef.current = null;
+    terrainProfileDraftPointRef.current = null;
+    if (points.length < 2) {
+      terrainProfileDrawPointsRef.current = [];
+      updateTerrainProfileGraphicsOnMaps([mapRef.current, splitMapRef.current], terrainProfileResultRef.current, [], null, null);
+      return;
+    }
+    terrainProfileDrawPointsRef.current = points;
+    updateTerrainProfileGraphicsOnMaps([mapRef.current, splitMapRef.current], terrainProfileResultRef.current, points, null, null);
+    void requestTerrainProfile({ mode: "draw", geometry: { type: "LineString", coordinates: points } });
+  }, [requestTerrainProfile]);
+
+  const handleTerrainProfileClick = useCallback((event: MapMouseEvent) => {
+    if (!terrainProfileOpenRef.current) return;
+    event.preventDefault();
+    const mode = terrainProfileModeRef.current;
+    if (mode === "draw") {
+      const coordinate: LngLatPair = [event.lngLat.lng, event.lngLat.lat];
+      const now = window.performance.now();
+      const previous = terrainProfileClickRef.current;
+      const points = terrainProfileDrawPointsRef.current;
+      const doubleClickFinish = points.length >= 2 && previous !== null
+        && now - previous.time <= 520
+        && Math.hypot(previous.x - event.point.x, previous.y - event.point.y) <= 8;
+      if (doubleClickFinish) {
+        event.originalEvent.preventDefault();
+        event.originalEvent.stopPropagation();
+        finishTerrainProfileDraw(coordinate);
+        return;
+      }
+      terrainProfileDrawPointsRef.current = [...points, coordinate];
+      terrainProfileClickRef.current = { time: now, x: event.point.x, y: event.point.y };
+      terrainProfileDraftPointRef.current = null;
+      updateTerrainProfileGraphicsOnMaps(
+        [mapRef.current, splitMapRef.current],
+        terrainProfileResultRef.current,
+        terrainProfileDrawPointsRef.current,
+        null,
+        null,
+      );
+      return;
+    }
+
+    const map = event.target as MapLibreMap;
+    const queryBox: [[number, number], [number, number]] = [
+      [event.point.x - 5, event.point.y - 5],
+      [event.point.x + 5, event.point.y + 5],
+    ];
+    const expectedType = mode === "pipe" ? "pipe" : "channel";
+    const candidate = map.queryRenderedFeatures(queryBox)
+      .map((feature, index) => identifyFeatureFromMapFeature(feature, map.getLayer(feature.layer.id) as StyleLayer | undefined, index, index))
+      .find((feature) => feature.assetHistory?.assetType === expectedType);
+    if (!candidate?.assetHistory) {
+      toast.warning(`Select a storm ${mode} line.`);
+      return;
+    }
+    void requestTerrainProfile({ mode, asset_id: candidate.assetHistory.assetId });
+  }, [finishTerrainProfileDraw, requestTerrainProfile]);
+
+  const handleTerrainProfileDoubleClick = useCallback((event: MapMouseEvent) => {
+    if (!terrainProfileOpenRef.current || terrainProfileModeRef.current !== "draw") return;
+    event.preventDefault();
+    event.originalEvent.preventDefault();
+    event.originalEvent.stopPropagation();
+    finishTerrainProfileDraw([event.lngLat.lng, event.lngLat.lat]);
+  }, [finishTerrainProfileDraw]);
+
+  const handleTerrainProfileMouseMove = useCallback((event: MapMouseEvent) => {
+    if (!terrainProfileOpenRef.current) return;
+    if (terrainProfileModeRef.current === "draw" && terrainProfileDrawPointsRef.current.length) {
+      terrainProfileDraftPointRef.current = [event.lngLat.lng, event.lngLat.lat];
+      updateTerrainProfileGraphicsOnMaps(
+        [mapRef.current, splitMapRef.current],
+        terrainProfileResultRef.current,
+        terrainProfileDrawPointsRef.current,
+        terrainProfileDraftPointRef.current,
+        terrainProfileHoverIndexRef.current,
+      );
+      return;
+    }
+    const profile = terrainProfileResultRef.current;
+    if (!profile?.path.coordinates.length) return;
+    try {
+      const snapped = nearestPointOnLine(
+        lineString(profile.path.coordinates),
+        point([event.lngLat.lng, event.lngLat.lat]),
+        { units: "feet" },
+      );
+      const pixel = (event.target as MapLibreMap).project(snapped.geometry.coordinates as LngLatPair);
+      if (Math.hypot(pixel.x - event.point.x, pixel.y - event.point.y) > 14) {
+        if (terrainProfileHoverIndexRef.current !== null) setTerrainProfileHoverIndex(null);
+        return;
+      }
+      const location = Number(snapped.properties.location || 0);
+      let nearest = 0;
+      let difference = Number.POSITIVE_INFINITY;
+      profile.samples.forEach((sample, index) => {
+        const candidateDifference = Math.abs(sample.distance_feet - location);
+        if (candidateDifference < difference) {
+          difference = candidateDifference;
+          nearest = index;
+        }
+      });
+      if (terrainProfileHoverIndexRef.current !== nearest) setTerrainProfileHoverIndex(nearest);
+    } catch {
+      // Ignore transient geometry errors while the map style is changing.
+    }
+  }, []);
+
   const showClickedFeature = useCallback(
     (event: MapMouseEvent) => {
-      if (drawModeActiveRef.current) {
+      if (drawModeActiveRef.current || terrainProfileOpenRef.current || failureConsequenceOpenRef.current) {
         return;
       }
       const map = mapRef.current;
@@ -1428,7 +1727,7 @@ export default function App() {
   );
 
   const commitDrawFeature = useCallback(
-    (shape: DrawShape, geometry: DrawGeometry) => {
+    (shape: DrawShape, geometry: DrawGeometry, customLabel?: string) => {
       const id = `draw-${Date.now()}-${Math.round(Math.random() * 100000)}`;
       const feature: DrawGeoJsonFeature = {
         type: "Feature",
@@ -1436,7 +1735,7 @@ export default function App() {
         properties: {
           id,
           shape,
-          label: shapeLabel(shape),
+          label: customLabel || shapeLabel(shape),
         },
         geometry,
       };
@@ -1621,9 +1920,245 @@ export default function App() {
     drawFeaturesRef.current = [];
     drawDraftFeaturesRef.current = [];
     drawInteractionRef.current = null;
+    selectedDrawIdRef.current = null;
     setDrawFeatures([]);
     setSelectedDrawId(null);
     updateDrawDataOnMaps([mapRef.current, splitMapRef.current], [], [], null);
+  }, []);
+
+  const assetExtractAreas = useMemo(() => drawFeatures
+    .filter((feature): feature is DrawGeoJsonFeature & { geometry: Extract<DrawGeometry, { type: "Polygon" | "MultiPolygon" }> } => feature.geometry.type === "Polygon" || feature.geometry.type === "MultiPolygon")
+    .map((feature, index) => ({
+      id: String(feature.properties.id || feature.id || `drawing-${index + 1}`),
+      label: String(feature.properties.label || `Drawing ${index + 1}`),
+      area: feature as unknown as AssetExtractArea,
+    })), [drawFeatures]);
+
+  const activateAssetExtractDraw = useCallback((tool: "polygon" | "circle" | "rectangle") => {
+    setDrawTool(tool);
+    setDrawModeActive(true);
+  }, []);
+
+  const useCurrentExtentForAssetExtract = useCallback(() => {
+    const bounds = mapRef.current?.getBounds();
+    if (!bounds) return;
+    commitDrawFeature("rectangle", rectangleGeometry([bounds.getWest(), bounds.getSouth()], [bounds.getEast(), bounds.getNorth()]), "Current map extent");
+  }, [commitDrawFeature]);
+
+  const useBoundaryAreaForAssetExtract = useCallback((area: AssetExtractArea, label: string) => {
+    commitDrawFeature("polygon", area.geometry as DrawGeometry, label);
+    const bounds = geometryBounds(area.geometry as AssetSearchResult["geometry"]);
+    const map = mapRef.current;
+    if (map && bounds) {
+      map.fitBounds(boundsToLngLatBounds(bounds), { padding: 72, duration: 650, maxZoom: 17 });
+    }
+  }, [commitDrawFeature]);
+
+  const closeAssetExtract = useCallback(() => {
+    assetExtractOpenRef.current = false;
+    assetExtractPreviewRef.current = null;
+    drawModeActiveRef.current = false;
+    drawToolRef.current = "select";
+    setAssetExtractOpen(false);
+    setAssetExtractPreview(null);
+    setDrawModeActive(false);
+    setDrawTool("select");
+    clearDrawFeatures();
+    updateAssetExtractPreviewOnMaps([mapRef.current, splitMapRef.current], null);
+  }, [clearDrawFeatures]);
+
+  const handleAssetExtractPreview = useCallback((preview: AssetExtractPreview | null) => {
+    if (!assetExtractOpenRef.current) {
+      return;
+    }
+    setAssetExtractPreview(preview);
+  }, []);
+
+  const toggleAssetExtract = useCallback(() => {
+    if (assetExtractOpenRef.current) {
+      closeAssetExtract();
+      return;
+    }
+    assetExtractOpenRef.current = true;
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setSelectedFeature(null);
+    setLayerFilterEditor(null);
+    setAssetExtractOpen(true);
+  }, [closeAssetExtract]);
+
+  const changeTerrainProfileMode = useCallback((mode: TerrainProfileMode) => {
+    clearTerrainProfile();
+    terrainProfileModeRef.current = mode;
+    setTerrainProfileMode(mode);
+  }, [clearTerrainProfile]);
+
+  const openTerrainProfile = useCallback((mode: TerrainProfileMode = "draw") => {
+    if (assetExtractOpenRef.current) closeAssetExtract();
+    setDrawModeActive(false);
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setSelectedFeature(null);
+    setSelectedFeatureOptions([]);
+    terrainProfileOpenRef.current = true;
+    terrainProfileModeRef.current = mode;
+    setTerrainProfileMode(mode);
+    setTerrainProfileOpen(true);
+    clearTerrainProfile();
+  }, [clearTerrainProfile, closeAssetExtract]);
+
+  const toggleTerrainProfile = useCallback(() => {
+    if (terrainProfileOpenRef.current) closeTerrainProfile();
+    else openTerrainProfile("draw");
+  }, [closeTerrainProfile, openTerrainProfile]);
+
+  const profileSelectedFeature = useCallback(() => {
+    const context = selectedFeature?.assetHistory;
+    if (!context || (context.assetType !== "pipe" && context.assetType !== "channel")) return;
+    const mode: TerrainProfileMode = context.assetType === "pipe" ? "pipe" : "drainage";
+    openTerrainProfile(mode);
+    void requestTerrainProfile({ mode, asset_id: context.assetId });
+  }, [openTerrainProfile, requestTerrainProfile, selectedFeature?.assetHistory]);
+
+  const closeFailureConsequence = useCallback(() => {
+    failureConsequenceAbortRef.current?.abort();
+    failureConsequenceAbortRef.current = null;
+    failureConsequenceOpenRef.current = false;
+    failureConsequenceSimulatingRef.current = false;
+    failureConsequenceResultRef.current = null;
+    failureConsequence3dRef.current = false;
+    setFailureConsequenceOpen(false);
+    setFailureConsequenceSimulating(false);
+    setFailureConsequenceResult(null);
+    setFailureConsequence3d(false);
+    setFailureConsequenceLoading(false);
+    setFailureConsequenceError("");
+    updateFailureConsequenceGraphicsOnMaps([failureConsequenceMapRef.current], null, false);
+  }, []);
+
+  const requestFailureConsequence = useCallback(async (
+    assetId: string,
+    assetType: "pipe" | "structure" | "channel",
+    scenario?: FailureScenario,
+  ) => {
+    failureConsequenceAbortRef.current?.abort();
+    const controller = new AbortController();
+    failureConsequenceAbortRef.current = controller;
+    setFailureConsequenceLoading(true);
+    setFailureConsequenceError("");
+    try {
+      const result = await fetchFailureConsequence(assetId, assetType, scenario, controller.signal);
+      if (controller.signal.aborted) return;
+      failureConsequenceResultRef.current = result;
+      setFailureConsequenceResult(result);
+      updateFailureConsequenceGraphicsOnMaps([failureConsequenceMapRef.current], result, false);
+      const bounds = failureConsequenceBounds(result);
+      if (bounds && failureConsequenceMapRef.current) {
+        failureConsequenceMapRef.current.fitBounds(boundsToLngLatBounds(bounds), { padding: 0, duration: 520 });
+      }
+    } catch (analysisError) {
+      if (controller.signal.aborted) return;
+      const message = analysisError instanceof Error ? analysisError.message : "Could not analyze failure consequences.";
+      setFailureConsequenceError(message);
+      toast.error(message);
+    } finally {
+      if (failureConsequenceAbortRef.current === controller) {
+        failureConsequenceAbortRef.current = null;
+        setFailureConsequenceLoading(false);
+      }
+    }
+  }, []);
+
+  const openFailureConsequence = useCallback((context?: SelectedFeature["assetHistory"]) => {
+    if (assetExtractOpenRef.current) closeAssetExtract();
+    if (terrainProfileOpenRef.current) closeTerrainProfile();
+    setDrawModeActive(false);
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setSelectedFeature(null);
+    setSelectedFeatureOptions([]);
+    failureConsequenceOpenRef.current = true;
+    setFailureConsequenceOpen(true);
+    setFailureConsequenceError("");
+    if (context) {
+      void requestFailureConsequence(context.assetId, context.assetType);
+    } else {
+      toast.info("Select a storm pipe, structure, or drainage asset on the map.");
+    }
+  }, [closeAssetExtract, closeTerrainProfile, requestFailureConsequence]);
+
+  const toggleFailureConsequence = useCallback(() => {
+    if (failureConsequenceOpenRef.current) closeFailureConsequence();
+    else openFailureConsequence(selectedFeature?.assetHistory);
+  }, [closeFailureConsequence, openFailureConsequence, selectedFeature?.assetHistory]);
+
+  const analyzeSelectedFeature = useCallback(() => {
+    if (!selectedFeature?.assetHistory) return;
+    openFailureConsequence(selectedFeature.assetHistory);
+  }, [openFailureConsequence, selectedFeature?.assetHistory]);
+
+  const selectFailureDefect = useCallback((defect: FailureDefect) => {
+    const current = failureConsequenceResultRef.current;
+    if (!current || !defect.located || defect.source === "simulated") return;
+    void requestFailureConsequence(current.asset.asset_id, current.asset.asset_type, { source: defect.source, id: defect.id });
+  }, [requestFailureConsequence]);
+
+  const handleFailureConsequenceClick = useCallback((event: MapMouseEvent) => {
+    if (!failureConsequenceOpenRef.current) return;
+    event.preventDefault();
+    if (failureConsequenceResultRef.current) return;
+    const map = event.target as MapLibreMap;
+    const box: [[number, number], [number, number]] = [[event.point.x - 6, event.point.y - 6], [event.point.x + 6, event.point.y + 6]];
+    const candidate = map.queryRenderedFeatures(box)
+      .map((feature, index) => identifyFeatureFromMapFeature(feature, map.getLayer(feature.layer.id) as StyleLayer | undefined, index, index))
+      .find((feature) => feature.assetHistory);
+    if (!candidate?.assetHistory) {
+      toast.warning("Select a storm pipe, structure, or drainage asset.");
+      return;
+    }
+    void requestFailureConsequence(candidate.assetHistory.assetId, candidate.assetHistory.assetType);
+  }, [requestFailureConsequence]);
+
+  const handleFailureConsequenceMapReady = useCallback((map: MapLibreMap | null) => {
+    failureConsequenceMapRef.current = map;
+    if (!map) return;
+    const result = failureConsequenceResultRef.current;
+    updateFailureConsequenceGraphicsOnMaps([map], result, false);
+    const bounds = result ? failureConsequenceBounds(result) : null;
+    if (bounds) {
+      map.fitBounds(boundsToLngLatBounds(bounds), { padding: 0, duration: 0 });
+    }
+  }, []);
+
+  const handleFailureConsequenceMapClick = useCallback((coordinates: [number, number]) => {
+    const current = failureConsequenceResultRef.current;
+    if (!failureConsequenceSimulatingRef.current || !current) return;
+    const scenario: FailureScenario = {
+      source: "simulated",
+      id: "simulated",
+      coordinates,
+    };
+    setFailureConsequenceSimulating(false);
+    void requestFailureConsequence(current.asset.asset_id, current.asset.asset_type, scenario);
+  }, [requestFailureConsequence]);
+
+  const toggleFailureConsequence3d = useCallback(() => {
+    setFailureConsequence3d((current) => {
+      const next = !current;
+      failureConsequence3dRef.current = next;
+      return next;
+    });
+  }, []);
+
+  const reverseCurrentTerrainProfile = useCallback(() => {
+    const profile = terrainProfileResultRef.current;
+    if (!profile) return;
+    const reversed = reverseTerrainProfile(profile);
+    terrainProfileResultRef.current = reversed;
+    terrainProfileHoverIndexRef.current = null;
+    setTerrainProfileHoverIndex(null);
+    setTerrainProfileResult(reversed);
+    updateTerrainProfileGraphicsOnMaps([mapRef.current, splitMapRef.current], reversed, [], null, null);
   }, []);
 
   const selectFeatureOption = useCallback((index: number) => {
@@ -2422,6 +2957,7 @@ export default function App() {
         applyAttributeFiltersToMap(map);
         refreshDuckDbGeoJsonSources(map);
         updateDrawDataOnMaps([map], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateTerrainProfileGraphicsOnMaps([map], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         updateBearing();
         refreshCurrentZoom();
         rememberValidCamera();
@@ -2440,6 +2976,7 @@ export default function App() {
         applyAttributeFiltersToMap(map);
         refreshDuckDbGeoJsonSources(map);
         updateDrawDataOnMaps([map], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateTerrainProfileGraphicsOnMaps([map], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         updateBearing();
         refreshCurrentZoom();
         refreshLayerPanel();
@@ -2465,10 +3002,14 @@ export default function App() {
         refreshDuckDbGeoJsonSourcesOnMaps();
       });
       map.on("click", showClickedFeature);
+      map.on("click", handleFailureConsequenceClick);
+      map.on("click", handleTerrainProfileClick);
       map.on("click", handleDrawClick);
+      map.on("dblclick", handleTerrainProfileDoubleClick);
       map.on("dblclick", handleDrawDoubleClick);
       map.on("mousedown", handleDrawMouseDown);
       map.on("mousemove", handleDrawMouseMove);
+      map.on("mousemove", handleTerrainProfileMouseMove);
       map.on("mouseup", handleDrawMouseUp);
       map.on("error", (event) => showError(new Error(event.error?.message || "MapLibre reported an error.")));
       return;
@@ -2481,6 +3022,7 @@ export default function App() {
       applyAttributeFiltersToMap(mapRef.current);
       refreshDuckDbGeoJsonSources(mapRef.current);
       updateDrawDataOnMaps([mapRef.current], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+      updateTerrainProfileGraphicsOnMaps([mapRef.current], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
       refreshCurrentZoom();
       refreshLayerPanel();
       updateRenderedFeatureMetric();
@@ -2502,6 +3044,9 @@ export default function App() {
     handleDrawMouseDown,
     handleDrawMouseMove,
     handleDrawMouseUp,
+    handleTerrainProfileClick,
+    handleTerrainProfileDoubleClick,
+    handleTerrainProfileMouseMove,
     refreshDuckDbGeoJsonSources,
     refreshDuckDbGeoJsonSourcesOnMaps,
     refreshCurrentZoom,
@@ -2548,6 +3093,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMap);
         refreshDuckDbGeoJsonSources(splitMap);
         updateDrawDataOnMaps([splitMap], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateTerrainProfileGraphicsOnMaps([splitMap], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         syncMapCamera(primaryMap, splitMap);
         setSplitMapReadyCounter((counter) => counter + 1);
       });
@@ -2558,6 +3104,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMap);
         refreshDuckDbGeoJsonSources(splitMap);
         updateDrawDataOnMaps([splitMap], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateTerrainProfileGraphicsOnMaps([splitMap], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         setSplitMapReadyCounter((counter) => counter + 1);
       });
       splitMap.on("moveend", () => {
@@ -2569,9 +3116,13 @@ export default function App() {
         refreshDuckDbGeoJsonSources(splitMap);
       });
       splitMap.on("click", handleDrawClick);
+      splitMap.on("click", handleFailureConsequenceClick);
+      splitMap.on("click", handleTerrainProfileClick);
       splitMap.on("dblclick", handleDrawDoubleClick);
+      splitMap.on("dblclick", handleTerrainProfileDoubleClick);
       splitMap.on("mousedown", handleDrawMouseDown);
       splitMap.on("mousemove", handleDrawMouseMove);
+      splitMap.on("mousemove", handleTerrainProfileMouseMove);
       splitMap.on("mouseup", handleDrawMouseUp);
       splitMap.on("error", (event) => showError(new Error(event.error?.message || "Split map reported an error.")));
     } else {
@@ -2586,6 +3137,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMapRef.current);
         refreshDuckDbGeoJsonSources(splitMapRef.current);
         updateDrawDataOnMaps([splitMapRef.current], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateTerrainProfileGraphicsOnMaps([splitMapRef.current], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         syncMapCamera(primaryMap, splitMapRef.current);
         setSplitMapReadyCounter((counter) => counter + 1);
       });
@@ -2607,6 +3159,9 @@ export default function App() {
     handleDrawMouseDown,
     handleDrawMouseMove,
     handleDrawMouseUp,
+    handleTerrainProfileClick,
+    handleTerrainProfileDoubleClick,
+    handleTerrainProfileMouseMove,
     mapViewMode,
     refreshDuckDbGeoJsonSources,
   ]);
@@ -3276,6 +3831,9 @@ export default function App() {
             onPointerCancel={handleNorthArrowPointerCancel}
           />
           <MapToolStrip
+            assetExtractActive={assetExtractOpen}
+            failureConsequenceActive={failureConsequenceOpen}
+            terrainProfileActive={terrainProfileOpen}
             drawActive={drawModeActive}
             drawFeatureCount={drawFeatures.length}
             drawTool={drawTool}
@@ -3294,6 +3852,9 @@ export default function App() {
             onMap3dToggle={toggle3dMap}
             onMapViewMenuToggle={() => setMapViewMenuOpen((open) => !open)}
             onModeChange={changeMapViewMode}
+            onAssetExtractToggle={toggleAssetExtract}
+            onFailureConsequenceToggle={toggleFailureConsequence}
+            onTerrainProfileToggle={toggleTerrainProfile}
           />
           <div className="map-tiles-navigation-strip grid w-10 overflow-visible border-t border-[var(--control-border)] pt-1">
             <MapControlButton label="Zoom in" onClick={() => mapRef.current?.zoomIn({ duration: 180 })}>
@@ -3323,6 +3884,52 @@ export default function App() {
             </button>
           </div>
         ) : null}
+
+        <AssetDataExtractPanel
+          areas={assetExtractAreas}
+          onActivateDraw={activateAssetExtractDraw}
+          onClose={closeAssetExtract}
+          onPreview={handleAssetExtractPreview}
+          onSelectArea={setSelectedDrawId}
+          onUseCurrentExtent={useCurrentExtentForAssetExtract}
+          onUseBoundaryArea={useBoundaryAreaForAssetExtract}
+          open={assetExtractOpen}
+          selectedAreaId={selectedDrawId}
+        />
+
+        <TerrainProfilePanel
+          colorScheme={colorScheme}
+          error={terrainProfileError}
+          hoverIndex={terrainProfileHoverIndex}
+          loading={terrainProfileLoading}
+          mode={terrainProfileMode}
+          open={terrainProfileOpen}
+          profile={terrainProfileResult}
+          onClear={clearTerrainProfile}
+          onClose={closeTerrainProfile}
+          onHoverSample={setTerrainProfileHoverIndex}
+          onModeChange={changeTerrainProfileMode}
+          onReverse={reverseCurrentTerrainProfile}
+        />
+
+        <FailureConsequencePanel
+          error={failureConsequenceError}
+          loading={failureConsequenceLoading}
+          open={failureConsequenceOpen && (failureConsequenceLoading || Boolean(failureConsequenceResult) || Boolean(failureConsequenceError))}
+          result={failureConsequenceResult}
+          simulating={failureConsequenceSimulating}
+          is3d={failureConsequence3d}
+          terrainStyle={activeStyle}
+          activeBasemapId={activeBasemapId}
+          basemapEnabled={basemapEnabled}
+          aerialBasemapUrl={AERIAL_2025_EXPORT_URL}
+          onClose={closeFailureConsequence}
+          onMapClick={handleFailureConsequenceMapClick}
+          onMapReady={handleFailureConsequenceMapReady}
+          onSelectDefect={selectFailureDefect}
+          onSimulatingChange={setFailureConsequenceSimulating}
+          onToggle3d={toggleFailureConsequence3d}
+        />
 
         <aside
           className={`map-tiles-layer-panel absolute bottom-3 right-3 top-3 z-20 grid w-[380px] max-w-[calc(100vw-72px)] grid-rows-[48px_minmax(0,1fr)] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_48px_rgba(0,0,0,.26)] transition-transform duration-200 ${
@@ -3620,6 +4227,26 @@ export default function App() {
                 >
                   <History className="h-3.5 w-3.5 shrink-0" />
                   Asset history
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-1.5 text-[10px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
+                  onClick={profileSelectedFeature}
+                  disabled={!selectedFeature.assetHistory || !["pipe", "channel"].includes(selectedFeature.assetHistory.assetType)}
+                  title="Show the DEM terrain profile for this pipe or drainage"
+                >
+                  <ChartArea className="h-3.5 w-3.5 shrink-0" />
+                  Terrain profile
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex h-9 min-w-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-sm border border-[var(--panel-border)] bg-[var(--control-bg)] px-1.5 text-[10px] font-semibold text-[var(--control-text)] transition hover:border-[var(--accent)] hover:bg-[var(--row-hover)] disabled:cursor-not-allowed disabled:text-[var(--panel-disabled)]"
+                  onClick={analyzeSelectedFeature}
+                  disabled={!selectedFeature.assetHistory}
+                  title="Screen the selected asset's latest observed or simulated failure consequence"
+                >
+                  <ShieldAlert className="h-3.5 w-3.5 shrink-0" />
+                  Consequence
                 </button>
               </div>
             </div>
@@ -4544,6 +5171,9 @@ function MapControlButton({
 }
 
 function MapToolStrip({
+  assetExtractActive,
+  failureConsequenceActive,
+  terrainProfileActive,
   drawActive,
   drawFeatureCount,
   drawTool,
@@ -4555,6 +5185,9 @@ function MapToolStrip({
   mode,
   selectedDrawId,
   onClearDrawFeatures,
+  onAssetExtractToggle,
+  onFailureConsequenceToggle,
+  onTerrainProfileToggle,
   onDeleteSelectedDrawFeature,
   onDrawToggle,
   onDrawToolChange,
@@ -4563,6 +5196,9 @@ function MapToolStrip({
   onMapViewMenuToggle,
   onModeChange,
 }: {
+  assetExtractActive: boolean;
+  failureConsequenceActive: boolean;
+  terrainProfileActive: boolean;
   drawActive: boolean;
   drawFeatureCount: number;
   drawTool: DrawTool;
@@ -4574,6 +5210,9 @@ function MapToolStrip({
   mode: MapViewMode;
   selectedDrawId: string | null;
   onClearDrawFeatures: () => void;
+  onAssetExtractToggle: () => void;
+  onFailureConsequenceToggle: () => void;
+  onTerrainProfileToggle: () => void;
   onDeleteSelectedDrawFeature: () => void;
   onDrawToggle: () => void;
   onDrawToolChange: (tool: DrawTool) => void;
@@ -4599,6 +5238,15 @@ function MapToolStrip({
         </MapToolButton>
         <MapToolButton active={drawActive} label="Draw on map" onClick={onDrawToggle}>
           <KeplerDrawIcon className="h-[18px] w-[18px]" />
+        </MapToolButton>
+        <MapToolButton active={assetExtractActive} label="Extract asset data" onClick={onAssetExtractToggle}>
+          <Database className="h-[18px] w-[18px]" />
+        </MapToolButton>
+        <MapToolButton active={failureConsequenceActive} label="Failure consequence" onClick={onFailureConsequenceToggle}>
+          <ShieldAlert className="h-[18px] w-[18px]" />
+        </MapToolButton>
+        <MapToolButton active={terrainProfileActive} label="Terrain profile" onClick={onTerrainProfileToggle}>
+          <ChartArea className="h-[18px] w-[18px]" />
         </MapToolButton>
         <MapToolButton
           active={mapPdfExportActive || mapPdfExporting}
@@ -6272,6 +6920,720 @@ function updateDrawDataOnMaps(
   });
 }
 
+function updateAssetExtractPreviewOnMaps(
+  maps: Array<MapLibreMap | null>,
+  preview: AssetExtractPreview | null,
+): void {
+  maps.forEach((map) => {
+    if (!map?.isStyleLoaded()) return;
+    ensureAssetExtractPreviewLayers(map);
+    const source = map.getSource(ASSET_EXTRACT_SOURCE_ID) as GeoJSONSource | undefined;
+    source?.setData((preview || { type: "FeatureCollection", features: [] }) as Parameters<GeoJSONSource["setData"]>[0]);
+  });
+}
+
+function updateTerrainProfileGraphicsOnMaps(
+  maps: Array<MapLibreMap | null>,
+  profile: TerrainProfileResult | null,
+  drawPoints: LngLatPair[],
+  draftPoint: LngLatPair | null,
+  hoverIndex: number | null,
+): void {
+  const draftCoordinates = drawPoints.length
+    ? removeNearbyDuplicatePoints(draftPoint ? [...drawPoints, draftPoint] : drawPoints)
+    : [];
+  const coordinates = draftCoordinates.length ? draftCoordinates : profile?.path.coordinates || [];
+  const pathFeatures: DrawGeoJsonFeature[] = [];
+  if (coordinates.length >= 2) {
+    pathFeatures.push({
+      type: "Feature",
+      properties: { role: draftCoordinates.length ? "draft" : "profile" },
+      geometry: { type: "LineString", coordinates },
+    });
+  }
+  const endpointCoordinates = coordinates.length ? [coordinates[0], coordinates[coordinates.length - 1]] : [];
+  endpointCoordinates.forEach((coordinate, index) => {
+    pathFeatures.push({
+      type: "Feature",
+      properties: {
+        role: index === 0 ? "start" : "end",
+        label: profile ? (index === 0 ? profile.endpoints.start.label : profile.endpoints.end.label) : index === 0 ? "Start" : "End",
+      },
+      geometry: { type: "Point", coordinates: coordinate },
+    });
+  });
+  const hoverSample = hoverIndex === null ? null : profile?.samples[hoverIndex] || null;
+  const hoverFeatures: DrawGeoJsonFeature[] = hoverSample ? [{
+    type: "Feature",
+    properties: { role: "hover", distance: hoverSample.distance_feet },
+    geometry: { type: "Point", coordinates: [hoverSample.longitude, hoverSample.latitude] },
+  }] : [];
+
+  maps.forEach((map) => {
+    if (!map?.isStyleLoaded()) return;
+    ensureTerrainProfileLayers(map);
+    (map.getSource(TERRAIN_PROFILE_SOURCE_ID) as GeoJSONSource | undefined)?.setData(
+      drawFeatureCollection(pathFeatures) as unknown as Parameters<GeoJSONSource["setData"]>[0],
+    );
+    (map.getSource(TERRAIN_PROFILE_HOVER_SOURCE_ID) as GeoJSONSource | undefined)?.setData(
+      drawFeatureCollection(hoverFeatures) as unknown as Parameters<GeoJSONSource["setData"]>[0],
+    );
+  });
+}
+
+function updateFailureConsequenceGraphicsOnMaps(
+  maps: Array<MapLibreMap | null>,
+  result: FailureConsequenceResult | null,
+  is3d: boolean,
+): void {
+  const features: Array<GeoJSON.Feature<GeoJSON.Geometry, Record<string, unknown>>> = [];
+  if (result) {
+    const analysisVolumeHeight = result.analysis
+      ? Math.max(8, Math.min(36, result.analysis.zoi_radius_feet * 0.3048 * 1.25))
+      : 10;
+    features.push({
+      type: "Feature",
+      properties: { role: "asset", asset_type: result.asset.asset_type, asset_id: result.asset.asset_id },
+      geometry: result.asset.geometry,
+    });
+    result.defects.filter((item) => item.geometry).forEach((defect) => {
+      features.push({
+        type: "Feature",
+        properties: {
+          role: "defect",
+          source: defect.source,
+          active: defect.id === result.active_defect_id,
+          defect_id: defect.id,
+          label: defect.label,
+          condition_risk: defect.condition_risk,
+        },
+        geometry: defect.geometry!,
+      });
+      const defectPoint = representativePoint(defect.geometry!);
+      if (defectPoint) {
+        features.push({
+          type: "Feature",
+          properties: {
+            role: "defect-3d",
+            source: defect.source,
+            active: defect.id === result.active_defect_id,
+            defect_id: defect.id,
+            height_m: Math.max(4, Math.min(analysisVolumeHeight * 0.82, 4 + Number(defect.condition_risk ?? 0) * 0.22)),
+          },
+          geometry: squareFootprintAroundPoint(defectPoint, 4.5),
+        });
+      }
+    });
+    if (result.analysis) {
+      const active = result.defects.find((item) => item.id === result.active_defect_id);
+      const clipMask = outsideFailureConsequenceMask(result.analysis.display_extent_geometry);
+      if (clipMask) {
+        features.push({
+          type: "Feature",
+          properties: { role: "clip-mask" },
+          geometry: clipMask,
+        });
+        features.push({
+          type: "Feature",
+          properties: { role: "clip-boundary", basis: result.analysis.clip_basis },
+          geometry: result.analysis.display_extent_geometry,
+        });
+      }
+      const volumeBounds = geometryCoordinateBounds(result.analysis.zoi_geometry);
+      if (volumeBounds) {
+        features.push({
+          type: "Feature",
+          properties: {
+            role: "analysis-volume",
+            source: active?.source ?? "asset",
+            height_m: analysisVolumeHeight,
+          },
+          geometry: polygonFromBounds(volumeBounds),
+        });
+      }
+      features.push({
+        type: "Feature",
+        properties: { role: "zoi", source: active?.source ?? "asset", radius_feet: result.analysis.zoi_radius_feet },
+        geometry: result.analysis.zoi_geometry,
+      });
+      if (result.analysis.scenario_zoi_geometry) {
+        features.push({
+          type: "Feature",
+          properties: { role: "scenario-zoi", source: active?.source ?? "asset" },
+          geometry: result.analysis.scenario_zoi_geometry,
+        });
+      }
+      if (result.analysis.influence_footprint_geometry) {
+        features.push({
+          type: "Feature",
+          properties: { role: "influence-footprint", source: active?.source ?? "asset" },
+          geometry: result.analysis.influence_footprint_geometry,
+        });
+      }
+      result.analysis.impacted_features.forEach((feature) => {
+        features.push({
+          type: "Feature",
+          properties: {
+            role: "impact",
+            impact_id: feature.id,
+            category: feature.category,
+            label: feature.label,
+            relationship: feature.relationship,
+            is_influenced: feature.is_influenced,
+          },
+          geometry: feature.geometry,
+        });
+        const impactPoint = representativePoint(feature.geometry);
+        if (feature.geometry.type === "Point" && impactPoint) {
+          features.push({
+            type: "Feature",
+            properties: {
+              role: "impact-point-3d",
+              impact_id: feature.id,
+              category: feature.category,
+              label: feature.label,
+              relationship: feature.relationship,
+              height_m: feature.relationship === "direct" ? 8 : 5,
+            },
+            geometry: squareFootprintAroundPoint(impactPoint, 4),
+          });
+        }
+        if (feature.influenced_geometry) {
+          features.push({
+            type: "Feature",
+            properties: {
+              role: "influence",
+              source: active?.source ?? "asset",
+              impact_id: feature.id,
+              category: feature.category,
+              label: feature.label,
+              relationship: feature.relationship,
+            },
+            geometry: feature.influenced_geometry,
+          });
+          const influencedPoint = representativePoint(feature.influenced_geometry);
+          if (feature.influenced_geometry.type === "Point" && influencedPoint) {
+            features.push({
+              type: "Feature",
+              properties: {
+                role: "influence-point-3d",
+                source: active?.source ?? "asset",
+                impact_id: feature.id,
+                category: feature.category,
+                height_m: 9,
+              },
+              geometry: squareFootprintAroundPoint(influencedPoint, 5),
+            });
+          }
+        }
+      });
+    }
+  }
+  const collection: GeoJSON.FeatureCollection = { type: "FeatureCollection", features };
+  maps.forEach((map) => {
+    if (!map?.isStyleLoaded()) return;
+    ensureFailureConsequenceLayers(map);
+    (map.getSource(FAILURE_CONSEQUENCE_SOURCE_ID) as GeoJSONSource | undefined)?.setData(
+      collection as Parameters<GeoJSONSource["setData"]>[0],
+    );
+    [
+      FAILURE_CONSEQUENCE_LAYER_IDS.analysisVolume,
+      FAILURE_CONSEQUENCE_LAYER_IDS.impact3d,
+      FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint3d,
+      FAILURE_CONSEQUENCE_LAYER_IDS.influence3d,
+      FAILURE_CONSEQUENCE_LAYER_IDS.defects3d,
+    ].forEach((layerId) => {
+      if (map.getLayer(layerId)) map.setLayoutProperty(layerId, "visibility", is3d ? "visible" : "none");
+    });
+  });
+}
+
+function ensureFailureConsequenceLayers(map: MapLibreMap): void {
+  if (!map.getSource(FAILURE_CONSEQUENCE_SOURCE_ID)) {
+    map.addSource(FAILURE_CONSEQUENCE_SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  }
+  const categoryColor = [
+    "match", ["get", "category"],
+    "building", "#e97324",
+    "accessory_structure", "#f59e0b",
+    "roadway", "#64748b",
+    "city_row", "#0ea5e9",
+    "driveway", "#9ca3af",
+    "paved_surface", "#7c8a99",
+    "stormwater_easement", "#16a34a",
+    "#8b5cf6",
+  ] as unknown as string;
+  const zoiColor = [
+    "match", ["get", "source"],
+    "itpipes", "#0891b2",
+    "cityworks", "#d97706",
+    "simulated", "#9333ea",
+    "#2563eb",
+  ] as unknown as string;
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.clipMask)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.clipMask,
+      type: "fill",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "clip-mask"],
+      paint: { "fill-color": "#eaf1f5", "fill-opacity": 1 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.analysisVolume)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.analysisVolume,
+      type: "fill-extrusion",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "analysis-volume"],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-extrusion-color": zoiColor,
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.035,
+        "fill-extrusion-vertical-gradient": true,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.impactFill)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.impactFill,
+      type: "fill",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Polygon"]],
+      paint: { "fill-color": categoryColor, "fill-opacity": 0.055 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.impactLine)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.impactLine,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "impact"], ["!=", ["geometry-type"], "Point"]],
+      paint: { "line-color": categoryColor, "line-width": 1.15, "line-opacity": 0.42 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint,
+      type: "circle",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Point"]],
+      paint: { "circle-color": categoryColor, "circle-radius": 4, "circle-opacity": 0.58, "circle-stroke-color": "#ffffff", "circle-stroke-width": 1 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.influenceFill)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.influenceFill,
+      type: "fill",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "influence-footprint"], ["==", ["geometry-type"], "Polygon"]],
+      paint: { "fill-color": zoiColor, "fill-opacity": 0.28 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.influenceLine)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.influenceLine,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "influence"], ["!=", ["geometry-type"], "Point"]],
+      paint: {
+        "line-color": categoryColor,
+        "line-width": ["case", ["==", ["geometry-type"], "Polygon"], 2, 4],
+        "line-opacity": 0.9,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.influencePoint)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.influencePoint,
+      type: "circle",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "influence"], ["==", ["geometry-type"], "Point"]],
+      paint: { "circle-color": zoiColor, "circle-radius": 8, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2.5 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.impact3d)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.impact3d,
+      type: "fill-extrusion",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Polygon"]],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-extrusion-color": categoryColor,
+        "fill-extrusion-height": [
+          "match", ["get", "category"],
+          "building", 18,
+          "accessory_structure", 10,
+          "roadway", 1.2,
+          "city_row", 0.8,
+          "driveway", 0.6,
+          "paved_surface", 0.5,
+          "stormwater_easement", 0.35,
+          4,
+        ],
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.68,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint3d)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint3d,
+      type: "fill-extrusion",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "impact-point-3d"],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-extrusion-color": categoryColor,
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.78,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.influence3d)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.influence3d,
+      type: "fill-extrusion",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["any",
+        ["all", ["==", ["get", "role"], "influence-footprint"], ["==", ["geometry-type"], "Polygon"]],
+        ["==", ["get", "role"], "influence-point-3d"],
+      ],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-extrusion-color": zoiColor,
+        "fill-extrusion-height": ["case", ["has", "height_m"], ["get", "height_m"], 1.2],
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.88,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.zoiFill)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.zoiFill,
+      type: "fill",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "zoi"],
+      paint: { "fill-color": "#0891b2", "fill-opacity": 0.035 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.zoiLine)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.zoiLine,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "zoi"],
+      paint: {
+        "line-color": "#0891b2",
+        "line-width": 1.5,
+        "line-opacity": 0.75,
+        "line-dasharray": ["literal", [3, 2]],
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.scenarioZoiFill)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.scenarioZoiFill,
+      type: "fill",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "scenario-zoi"],
+      paint: { "fill-color": zoiColor, "fill-opacity": 0.035 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.scenarioZoiLine)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.scenarioZoiLine,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "scenario-zoi"],
+      paint: { "line-color": zoiColor, "line-width": 3, "line-opacity": 0.96 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.assetLine)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.assetLine,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "asset"], ["==", ["geometry-type"], "LineString"]],
+      paint: { "line-color": "#00e5ff", "line-width": 7, "line-opacity": 0.98, "line-blur": 0.2 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.assetPoint)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.assetPoint,
+      type: "circle",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "asset"], ["==", ["geometry-type"], "Point"]],
+      paint: { "circle-color": "#00e5ff", "circle-radius": 9, "circle-stroke-color": "#063b56", "circle-stroke-width": 3 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.defects)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.defects,
+      type: "circle",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "defect"], ["!=", ["get", "source"], "simulated"]],
+      paint: {
+        "circle-color": ["match", ["get", "source"], "itpipes", "#0891b2", "cityworks", "#d97706", "#64748b"],
+        "circle-radius": ["case", ["boolean", ["get", "active"], false], 9, 6],
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": ["case", ["boolean", ["get", "active"], false], 3, 1.5],
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.defects3d)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.defects3d,
+      type: "fill-extrusion",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "defect-3d"],
+      layout: { visibility: "none" },
+      paint: {
+        "fill-extrusion-color": ["match", ["get", "source"], "itpipes", "#0891b2", "cityworks", "#d97706", "simulated", "#9333ea", "#64748b"],
+        "fill-extrusion-height": ["get", "height_m"],
+        "fill-extrusion-base": 0,
+        "fill-extrusion-opacity": 0.92,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.simulated)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.simulated,
+      type: "symbol",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["all", ["==", ["get", "role"], "defect"], ["==", ["get", "source"], "simulated"]],
+      layout: { "text-field": "⊕", "text-size": 30 },
+      paint: { "text-color": "#9333ea", "text-halo-color": "#ffffff", "text-halo-width": 2 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.clipBoundary)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.clipBoundary,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "clip-boundary"],
+      paint: { "line-color": "#557083", "line-width": 1.5, "line-opacity": 0.8 },
+      metadata: { runtime_helper: true },
+    });
+  }
+}
+
+function failureConsequenceBounds(result: FailureConsequenceResult): Bounds | null {
+  return geometryCoordinateBounds(result.analysis?.display_extent_geometry)
+    ?? geometryCoordinateBounds(result.analysis?.zoi_geometry)
+    ?? geometryCoordinateBounds(result.asset.geometry);
+}
+
+function outsideFailureConsequenceMask(geometry: GeoJSON.Geometry): GeoJSON.Polygon | null {
+  const bounds = geometryCoordinateBounds(geometry);
+  if (!bounds) return null;
+  const [minimumLongitude, minimumLatitude, maximumLongitude, maximumLatitude] = bounds;
+  const outerRing = [
+    [-180, -85],
+    [180, -85],
+    [180, 85],
+    [-180, 85],
+    [-180, -85],
+  ];
+  const innerRing = [
+    [minimumLongitude, minimumLatitude],
+    [minimumLongitude, maximumLatitude],
+    [maximumLongitude, maximumLatitude],
+    [maximumLongitude, minimumLatitude],
+    [minimumLongitude, minimumLatitude],
+  ];
+  return { type: "Polygon", coordinates: [outerRing, innerRing] };
+}
+
+function geometryCoordinateBounds(geometry: GeoJSON.Geometry | null | undefined): Bounds | null {
+  const coordinates: number[][] = [];
+  const collect = (value: unknown): void => {
+    if (!Array.isArray(value)) return;
+    if (value.length >= 2 && typeof value[0] === "number" && typeof value[1] === "number") {
+      coordinates.push([value[0], value[1]]);
+      return;
+    }
+    value.forEach(collect);
+  };
+  const collectGeometry = (geometry: GeoJSON.Geometry | undefined): void => {
+    if (!geometry) return;
+    if (geometry.type === "GeometryCollection") geometry.geometries.forEach(collectGeometry);
+    else collect(geometry.coordinates);
+  };
+  collectGeometry(geometry ?? undefined);
+  if (!coordinates.length) return null;
+  return [
+    Math.min(...coordinates.map((item) => item[0])),
+    Math.min(...coordinates.map((item) => item[1])),
+    Math.max(...coordinates.map((item) => item[0])),
+    Math.max(...coordinates.map((item) => item[1])),
+  ];
+}
+
+function polygonFromBounds(bounds: Bounds): GeoJSON.Polygon {
+  const [west, south, east, north] = bounds;
+  return {
+    type: "Polygon",
+    coordinates: [[
+      [west, south],
+      [east, south],
+      [east, north],
+      [west, north],
+      [west, south],
+    ]],
+  };
+}
+
+function representativePoint(geometry: GeoJSON.Geometry): [number, number] | null {
+  if (geometry.type === "Point") {
+    return [geometry.coordinates[0], geometry.coordinates[1]];
+  }
+  if (geometry.type === "MultiPoint" && geometry.coordinates.length) {
+    return [geometry.coordinates[0][0], geometry.coordinates[0][1]];
+  }
+  return null;
+}
+
+function squareFootprintAroundPoint(coordinates: [number, number], halfWidthFeet: number): GeoJSON.Polygon {
+  const [longitude, latitude] = coordinates;
+  const latitudeDelta = halfWidthFeet / 364000;
+  const longitudeDelta = halfWidthFeet / Math.max(1000, 364000 * Math.cos(latitude * Math.PI / 180));
+  return {
+    type: "Polygon",
+    coordinates: [[
+      [longitude - longitudeDelta, latitude - latitudeDelta],
+      [longitude + longitudeDelta, latitude - latitudeDelta],
+      [longitude + longitudeDelta, latitude + latitudeDelta],
+      [longitude - longitudeDelta, latitude + latitudeDelta],
+      [longitude - longitudeDelta, latitude - latitudeDelta],
+    ]],
+  };
+}
+
+function ensureTerrainProfileLayers(map: MapLibreMap): void {
+  if (!map.getSource(TERRAIN_PROFILE_SOURCE_ID)) {
+    map.addSource(TERRAIN_PROFILE_SOURCE_ID, { type: "geojson", data: emptyDrawFeatureCollection() });
+  }
+  if (!map.getSource(TERRAIN_PROFILE_HOVER_SOURCE_ID)) {
+    map.addSource(TERRAIN_PROFILE_HOVER_SOURCE_ID, { type: "geojson", data: emptyDrawFeatureCollection() });
+  }
+  if (!map.getLayer(TERRAIN_PROFILE_LINE_LAYER_ID)) {
+    map.addLayer({
+      id: TERRAIN_PROFILE_LINE_LAYER_ID,
+      type: "line",
+      source: TERRAIN_PROFILE_SOURCE_ID,
+      filter: ["==", ["geometry-type"], "LineString"],
+      paint: {
+        "line-color": ["case", ["==", ["get", "role"], "draft"], "#f59e0b", "#0ea5e9"],
+        "line-width": ["case", ["==", ["get", "role"], "draft"], 3, 4],
+        "line-dasharray": [
+          "case",
+          ["==", ["get", "role"], "draft"],
+          ["literal", [1.5, 1.2]],
+          ["literal", [1, 0]],
+        ],
+        "line-opacity": 0.96,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(TERRAIN_PROFILE_ENDPOINT_LAYER_ID)) {
+    map.addLayer({
+      id: TERRAIN_PROFILE_ENDPOINT_LAYER_ID,
+      type: "circle",
+      source: TERRAIN_PROFILE_SOURCE_ID,
+      filter: ["==", ["geometry-type"], "Point"],
+      paint: {
+        "circle-color": ["case", ["==", ["get", "role"], "start"], "#16a34a", "#dc2626"],
+        "circle-radius": 6,
+        "circle-stroke-color": "#ffffff",
+        "circle-stroke-width": 2,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(TERRAIN_PROFILE_HOVER_LAYER_ID)) {
+    map.addLayer({
+      id: TERRAIN_PROFILE_HOVER_LAYER_ID,
+      type: "circle",
+      source: TERRAIN_PROFILE_HOVER_SOURCE_ID,
+      paint: {
+        "circle-color": "#facc15",
+        "circle-radius": 7,
+        "circle-stroke-color": "#17212d",
+        "circle-stroke-width": 2.5,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+}
+
+function ensureAssetExtractPreviewLayers(map: MapLibreMap): void {
+  if (!map.getSource(ASSET_EXTRACT_SOURCE_ID)) {
+    map.addSource(ASSET_EXTRACT_SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  }
+  const assignmentColor = [
+    "match", ["get", "assignment_status"],
+    "assigned", "#16a34a",
+    "unassigned", "#dc2626",
+    "not_evaluated", "#d97706",
+    "#64748b",
+  ] as unknown as string;
+  if (!map.getLayer(ASSET_EXTRACT_STRUCTURE_LAYER_ID)) {
+    map.addLayer({
+      id: ASSET_EXTRACT_STRUCTURE_LAYER_ID,
+      type: "circle",
+      source: ASSET_EXTRACT_SOURCE_ID,
+      filter: ["==", ["get", "asset_type"], "structure"],
+      paint: { "circle-color": assignmentColor, "circle-radius": 5, "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(ASSET_EXTRACT_PIPE_LAYER_ID)) {
+    map.addLayer({
+      id: ASSET_EXTRACT_PIPE_LAYER_ID,
+      type: "line",
+      source: ASSET_EXTRACT_SOURCE_ID,
+      filter: ["==", ["get", "asset_type"], "pipe"],
+      paint: { "line-color": assignmentColor, "line-width": 4, "line-opacity": 0.9 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(ASSET_EXTRACT_CHANNEL_LAYER_ID)) {
+    map.addLayer({
+      id: ASSET_EXTRACT_CHANNEL_LAYER_ID,
+      type: "line",
+      source: ASSET_EXTRACT_SOURCE_ID,
+      filter: ["==", ["get", "asset_type"], "channel"],
+      paint: { "line-color": assignmentColor, "line-width": 4, "line-dasharray": [2, 1], "line-opacity": 0.9 },
+      metadata: { runtime_helper: true },
+    });
+  }
+}
+
 function updateDrawSelectionOnMaps(maps: Array<MapLibreMap | null>, selectedDrawId: string | null): void {
   maps.forEach((map) => {
     if (map?.isStyleLoaded()) {
@@ -6506,14 +7868,10 @@ function radiansToDegrees(radians: number): number {
 }
 
 function geometryAreaHint(geometry: DrawGeometry): number {
-  if (geometry.type !== "Polygon") {
+  if (geometry.type !== "Polygon" && geometry.type !== "MultiPolygon") {
     return 0;
   }
-  const ring = geometry.coordinates[0] || [];
-  if (ring.length < 4) {
-    return 0;
-  }
-  const bounds = geometryBounds({ type: "Polygon", coordinates: geometry.coordinates });
+  const bounds = geometryBounds(geometry as AssetSearchResult["geometry"]);
   if (!bounds) {
     return 0;
   }
@@ -7235,6 +8593,7 @@ function isRuntimeHelperLayer(layer: StyleLayer): boolean {
     layer.metadata?.runtime_helper === true
     || layer.id.startsWith(`${DRAW_SOURCE_ID}-`)
     || layer.id.startsWith(`${SEARCH_HIGHLIGHT_SOURCE_ID}-`)
+    || layer.id.startsWith(`${ASSET_EXTRACT_SOURCE_ID}-`)
   );
 }
 

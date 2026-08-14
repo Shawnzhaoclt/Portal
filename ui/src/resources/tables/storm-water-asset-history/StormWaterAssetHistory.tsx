@@ -67,7 +67,46 @@ const EXPORT_TABS: Array<{ id: Exclude<HistoryKind, 'timeline'>; label: string; 
   { id: 'pipe_risk', label: 'Risk Information', required: ['Basin name', 'Work zone ID', 'CL score', 'LOF score', 'COF score', 'Risk'] },
 ]
 
-function exportKindForRecord(kind: AssetHistoryRecord['kind']): Exclude<HistoryKind, 'timeline'> {
+type AssetSummaryField = { label: string; keys: string[]; format?: 'date' | 'number'; compact?: boolean; wide?: boolean }
+
+const ASSET_SUMMARY_FIELDS: Record<AssetType, AssetSummaryField[]> = {
+  pipe: [
+    { label: 'Active', keys: ['Active', 'STATUS'] },
+    { label: 'Diameter', keys: ['DIAMETER'], format: 'number' },
+    { label: 'Material', keys: ['MATERIAL'] },
+    { label: 'Pipe shape', keys: ['PI_SHAPE', 'PACP_Shape'] },
+    { label: 'Construction date', keys: ['CONST_DATE'], format: 'date' },
+    { label: 'Construction date source', keys: ['ConstDateSource'], wide: true },
+    { label: 'Upstream asset', keys: ['US_ID'] },
+    { label: 'Upstream invert', keys: ['US_INVERT'], format: 'number' },
+    { label: 'Downstream asset', keys: ['DS_ID'] },
+    { label: 'Downstream invert', keys: ['DS_INVERT'], format: 'number' },
+  ],
+  structure: [
+    { label: 'Active', keys: ['Active', 'STATUS'] },
+    { label: 'Structure type', keys: ['STRUCT_TYPE', 'TYPE'] },
+    { label: 'Structure size', keys: ['STRUCTURE_SIZE'] },
+    { label: 'Material', keys: ['MATERIAL'] },
+    { label: 'Depth', keys: ['DEPTH'], format: 'number' },
+    { label: 'Invert', keys: ['INVERT'], format: 'number', compact: true },
+    { label: 'Construction date', keys: ['CONST_DATE'], format: 'date' },
+    { label: 'Construction date source', keys: ['ConstDateSource'], wide: true },
+  ],
+  channel: [
+    { label: 'Active', keys: ['Active', 'STATUS'] },
+    { label: 'Channel shape', keys: ['CH_SHAPE', 'TYPE'] },
+    { label: 'Material', keys: ['MATERIAL'] },
+    { label: 'Width', keys: ['WIDTH', 'WIDTH_TOP'], format: 'number', compact: true },
+    { label: 'Depth', keys: ['DEPTH'], format: 'number', compact: true },
+    { label: 'Construction date', keys: ['CONST_DATE'], format: 'date' },
+    { label: 'Construction date source', keys: ['ConstDateSource'], wide: true },
+    { label: 'Upstream asset', keys: ['US_ID'] },
+    { label: 'Downstream asset', keys: ['DS_ID'] },
+  ],
+}
+
+function exportKindForRecord(kind: AssetHistoryRecord['kind']): Exclude<HistoryKind, 'timeline'> | null {
+  if (kind === 'asset') return null
   return `${kind}s` === 'pipe_risks' ? 'pipe_risk' : `${kind}s` as Exclude<HistoryKind, 'timeline'>
 }
 
@@ -144,8 +183,24 @@ function valueText(value: unknown) {
   return String(value)
 }
 
+function assetSummaryEntries(asset: AssetSummaryResponse['asset'], assetType: AssetType) {
+  const values = { ...asset.all_fields, ...asset.summary }
+  const normalized = new Map(Object.entries(values).map(([key, value]) => [key.toLowerCase(), value]))
+  return ASSET_SUMMARY_FIELDS[assetType].map((field) => {
+    const value = field.keys.map((key) => normalized.get(key.toLowerCase())).find((candidate) => candidate !== null && candidate !== undefined && candidate !== '')
+    let text = valueText(value)
+    if (field.format === 'date' && value !== null && value !== undefined && value !== '') {
+      text = formatEasternDateOnly(String(value))
+    } else if (field.format === 'number' && typeof value === 'number' && Number.isFinite(value)) {
+      text = new Intl.NumberFormat('en-US', { maximumFractionDigits: 3 }).format(value)
+    }
+    return { label: field.label, text, compact: Boolean(field.compact), wide: Boolean(field.wide) }
+  })
+}
+
 function recordKindLabel(kind: AssetHistoryRecord['kind']) {
   return ({
+    asset: 'Asset',
     service_request: 'Service request',
     investigation: 'Investigation',
     inspection: 'Inspection',
@@ -163,6 +218,14 @@ function openRecordUrl(event: MouseEvent<HTMLAnchorElement>, url: string, record
   event.preventDefault()
   event.stopPropagation()
   void openExternalUrl(url).catch((reason) => toast.error(reason instanceof Error ? reason.message : `Could not open ${recordLabel}.`))
+}
+
+function backToPortal() {
+  if (window.parent !== window) {
+    window.parent.postMessage({ type: 'portal:activate-home' }, window.location.origin)
+    return
+  }
+  window.location.assign('/')
 }
 
 function isCityworksRecord(record: AssetHistoryRecord): record is HistoryRecord {
@@ -313,11 +376,11 @@ export default function StormWaterAssetHistory() {
     }
     setDetailLoading(true)
     setDetail(null)
-    loadRecordDetail(selected.kind, selected.record_id, selected.kind === 'pipe_risk' ? selected.work_zone_id ?? '' : '')
+    loadRecordDetail(selected.kind, selected.record_id, selected.kind === 'pipe_risk' ? selected.work_zone_id ?? '' : '', assetType)
       .then(setDetail)
       .catch((reason: Error) => toast.error(reason.message))
       .finally(() => setDetailLoading(false))
-  }, [selected])
+  }, [assetType, selected])
 
   useEffect(() => {
     if (!selected || !assetType || !assetId || Object.keys(exportCatalog.worksheets).length) return
@@ -416,7 +479,7 @@ export default function StormWaterAssetHistory() {
             </div>
           ) : search.length >= 2 && !searching ? <div className="empty-search">No matching core asset.</div> : null}
           {error ? <div className="asset-history-error">{error}</div> : null}
-          <button className="text-button" type="button" onClick={() => window.location.assign('/')}><ArrowLeft size={16} /> Back to Portal</button>
+          <button className="text-button" type="button" onClick={backToPortal}><ArrowLeft size={16} /> Back to Portal</button>
         </section>
       </main>
     )
@@ -425,7 +488,7 @@ export default function StormWaterAssetHistory() {
   const assignment = summary?.assignment.combined ?? 'not_evaluated'
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const sourceTime = summary?.assignment.published_at || summary?.sources.step401?.published_at
-  const summaryEntries = Object.entries(summary?.asset.summary ?? {}).slice(0, 6)
+  const summaryEntries = summary ? assetSummaryEntries(summary.asset, assetType) : []
   const availableTabs = TABS.filter((item) => {
     if (item.id === 'itpipes_defects') return (summary?.counts.itpipes_defects ?? 0) > 0
     if (item.id === 'pipe_risk') return assetType === 'pipe' && (summary?.counts.pipe_risk ?? 0) > 0
@@ -465,7 +528,7 @@ export default function StormWaterAssetHistory() {
           </div>
         </div>
         <div className="asset-summary-row">
-          {summaryLoading ? <span><LoaderCircle className="spin" size={17} /> Loading asset...</span> : summaryEntries.map(([key, value]) => <span key={key}><small>{key.replaceAll('_', ' ')}</small><strong>{valueText(value)}</strong></span>)}
+          {summaryLoading ? <span><LoaderCircle className="spin" size={17} /> Loading asset...</span> : summaryEntries.map((item) => <span className={item.wide ? 'asset-summary-wide' : item.compact ? 'asset-summary-compact' : undefined} key={item.label}><small>{item.label}</small><strong title={item.text}>{item.text}</strong></span>)}
           {sourceTime ? <span className="source-age"><small>Step 401 published</small><strong>{formatEasternDateTime(sourceTime)}</strong></span> : null}
         </div>
       </header>
@@ -598,9 +661,9 @@ export default function StormWaterAssetHistory() {
                   <h3>Source fields</h3>
                   <dl>{Object.entries(detail.fields).filter(([, value]) => !isCityworksRecord(selected) || (value !== null && value !== '')).map(([key, value]) => {
                     const exportKind = exportKindForRecord(selected.kind)
-                    const included = (exportSelection[exportKind] ?? []).includes(key)
-                    const exportable = (exportCatalog.worksheets[exportKind] ?? []).some((field) => field.key === key)
-                    return <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{detailValueText(key, value)}</dd>{exportable ? <label className="detail-export-field" title="Include this field in the exported worksheet"><input type="checkbox" checked={included} onChange={(event) => setExportField(exportKind, key, event.target.checked)} /><Download size={14} /></label> : <span />}</div>
+                    const included = exportKind ? (exportSelection[exportKind] ?? []).includes(key) : false
+                    const exportable = exportKind ? (exportCatalog.worksheets[exportKind] ?? []).some((field) => field.key === key) : false
+                    return <div key={key}><dt>{key.replaceAll('_', ' ')}</dt><dd>{detailValueText(key, value)}</dd>{exportable && exportKind ? <label className="detail-export-field" title="Include this field in the exported worksheet"><input type="checkbox" checked={included} onChange={(event) => setExportField(exportKind, key, event.target.checked)} /><Download size={14} /></label> : <span />}</div>
                   })}</dl>
                   {detail.questions.length ? <><h3>Inspection questions</h3><div className="question-list">{detail.questions.map((question, index) => <article key={String(question.INSPQUESTIONID ?? index)}><strong>{valueText(question.QUESTION)}</strong><p>{valueText(question.ANSWER)}</p></article>)}</div></> : null}
                 </div>

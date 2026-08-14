@@ -81,11 +81,13 @@
 .header-actions button:hover,
 .history-toolbar button:hover,
 .history-pager button:hover:not(:disabled) { border-color: #1768a4; background: #edf6fc; }
-.asset-summary-row { display: flex; min-height: 44px; border-top: 1px solid #d6e2eb; background: #f5f9fc; padding: 5px 18px; gap: 22px; overflow: hidden; }
-.asset-summary-row > span { min-width: 100px; display: flex; flex-direction: column; justify-content: center; }
-.asset-summary-row small { color: #61788b; font-size: 10px; font-weight: 800; text-transform: uppercase; }
-.asset-summary-row strong { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
-.source-age { margin-left: auto; }
+.asset-summary-row { display: flex; flex-wrap: wrap; min-height: 48px; border-top: 1px solid #d6e2eb; background: #f5f9fc; padding: 6px 18px; column-gap: 16px; row-gap: 5px; }
+.asset-summary-row > span { min-width: 112px; flex: 1 1 112px; display: flex; flex-direction: column; justify-content: center; }
+.asset-summary-row > .asset-summary-compact { min-width: 64px; flex: .5 1 72px; }
+.asset-summary-row > .asset-summary-wide { min-width: 280px; flex: 2.5 1 320px; }
+.asset-summary-row small { overflow: hidden; color: #61788b; font-size: 10px; font-weight: 800; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.asset-summary-row strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.source-age { margin-left: 0; }
 
 .asset-history-error { margin-top: 12px; border: 1px solid #df8e88; background: #fff2f1; color: #a11d18; padding: 11px 13px; }
 .page-error { margin: 8px 12px 0; display: flex; align-items: center; gap: 8px; }
@@ -134,6 +136,7 @@
 .history-table td small { display: block; margin-top: 4px; color: #5c7488; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .record-kind { padding: 3px 7px; }
 .kind-service_request { background: #edf4ff; }
+.kind-asset { background: #e7f3e9; }
 .kind-investigation { background: #f4efff; }
 .kind-work_order { background: #fff4df; }
 .relationship-chip { max-width: 100%; padding: 3px 7px; white-space: normal; }
@@ -218,6 +221,7 @@
 .status-assigned { background: #e6f0fb; color: #16578b; }
 .timeline-open { margin-top: -3px; }
 .kind-border-service_request { border-left-color: #397fba; }
+.kind-border-asset { border-left-color: #2f7d4a; }
 .kind-border-investigation { border-left-color: #7b60ad; }
 .kind-border-inspection { border-left-color: #168479; }
 .kind-border-work_order { border-left-color: #c27a16; }

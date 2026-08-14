@@ -103,6 +103,7 @@ $cacheBackedPaths = @(
     $templateSettings.maps.legacyPmtilesRoot
     $templateSettings.maps.terrainRoot
     $templateSettings.maps.pmtilesDetailSources.PSObject.Properties | ForEach-Object { $_.Value.database }
+    $templateSettings.maps.assetExtractBoundarySources | ForEach-Object { $_.database }
     $templateSettings.maps.duckdbGeoJsonLayers | ForEach-Object { $_.database }
 ) | Where-Object { $_ }
 $sharedCacheFallbacks = @($cacheBackedPaths | Where-Object { [string]$_ -match '\$\{PORTAL_SHARED_DATA_ROOT\}' })
@@ -126,7 +127,9 @@ $cacheSourceIds = @(
     $templateSettings.aifSources.itpipesProductionSourceId
     $templateSettings.maps.portalLayerArchiveSources.PSObject.Properties.Value
     $templateSettings.maps.terrainSourceId
+    $templateSettings.maps.terrainDemSourceId
     $templateSettings.maps.pmtilesDetailSources.PSObject.Properties | ForEach-Object { $_.Value.databaseSourceId }
+    $templateSettings.maps.assetExtractBoundarySources | ForEach-Object { $_.databaseSourceId }
     $templateSettings.maps.duckdbGeoJsonLayers | ForEach-Object { $_.databaseSourceId }
 ) | Where-Object { $_ } | Sort-Object -Unique
 if ($cacheSourceIds.Count -eq 0) {
@@ -153,7 +156,7 @@ if (-not (Get-Command $PythonExecutable -ErrorAction SilentlyContinue)) {
     throw "Python was not found. It is required only on the build workstation."
 }
 
-& $PythonExecutable -c "import dotenv, duckdb, openpyxl, pandas, pyodbc, sqlalchemy"
+& $PythonExecutable -c "import dotenv, duckdb, geopandas, openpyxl, pandas, pyodbc, pyogrio, pyproj, rasterio, shapely, sqlalchemy"
 if ($LASTEXITCODE -ne 0) {
     throw "The selected Python environment is missing Portal runtime dependencies: $PythonExecutable"
 }
@@ -242,7 +245,12 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
     --specpath $pythonBuild `
     --paths (Join-Path $projectRoot "python") `
     --collect-submodules portal `
+    --collect-submodules pyproj `
+    --collect-submodules rasterio `
+    --collect-submodules shapely `
     --collect-all pytz `
+    --collect-all pyogrio `
+    --add-data "$pythonPrefix\Library\share\gdal;Library\share\gdal" `
     --add-data "$projectRoot\python\portal\app\config;portal\app\config" `
     --add-data "$projectRoot\python\portal\app\resources\maps\stm_risk_map\assets;portal\app\resources\maps\stm_risk_map\assets" `
     --add-data "$systemSeed;portal\data" `
@@ -252,13 +260,25 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Python worker packaging failed." }
 
 Write-Host "[3/4] Building Tauri host..."
-& $cargo build `
-    --release `
-    --features custom-protocol `
-    --bin Portal `
-    --bin PortalUpdater `
-    --manifest-path (Join-Path $tauriRoot "Cargo.toml")
-if ($LASTEXITCODE -ne 0) { throw "Tauri build failed." }
+$previousPackageVersion = $env:PORTAL_PACKAGE_VERSION
+try {
+    $env:PORTAL_PACKAGE_VERSION = $Version
+    & $cargo build `
+        --release `
+        --features custom-protocol `
+        --bin Portal `
+        --bin PortalUpdater `
+        --manifest-path (Join-Path $tauriRoot "Cargo.toml")
+    if ($LASTEXITCODE -ne 0) { throw "Tauri build failed." }
+}
+finally {
+    if ($null -eq $previousPackageVersion) {
+        Remove-Item Env:PORTAL_PACKAGE_VERSION -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:PORTAL_PACKAGE_VERSION = $previousPackageVersion
+    }
+}
 
 Write-Host "[4/4] Assembling portable folder..."
 $outputRoot = [System.IO.Path]::GetPathRoot($OutputDirectory)

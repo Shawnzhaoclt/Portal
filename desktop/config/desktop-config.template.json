@@ -72,9 +72,9 @@
                                   }
                 },
                          "inventoryTables":  {
-                                                  "structure":  { "table":  "STORMSTRUCTURE_1_PT", "idField":  "ITPIPE_ASSETID", "entityType":  "STRUCTURES" },
-                                                  "pipe":  { "table":  "STORMPIPES_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "PIPES" },
-                                                  "channel":  { "table":  "STORMDRAINAGE_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "CHANNELS" }
+                                                  "structure":  { "table":  "STORMSTRUCTURE_1_PT", "idField":  "ITPIPE_ASSETID", "entityType":  "STRUCTURES", "constructionDateField":  "CONST_DATE" },
+                                                  "pipe":  { "table":  "STORMPIPES_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "PIPES", "constructionDateField":  "CONST_DATE" },
+                                                  "channel":  { "table":  "STORMDRAINAGE_1_LN", "idField":  "ITPIPE_ASSETID", "entityType":  "CHANNELS", "constructionDateField":  "CONST_DATE" }
                                               },
                          "step401Tables":  {
                                                 "cityworksUnassigned":  "t_0001_UR_AC_CWOnly_All_Unassigned",
@@ -92,7 +92,10 @@
                             "request":  "azteca_REQUEST"
                         },
     "cityworksRiskTables":  {
-                                 "scoredInspection":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT"
+                                 "scoredInspection":  "CW_SCORED_ASSET_INSPECTIONS_ALL_PT",
+                                 "pipe":  "CW_SCORED_ASSET_INSPECTIONS_PIPES_LN",
+                                 "structure":  "CW_SCORED_ASSET_INSPECTIONS_STRUCTURES_PT",
+                                 "channel":  "CW_SCORED_ASSET_INSPECTIONS_DRAINAGE_LN"
                              },
     "itpipesTables":  {
                            "defects":  "ITPipes_Defects_Merged_PT",
@@ -166,13 +169,56 @@
                  "terrainRoot":  "${PORTAL_DATA_ROOT}/data/source-cache",
                  "terrainArchive":  "mecklenburg_terrain.pmtiles",
                  "terrainSourceId":  "terrain.pmtiles",
+                 "terrainDem":  "mecklenburg_dem.tif",
+                 "terrainDemSourceId":  "terrain.dem",
                  "reportsRoot":  "${PORTAL_APP_ROOT}/config/map-reports",
+                 "failureConsequenceSources":  {
+                                                       "reference":  {
+                                                                          "databaseSourceId":  "reference.consequence",
+                                                                          "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/reference.consequence/consequence.duckdb"
+                                                                      },
+                                                       "spatialWarehouse":  {
+                                                                                "databaseSourceId":  "mirror.virt-sdw-sdw",
+                                                                                "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-sdw/virt_sdw_01_sdw.duckdb"
+                                                                            },
+                                                       "stormWaterWarehouse":  {
+                                                                                   "databaseSourceId":  "mirror.virt-sdw-stm",
+                                                                                   "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-stm/virt_sdw_01_stm.duckdb"
+                                                                               }
+                                                   },
                  "pmtilesDetailSources":  {
                                                      "spatial-data-warehouse":  {
                                                                                    "databaseSourceId":  "mirror.sdw-spatial",
                                                                                    "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.sdw-spatial/virt_sdw_01_sdw_spatial_warehouse.duckdb"
                                                                                }
                                                  },
+                 "assetExtractBoundarySources":  [
+                                                        {
+                                                            "id":  "culvert",
+                                                            "label":  "Culverts",
+                                                            "databaseSourceId":  "mirror.cityworks-spatial",
+                                                            "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.cityworks-spatial/myrs_cwdbprd_1_stw_cityworks_sd.duckdb",
+                                                            "table":  "Culverts_evw",
+                                                            "geometryColumn":  "Shape",
+                                                            "featureIdColumn":  "OBJECTID",
+                                                            "sourceSrid":  2264,
+                                                            "searchFields":  ["FacilityID", "Location", "GridID"],
+                                                            "displayFields":  ["FacilityID", "Location", "GridID"]
+                                                        },
+                          {
+                              "id":  "work_zone",
+                              "label":  "Work zones",
+                              "databaseSourceId":  "reference.consequence",
+                              "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/reference.consequence/consequence.duckdb",
+                              "schema":  "geo",
+                              "table":  "WorkZones",
+                              "geometryColumn":  "geometry",
+                              "featureIdColumn":  "WorkZoneID",
+                              "sourceSrid":  2264,
+                              "searchFields":  ["WorkZoneID", "Basin_Name"],
+                              "displayFields":  ["WorkZoneID", "Basin_Name"]
+                          }
+                                                    ],
                  "duckdbGeoJsonLayers":  [
                                                   {
                                                       "id":  "culverts",

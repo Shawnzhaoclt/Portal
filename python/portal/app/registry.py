@@ -19,6 +19,9 @@ from portal.app.dashboards.critical_team import router as critical_team_router
 from portal.app.dashboards.gis import router as gis_router
 from portal.app.dashboards.planning import router as planning_router
 from portal.app.resources.maps.stm_risk_map import router as map_tiles_router
+from portal.app.resources.maps.stm_risk_map.asset_extract_router import router as asset_extract_router
+from portal.app.resources.maps.stm_risk_map.terrain_profile_router import router as terrain_profile_router
+from portal.app.resources.maps.stm_risk_map.failure_consequence_router import router as failure_consequence_router
 from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
 from portal.app.resources.forms.create_aif_from_itpipes.router import router as create_aif_router
 from portal.app.resources.tables.storm_water_asset_history import router as asset_history_router
@@ -43,6 +46,9 @@ app.include_router(critical_assets_router)
 app.include_router(gis_router)
 app.include_router(planning_router)
 app.include_router(map_tiles_router)
+app.include_router(asset_extract_router)
+app.include_router(terrain_profile_router)
+app.include_router(failure_consequence_router)
 app.include_router(cctv_review_report_router)
 app.include_router(create_aif_router)
 app.include_router(asset_history_router)

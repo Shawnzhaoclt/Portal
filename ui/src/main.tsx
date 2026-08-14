@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event'
 import { Toaster } from 'sonner'
 import './index.css'
 import { AppMessageDialogProvider } from './components/AppMessageDialog'
+import { appConfirm } from './components/messageDialogService'
 import DesktopStartupSplash from './desktop/DesktopStartupSplash'
 import {
   isScheduledMaintenance,
@@ -11,12 +12,15 @@ import {
 } from './desktop/maintenance'
 import {
   checkPortalUpdate,
+  DESKTOP_RESOURCE_COUNT_EVENT,
   exitDesktopApplication,
   installPortalUpdate,
   isDesktopRuntime,
+  restartDesktopApplication,
   startDataCache,
   startDesktopSession,
   type DataCacheProgress,
+  type DataCacheUpdateCompleted,
 } from './desktop/runtime'
 import { initializeClientSettings } from './desktop/settings'
 import {
@@ -32,6 +36,33 @@ import { applyAppTheme, getInitialTheme } from './theme'
 
 const root = createRoot(document.getElementById('root')!)
 const MAINTENANCE_MONITOR_INTERVAL_MS = 5_000
+let dataRestartPromptPending = false
+let openDesktopResourceCount = 0
+
+window.addEventListener(DESKTOP_RESOURCE_COUNT_EVENT, (event) => {
+  if (!(event instanceof CustomEvent) || typeof event.detail !== 'number') return
+  openDesktopResourceCount = Math.max(0, Math.trunc(event.detail))
+})
+
+async function promptForDataRestart(update: DataCacheUpdateCompleted) {
+  if (dataRestartPromptPending || openDesktopResourceCount === 0) return
+  dataRestartPromptPending = true
+  try {
+    const sourceLabel = update.updatedSourceCount === 1 ? 'data source has' : 'data sources have'
+    const restart = await appConfirm(
+      `${update.updatedSourceCount} ${sourceLabel} finished synchronizing and the new local data is ready.\n\nOne or more open resources may still be using an earlier data version. Restart Portal now to reload them with the newly activated data. If you choose Later, newly opened resources will automatically use the latest data.`,
+      {
+        title: 'New Portal data is ready',
+        confirmLabel: 'Restart now',
+        cancelLabel: 'Later',
+        kind: 'warning',
+      },
+    )
+    if (restart) await restartDesktopApplication()
+  } finally {
+    dataRestartPromptPending = false
+  }
+}
 
 function errorMessage(error: unknown) {
   if (error instanceof Error) return error.message
@@ -115,6 +146,9 @@ async function bootstrap() {
       const activeSessionRole = sessionManagementRole()
       clearManagementToken()
       await initializeClientSettings()
+      await listen<DataCacheUpdateCompleted>('portal-data-cache-updated', (event) => {
+        void promptForDataRestart(event.payload)
+      })
       const unlisten = await listen<DataCacheProgress>('portal-data-cache-progress', (event) => {
         if (!event.payload.background) renderDataCacheProgress(event.payload)
       })

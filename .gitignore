@@ -26,6 +26,7 @@ ui/node_modules/.tmp/
 /python/${PORTAL_APP_ROOT}/
 /tmp/
 /updater-layout-validation/
+/source-cache/
 /${PORTAL_DATA_ROOT}/
 /${PORTAL_APP_ROOT}/
 /python/${PORTAL_DATA_ROOT}/

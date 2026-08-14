@@ -5,13 +5,16 @@ use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     env,
-    fs::{self, File},
-    io::Read,
+    fs::{self, File, OpenOptions},
+    io::{self, Read, Write},
     path::{Path, PathBuf},
     process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+
+const ACTIVATION_RETRY_ATTEMPTS: usize = 80;
+const ACTIVATION_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +39,14 @@ struct ReleasePayload {
 
 fn main() {
     if let Err(error) = run() {
+        let arguments = parse_arguments();
+        if let Some(install_root) = update_install_root(&arguments) {
+            append_update_log(
+                &install_root,
+                "ERROR",
+                &format!("Portal update failed: {error}"),
+            );
+        }
         eprintln!("Portal update failed: {error}");
         std::process::exit(1);
     }
@@ -63,7 +74,25 @@ fn run() -> Result<(), String> {
         .unwrap_or("portal-release.json");
     let manifest = read_manifest(&release_root, manifest_name)?;
     let bootstrap = arguments.contains_key("bootstrap");
+    append_update_log(
+        &install_root,
+        "INFO",
+        &format!(
+            "Starting Portal {} update in {} mode.",
+            manifest.version,
+            if bootstrap {
+                "bootstrap"
+            } else {
+                manifest.update_mode.as_str()
+            }
+        ),
+    );
     install_release(&release_root, &install_root, &manifest, bootstrap)?;
+    append_update_log(
+        &install_root,
+        "INFO",
+        &format!("Portal {} update completed successfully.", manifest.version),
+    );
 
     if bootstrap {
         create_desktop_shortcut(&install_root)?;
@@ -122,6 +151,33 @@ fn default_install_root() -> Result<PathBuf, String> {
     let local_app_data = env::var_os("LOCALAPPDATA")
         .ok_or_else(|| "LOCALAPPDATA is not available for this Windows user.".to_string())?;
     Ok(PathBuf::from(local_app_data).join("StormWaterPortal"))
+}
+
+fn update_install_root(arguments: &HashMap<String, String>) -> Option<PathBuf> {
+    arguments
+        .get("install-root")
+        .map(PathBuf::from)
+        .or_else(|| default_install_root().ok())
+}
+
+fn append_update_log(install_root: &Path, level: &str, message: &str) {
+    let directory = install_root.join("data").join("logs");
+    if fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let Ok(mut log) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(directory.join("portal-updater.log"))
+    else {
+        return;
+    };
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_secs())
+        .unwrap_or_default();
+    let normalized = message.replace(['\r', '\n'], " ");
+    let _ = writeln!(log, "{timestamp} [{level}] {normalized}");
 }
 
 fn read_manifest(release_root: &Path, manifest_name: &str) -> Result<ReleaseManifest, String> {
@@ -295,15 +351,22 @@ fn install_full_release(
     remove_if_exists(&backup)?;
     let application_root = install_root.join("app");
     if application_root.exists() {
-        fs::rename(&application_root, &backup).map_err(|error| {
-            format!("Could not prepare the existing Portal application for replacement: {error}")
-        })?;
+        rename_with_retry(
+            &application_root,
+            &backup,
+            "prepare the existing Portal application for replacement",
+        )?;
     }
-    if let Err(error) = fs::rename(&staging, &application_root) {
+    if let Err(error) = rename_with_retry(&staging, &application_root, "activate the Portal update")
+    {
         if backup.exists() {
-            let _ = fs::rename(&backup, &application_root);
+            let _ = rename_with_retry(
+                &backup,
+                &application_root,
+                "restore the previous Portal application",
+            );
         }
-        return Err(format!("Could not activate the Portal update: {error}"));
+        return Err(error);
     }
     let _ = fs::remove_dir_all(&backup);
     cleanup_legacy_root_payload(install_root);
@@ -574,9 +637,31 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
 mod tests {
     use super::{
         copy_remaining_packaged_config, ensure_update_target_is_not_user_data,
-        merge_managed_settings,
+        merge_managed_settings, retry_io_operation,
     };
-    use std::{env, fs, process, time::SystemTime};
+    use std::{
+        env, fs, io, process,
+        sync::atomic::{AtomicUsize, Ordering},
+        time::{Duration, SystemTime},
+    };
+
+    #[test]
+    fn transient_activation_failures_are_retried() {
+        let calls = AtomicUsize::new(0);
+        retry_io_operation(4, Duration::ZERO, || {
+            let call = calls.fetch_add(1, Ordering::SeqCst);
+            if call < 2 {
+                Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "simulated Windows file lock",
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .expect("retry succeeds");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
 
     #[test]
     fn managed_settings_are_refreshed_while_user_paths_are_preserved() {
@@ -777,6 +862,35 @@ fn remove_if_exists(path: &Path) -> Result<(), String> {
             .map_err(|error| format!("Could not remove {}: {error}", path.display()))?;
     }
     Ok(())
+}
+
+fn retry_io_operation<F>(attempts: usize, delay: Duration, mut operation: F) -> io::Result<()>
+where
+    F: FnMut() -> io::Result<()>,
+{
+    let attempts = attempts.max(1);
+    let mut last_error = None;
+    for attempt in 0..attempts {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < attempts {
+                    thread::sleep(delay);
+                }
+            }
+        }
+    }
+    Err(last_error.expect("retry operation must run at least once"))
+}
+
+fn rename_with_retry(source: &Path, destination: &Path, action: &str) -> Result<(), String> {
+    retry_io_operation(ACTIVATION_RETRY_ATTEMPTS, ACTIVATION_RETRY_DELAY, || {
+        fs::rename(source, destination)
+    })
+    .map_err(|error| {
+        format!("Could not {action} after waiting for Windows file locks to clear: {error}")
+    })
 }
 
 fn unique_token() -> String {

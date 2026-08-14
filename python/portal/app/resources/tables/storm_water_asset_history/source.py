@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import math
 import re
 from contextlib import closing
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -16,6 +17,23 @@ from portal.runtime.transport import HTTPException
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 NUMERIC_ID = re.compile(r"^([+-]?\d+)\.0+$")
 ASSET_TYPES = {"structure", "pipe", "channel"}
+
+
+def _calendar_date(value: Any) -> Any:
+    if isinstance(value, datetime):
+        normalized = value.astimezone(timezone.utc) if value.tzinfo is not None else value
+        return normalized.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        text = value.strip()
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        normalized = parsed.astimezone(timezone.utc) if parsed.tzinfo is not None else parsed
+        return normalized.date().isoformat()
+    return value
 
 TIMELINE_DATE_FIELDS: dict[str, tuple[tuple[str, str], ...]] = {
     "service_request": (
@@ -95,8 +113,11 @@ def _timeline_timestamp(value: Any) -> str:
         return ""
 
 
-def timeline_events(history: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    """Expand Cityworks records into explicit, deduplicated lifecycle events."""
+def timeline_events(
+    history: dict[str, list[dict[str, Any]]],
+    asset: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Expand activity records and the inventory construction date into lifecycle events."""
 
     grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
     for records in history.values():
@@ -125,6 +146,27 @@ def timeline_events(history: dict[str, list[dict[str, Any]]]) -> list[dict[str, 
                     event["event_names"].append(label)
                     event["event_field"] = ", ".join(event["event_fields"])
                     event["event_name"] = " · ".join(event["event_names"])
+    if asset:
+        construction_timestamp = _timeline_timestamp(asset.get("construction_date"))
+        if construction_timestamp:
+            asset_id = _id(asset.get("asset_id"))
+            field = str(asset.get("construction_date_field") or "CONST_DATE")
+            grouped[("asset", asset_id, construction_timestamp)] = {
+                "kind": "asset",
+                "record_id": asset_id,
+                "event_date": construction_timestamp,
+                "status": asset.get("status"),
+                "title": f"{str(asset.get('asset_type') or 'asset').title()} constructed",
+                "summary": None,
+                "person": None,
+                "relationship": "Inventory record",
+                "related_id": None,
+                "source_attributes": dict(asset.get("all_fields") or {}),
+                "event_name": "Constructed",
+                "event_field": field,
+                "event_fields": [field],
+                "event_names": ["Constructed"],
+            }
     events = list(grouped.values())
     for event in events:
         event["event_key"] = ":".join((
@@ -221,7 +263,10 @@ def _asset_definition(config: dict[str, Any], asset_type: str) -> dict[str, str]
     raw = config.get("inventoryTables", {}).get(normalized)
     if not isinstance(raw, dict):
         raise HTTPException(status_code=503, detail=f"Asset History inventory table for {normalized} is not configured.")
-    return {key: str(raw.get(key) or "").strip() for key in ("table", "idField", "entityType")}
+    return {
+        key: str(raw.get(key) or "").strip()
+        for key in ("table", "idField", "entityType", "constructionDateField")
+    }
 
 
 def search_assets(query: str, limit: int = 10) -> list[dict[str, Any]]:
@@ -325,16 +370,24 @@ def asset_summary(asset_type: str, asset_id: str) -> dict[str, Any]:
     if not rows:
         raise HTTPException(status_code=404, detail=f"Asset {_id(asset_id)} was not found in the active inventory source.")
     raw = rows[0]
+    construction_date_field = _column(raw.keys(), definition["constructionDateField"])
     preferred = [
         "Location", "ADDRESS", "Active", "STATUS", "MATERIAL", "TYPE", "STRUCT_TYPE",
-        "STRUCTURE_SIZE", "DIAMETER", "WIDTH", "DEPTH", "US_ASSETID", "DS_ASSETID", "US_ID", "DS_ID",
+        "STRUCTURE_SIZE", "DIAMETER", "WIDTH", "DEPTH", "INVERT", "PI_SHAPE", "CH_SHAPE",
+        "US_ASSETID", "DS_ASSETID", "US_ID", "US_INVERT", "DS_ID", "DS_INVERT",
+        "CONST_DATE", "ConstDateSource",
     ]
     summary = {name: raw[name] for name in preferred if name in raw and raw[name] not in (None, "")}
+    construction_date = _calendar_date(raw.get(construction_date_field or ""))
+    if construction_date_field and construction_date not in (None, ""):
+        summary[construction_date_field] = construction_date
     return {
         "asset_id": _id(raw.get(id_field)),
         "asset_type": asset_type,
         "entity_type": definition["entityType"],
         "status": raw.get(_column(raw.keys(), "Active", "STATUS") or ""),
+        "construction_date": construction_date,
+        "construction_date_field": construction_date_field,
         "summary": summary,
         "all_fields": {key: value for key, value in raw.items() if value not in (None, "") and key.casefold() not in {"geometry", "shape"}},
     }
@@ -392,6 +445,54 @@ def assignment_status(asset_id: str) -> dict[str, Any]:
     return {
         "combined": combined,
         "branches": branches,
+        "source_id": source_id,
+        "version": str(metadata.get("version") or ""),
+        "published_at": metadata.get("publishedAt") or metadata.get("publicationTimestamp"),
+    }
+
+
+def assignment_statuses(asset_ids: Iterable[str]) -> dict[str, Any]:
+    """Resolve Step 401 status for many assets with one query per source table."""
+
+    normalized_ids = sorted({_id(value) for value in asset_ids if _id(value)})
+    config = _config()
+    source_id, path = _source(config, "step401")
+    tables = config.get("step401Tables", {})
+    id_field = str(tables.get("assetIdField") or "ITPIPE_ASSETID")
+    memberships: dict[str, set[str]] = {
+        "cityworks_assigned": set(),
+        "cityworks_unassigned": set(),
+        "itpipes_assigned": set(),
+        "itpipes_unassigned": set(),
+    }
+    placeholders, values = _in(value.upper() for value in normalized_ids)
+    if values:
+        with closing(_connect(path)) as connection:
+            for membership, table_key in (
+                ("cityworks_unassigned", "cityworksUnassigned"),
+                ("cityworks_assigned", "cityworksAssigned"),
+                ("itpipes_unassigned", "itpipesUnassigned"),
+                ("itpipes_assigned", "itpipesAssigned"),
+            ):
+                table = str(tables.get(table_key) or "")
+                columns = _columns(connection, table)
+                source_field = _required_column(columns, table, id_field)
+                rows = connection.execute(
+                    f"SELECT DISTINCT upper(regexp_replace(CAST({_quote(source_field)} AS VARCHAR), '\\.0+$', '')) "
+                    f"FROM {_quote(table)} WHERE upper(regexp_replace(CAST({_quote(source_field)} AS VARCHAR), '\\.0+$', '')) IN ({placeholders})",
+                    values,
+                ).fetchall()
+                memberships[membership] = {_id(row[0]).upper() for row in rows if _id(row[0])}
+
+    statuses: dict[str, str] = {}
+    for asset_id in normalized_ids:
+        key = asset_id.upper()
+        assigned = key in memberships["cityworks_assigned"] or key in memberships["itpipes_assigned"]
+        unassigned = key in memberships["cityworks_unassigned"] or key in memberships["itpipes_unassigned"]
+        statuses[asset_id] = "assigned" if assigned else "unassigned" if unassigned else "not_evaluated"
+    metadata = source_info(source_id)
+    return {
+        "statuses": statuses,
         "source_id": source_id,
         "version": str(metadata.get("version") or ""),
         "published_at": metadata.get("publishedAt") or metadata.get("publicationTimestamp"),
@@ -456,6 +557,114 @@ def itpipes_defect_count(asset_id: str) -> int:
 def itpipes_defects(asset_id: str) -> list[dict[str, Any]]:
     """Return merged ITPipes defects enriched by authoritative production MLI/ML rows."""
 
+    return itpipes_defects_for_assets([asset_id])
+
+
+def latest_itpipes_inspection_defects(asset_id: str) -> dict[str, Any] | None:
+    """Return the latest production MLI and its positive-condition-risk observations."""
+
+    normalized_asset_id = _id(asset_id)
+    if not normalized_asset_id:
+        return None
+    config = _config()
+    intermediate_source_id, intermediate_path = _source(config, "itpipesIntermediate")
+    production_source_id, production_path = _source(config, "itpipesProduction")
+    defect_table = _itpipes_table(config, "defects")
+    inspection_table = _itpipes_table(config, "inspection")
+    asset_table = _itpipes_table(config, "asset")
+
+    with closing(_connect(production_path)) as connection:
+        inspection_columns = _columns(connection, inspection_table)
+        asset_columns = _columns(connection, asset_table)
+        mli_id_field = _required_column(inspection_columns, inspection_table, "MLI_ID")
+        inspection_ml_id_field = _required_column(inspection_columns, inspection_table, "ML_ID")
+        inspection_date_field = _required_column(inspection_columns, inspection_table, "Inspection_Date")
+        direction_field = _required_column(inspection_columns, inspection_table, "Inspection_Direction")
+        asset_ml_id_field = _required_column(asset_columns, asset_table, "ML_ID")
+        asset_name_field = _required_column(asset_columns, asset_table, "ML_Name")
+        latest = _rows(connection.execute(
+            f"""
+            SELECT
+                inspection.{_quote(mli_id_field)} AS mli_id,
+                inspection.{_quote(inspection_ml_id_field)} AS ml_id,
+                inspection.{_quote(inspection_date_field)} AS inspection_date,
+                inspection.{_quote(direction_field)} AS inspection_direction,
+                asset.{_quote(asset_name_field)} AS production_asset_id
+            FROM {_quote(asset_table)} asset
+            JOIN {_quote(inspection_table)} inspection
+              ON CAST(inspection.{_quote(inspection_ml_id_field)} AS VARCHAR)=CAST(asset.{_quote(asset_ml_id_field)} AS VARCHAR)
+            WHERE upper(regexp_replace(CAST(asset.{_quote(asset_name_field)} AS VARCHAR), '\\.0+$', ''))=upper(?)
+            ORDER BY try_cast(inspection.{_quote(inspection_date_field)} AS TIMESTAMP) DESC NULLS LAST,
+                     CAST(inspection.{_quote(mli_id_field)} AS VARCHAR) ASC
+            LIMIT 1
+            """,
+            [normalized_asset_id],
+        ))
+    if not latest:
+        return None
+
+    inspection = latest[0]
+    mli_id = _id(inspection.get("mli_id"))
+    with closing(_connect(intermediate_path)) as connection:
+        columns = _columns(connection, defect_table)
+        fields = {
+            "asset_id": _required_column(columns, defect_table, "ITPIPE_ASSETID"),
+            "mli_id": _required_column(columns, defect_table, "MLI_ID"),
+            "mlo_id": _required_column(columns, defect_table, "MLO_ID"),
+            "is_continuous": _required_column(columns, defect_table, "IS_CONTINUOUS"),
+            "observation_text": _required_column(columns, defect_table, "Observation_Text"),
+            "distance": _required_column(columns, defect_table, "Distance"),
+            "condition_risk": _required_column(columns, defect_table, "COND_RISK"),
+        }
+        relative_depth_field = _column(columns, "RELATIVE_DEPTH", "Relative_Depth")
+        relative_depth_select = (
+            f"{_quote(relative_depth_field)} AS relative_depth"
+            if relative_depth_field else "NULL AS relative_depth"
+        )
+        defects = _rows(connection.execute(
+            f"""
+            SELECT
+                {_quote(fields['mlo_id'])} AS mlo_id,
+                {_quote(fields['is_continuous'])} AS is_continuous,
+                {_quote(fields['observation_text'])} AS observation_text,
+                {_quote(fields['distance'])} AS source_distance_feet,
+                {relative_depth_select},
+                try_cast({_quote(fields['condition_risk'])} AS DOUBLE) AS condition_risk
+            FROM {_quote(defect_table)}
+            WHERE upper(regexp_replace(CAST({_quote(fields['asset_id'])} AS VARCHAR), '\\.0+$', ''))=upper(?)
+              AND regexp_replace(CAST({_quote(fields['mli_id'])} AS VARCHAR), '\\.0+$', '')=?
+              AND try_cast({_quote(fields['condition_risk'])} AS DOUBLE) > 0
+            ORDER BY try_cast({_quote(fields['distance'])} AS DOUBLE) ASC NULLS LAST,
+                     try_cast({_quote(fields['condition_risk'])} AS DOUBLE) DESC,
+                     CAST({_quote(fields['mlo_id'])} AS VARCHAR) ASC
+            """,
+            [normalized_asset_id, mli_id],
+        ))
+
+    seen_mlo_ids: set[str] = set()
+    normalized_defects: list[dict[str, Any]] = []
+    for defect in defects:
+        mlo_id = _id(defect.get("mlo_id"))
+        if not mlo_id:
+            raise HTTPException(status_code=503, detail="The latest ITPipes inspection contains an observation without MLO_ID.")
+        if mlo_id in seen_mlo_ids:
+            raise HTTPException(status_code=503, detail=f"MLO_ID {mlo_id} is duplicated in the latest ITPipes inspection.")
+        seen_mlo_ids.add(mlo_id)
+        normalized_defects.append({**defect, "mlo_id": mlo_id})
+    return {
+        "mli_id": mli_id,
+        "ml_id": _id(inspection.get("ml_id")),
+        "inspection_date": inspection.get("inspection_date"),
+        "inspection_direction": inspection.get("inspection_direction"),
+        "production_asset_id": _id(inspection.get("production_asset_id")),
+        "source_ids": [intermediate_source_id, production_source_id],
+        "defects": normalized_defects,
+    }
+
+
+def itpipes_defects_for_assets(asset_ids: Iterable[str]) -> list[dict[str, Any]]:
+    """Return merged ITPipes defects for a selected asset set."""
+
     config = _config()
     intermediate_source_id, intermediate_path = _source(config, "itpipesIntermediate")
     production_source_id, production_path = _source(config, "itpipesProduction")
@@ -481,11 +690,12 @@ def itpipes_defects(asset_id: str) -> list[dict[str, Any]]:
         }
         distance_field = _column(columns, "Distance")
         relative_depth_field = _column(columns, "RELATIVE_DEPTH", "Relative_Depth")
+        placeholders, selected_ids = _in(_id(value).upper() for value in asset_ids)
         defects = _rows(connection.execute(
             f"SELECT * FROM {_quote(defect_table)} "
-            f"WHERE upper(CAST({_quote(fields['ITPIPE_ASSETID'])} AS VARCHAR))=upper(?)",
-            [_id(asset_id)],
-        ))
+            f"WHERE upper(regexp_replace(CAST({_quote(fields['ITPIPE_ASSETID'])} AS VARCHAR), '\\.0+$', '')) IN ({placeholders})",
+            selected_ids,
+        )) if selected_ids else []
     if not defects:
         return []
 
@@ -580,6 +790,12 @@ def priority_pipe_risk_count(asset_id: str) -> int:
 def priority_pipe_risk(asset_id: str) -> list[dict[str, Any]]:
     """Return the published priority-pipe scores without recalculating model logic."""
 
+    return priority_pipe_risk_for_assets([asset_id])
+
+
+def priority_pipe_risk_for_assets(asset_ids: Iterable[str]) -> list[dict[str, Any]]:
+    """Return published priority-pipe scores for a selected pipe set."""
+
     config = _config()
     source_id, path = _source(config, "priorityPipes")
     table = _priority_pipes_table(config, "scored")
@@ -589,12 +805,13 @@ def priority_pipe_risk(asset_id: str) -> list[dict[str, Any]]:
             name: _required_column(columns, table, name)
             for name in ("ITPIPE_ASSETID", "Basin_Name", "WorkZoneID", "CL_SCORE", "LOF_SCORE", "COF_SCORE", "RISK")
         }
+        placeholders, selected_ids = _in(_id(value).upper() for value in asset_ids)
         rows = _rows(connection.execute(
             f"SELECT * FROM {_quote(table)} "
-            f"WHERE upper(CAST({_quote(fields['ITPIPE_ASSETID'])} AS VARCHAR))=upper(?) "
+            f"WHERE upper(regexp_replace(CAST({_quote(fields['ITPIPE_ASSETID'])} AS VARCHAR), '\\.0+$', '')) IN ({placeholders}) "
             f"ORDER BY {_quote(fields['RISK'])} DESC NULLS LAST",
-            [_id(asset_id)],
-        ))
+            selected_ids,
+        )) if selected_ids else []
     return [
         {
             "kind": "pipe_risk",
@@ -648,6 +865,120 @@ def _inspection_risk_by_id(inspection_ids: Iterable[str]) -> dict[str, dict[str,
             values,
         ))
     return {_id(row.get("inspection_id")): row for row in rows}
+
+
+def related_risk_scores_for_assets(
+    assets: Iterable[tuple[str, str]],
+) -> tuple[dict[tuple[str, str], dict[str, float | None]], list[str]]:
+    """Return each asset's maximum published Cityworks/ITPipes risk scores."""
+
+    selected = sorted({
+        (str(asset_type).strip().casefold(), _id(asset_id))
+        for asset_type, asset_id in assets
+        if str(asset_type).strip().casefold() in ASSET_TYPES and _id(asset_id)
+    })
+    scores = {
+        asset: {"condition_risk": None, "flood_risk": None, "clogging_risk": None, "risk": None}
+        for asset in selected
+    }
+    warnings: list[str] = []
+    if not selected:
+        return scores, warnings
+
+    references_by_id: dict[str, set[tuple[str, str]]] = {}
+    for asset in selected:
+        references_by_id.setdefault(asset[1].upper(), set()).add(asset)
+
+    def record(asset: tuple[str, str], field: str, value: Any) -> None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return
+        if not math.isfinite(number):
+            return
+        current = scores[asset][field]
+        scores[asset][field] = number if current is None else max(current, number)
+
+    config = _config()
+    try:
+        _, cityworks_path = _source(config, "cityworks")
+        inspection_table = str(config.get("cityworksTables", {}).get("inspection") or "")
+        template_pattern = str(config.get("assetInspectionTemplatePattern") or "%Asset Insp%")
+        selected_rows = [
+            (asset_type, asset_id, _asset_definition(config, asset_type)["entityType"])
+            for asset_type, asset_id in selected
+        ]
+        with closing(_connect(cityworks_path)) as connection:
+            columns = _columns(connection, inspection_table)
+            inspection_id = _required_column(columns, inspection_table, "INSPECTIONID")
+            entity_uid = _required_column(columns, inspection_table, "ENTITYUID")
+            entity_type = _required_column(columns, inspection_table, "ENTITYTYPE")
+            template_name = _required_column(columns, inspection_table, "INSPTEMPLATENAME")
+            connection.execute("CREATE TEMP TABLE portal_risk_assets(asset_type VARCHAR, asset_id VARCHAR, entity_type VARCHAR)")
+            connection.executemany("INSERT INTO portal_risk_assets VALUES (?, ?, ?)", selected_rows)
+            rows = _rows(connection.execute(
+                f"""
+                SELECT selected.asset_type, selected.asset_id,
+                       inspection.{_quote(inspection_id)} AS inspection_id
+                FROM {_quote(inspection_table)} inspection
+                JOIN portal_risk_assets selected
+                  ON upper(regexp_replace(CAST(inspection.{_quote(entity_uid)} AS VARCHAR), '\\.0+$', ''))=upper(selected.asset_id)
+                 AND upper(CAST(inspection.{_quote(entity_type)} AS VARCHAR))=upper(selected.entity_type)
+                WHERE CAST(inspection.{_quote(template_name)} AS VARCHAR) ILIKE ?
+                """,
+                [template_pattern],
+            ))
+        inspection_assets: dict[str, set[tuple[str, str]]] = {}
+        for row in rows:
+            inspection_assets.setdefault(_id(row.get("inspection_id")), set()).add(
+                (str(row.get("asset_type")), _id(row.get("asset_id")))
+            )
+        for inspection_id_value, risk in _inspection_risk_by_id(inspection_assets).items():
+            for asset in inspection_assets.get(inspection_id_value, set()):
+                for field in ("condition_risk", "flood_risk", "clogging_risk", "risk"):
+                    record(asset, field, risk.get(field))
+    except (HTTPException, duckdb.Error) as error:
+        detail = error.detail if isinstance(error, HTTPException) else str(error)
+        warnings.append(f"Cityworks risk filters used no Cityworks scores: {detail}")
+
+    try:
+        _, itpipes_path = _source(config, "itpipesIntermediate")
+        defect_table = _itpipes_table(config, "defects")
+        with closing(_connect(itpipes_path)) as connection:
+            columns = _columns(connection, defect_table)
+            fields = {
+                name: _required_column(columns, defect_table, name)
+                for name in ("ITPIPE_ASSETID", "COND_RISK", "FLOOD_RISK", "CLOG_RISK", "RISK")
+            }
+            placeholders, values = _in(references_by_id)
+            rows = _rows(connection.execute(
+                f"SELECT {_quote(fields['ITPIPE_ASSETID'])} AS asset_id, "
+                f"{_quote(fields['COND_RISK'])} AS condition_risk, "
+                f"{_quote(fields['FLOOD_RISK'])} AS flood_risk, "
+                f"{_quote(fields['CLOG_RISK'])} AS clogging_risk, "
+                f"{_quote(fields['RISK'])} AS risk FROM {_quote(defect_table)} "
+                f"WHERE upper(regexp_replace(CAST({_quote(fields['ITPIPE_ASSETID'])} AS VARCHAR), '\\.0+$', '')) IN ({placeholders})",
+                values,
+            )) if values else []
+        for row in rows:
+            for asset in references_by_id.get(_id(row.get("asset_id")).upper(), set()):
+                for field in ("condition_risk", "flood_risk", "clogging_risk", "risk"):
+                    record(asset, field, row.get(field))
+    except (HTTPException, duckdb.Error) as error:
+        detail = error.detail if isinstance(error, HTTPException) else str(error)
+        warnings.append(f"Risk filters used no ITPipes scores: {detail}")
+
+    try:
+        pipe_ids = [asset_id for asset_type, asset_id in selected if asset_type == "pipe"]
+        for row in priority_pipe_risk_for_assets(pipe_ids) if pipe_ids else []:
+            asset = ("pipe", _id(row.get("asset_id")))
+            if asset in scores:
+                record(asset, "risk", row.get("risk"))
+    except (HTTPException, duckdb.Error) as error:
+        detail = error.detail if isinstance(error, HTTPException) else str(error)
+        warnings.append(f"Risk filters used no priority-pipe scores: {detail}")
+
+    return scores, warnings
 
 
 def _activity_type(value: Any) -> str:
@@ -835,6 +1166,221 @@ def activity_history(asset_type: str, asset_id: str) -> dict[str, list[dict[str,
         "inspections": inspection_records,
         "work_orders": work_order_records,
     }
+
+
+def activity_history_for_assets(assets: Iterable[tuple[str, str]]) -> dict[str, list[dict[str, Any]]]:
+    """Resolve Cityworks history for many assets without per-asset queries."""
+
+    selected = sorted({
+        (str(asset_type).strip().casefold(), _id(asset_id))
+        for asset_type, asset_id in assets
+        if str(asset_type).strip().casefold() in ASSET_TYPES and _id(asset_id)
+    })
+    result: dict[str, list[dict[str, Any]]] = {
+        "service_requests": [],
+        "investigations": [],
+        "inspections": [],
+        "work_orders": [],
+    }
+    if not selected:
+        return result
+
+    config = _config()
+    _, path = _source(config, "cityworks")
+    tables = config.get("cityworksTables", {})
+    inspection_table = str(tables.get("inspection") or "")
+    work_order_table = str(tables.get("workOrder") or "")
+    entity_table = str(tables.get("workOrderEntity") or "")
+    link_table = str(tables.get("activityLink") or "")
+    request_table = str(tables.get("request") or "")
+    template_pattern = str(config.get("assetInspectionTemplatePattern") or "%Asset Insp%")
+    selected_rows = [
+        (asset_type, asset_id, _asset_definition(config, asset_type)["entityType"])
+        for asset_type, asset_id in selected
+    ]
+
+    with closing(_connect(path)) as connection:
+        for table in (inspection_table, work_order_table, entity_table, link_table, request_table):
+            _columns(connection, table)
+        connection.execute("CREATE TEMP TABLE portal_selected_assets(asset_type VARCHAR, asset_id VARCHAR, entity_type VARCHAR)")
+        connection.executemany("INSERT INTO portal_selected_assets VALUES (?, ?, ?)", selected_rows)
+        inspections = _rows(connection.execute(
+            f"""
+            SELECT selected.asset_type AS __asset_type, selected.asset_id AS __asset_id, inspection.*
+            FROM {_quote(inspection_table)} inspection
+            JOIN portal_selected_assets selected
+              ON upper(regexp_replace(CAST(inspection.ENTITYUID AS VARCHAR), '\\.0+$', ''))=upper(selected.asset_id)
+             AND upper(CAST(inspection.ENTITYTYPE AS VARCHAR))=upper(selected.entity_type)
+            WHERE CAST(inspection.INSPTEMPLATENAME AS VARCHAR) ILIKE ?
+            """,
+            [template_pattern],
+        ))
+        work_orders = _rows(connection.execute(
+            f"""
+            SELECT DISTINCT selected.asset_type AS __asset_type, selected.asset_id AS __asset_id, work_order.*
+            FROM {_quote(work_order_table)} work_order
+            JOIN {_quote(entity_table)} entity
+              ON CAST(entity.WORKORDERID AS VARCHAR)=CAST(work_order.WORKORDERID AS VARCHAR)
+            JOIN portal_selected_assets selected
+              ON upper(regexp_replace(CAST(entity.ENTITYUID AS VARCHAR), '\\.0+$', ''))=upper(selected.asset_id)
+             AND upper(CAST(entity.ENTITYTYPE AS VARCHAR))=upper(selected.entity_type)
+            """
+        ))
+
+        inspection_refs: dict[str, set[tuple[str, str]]] = {}
+        for row in inspections:
+            inspection_refs.setdefault(_id(row.get("INSPECTIONID")), set()).add((str(row["__asset_type"]), _id(row["__asset_id"])))
+        work_order_refs: dict[str, set[tuple[str, str]]] = {}
+        for row in work_orders:
+            work_order_refs.setdefault(_id(row.get("WORKORDERID")), set()).add((str(row["__asset_type"]), _id(row["__asset_id"])))
+
+        inspection_placeholders, inspection_values = _in(inspection_refs)
+        inspection_links = _rows(connection.execute(
+            f"""
+            SELECT * FROM {_quote(link_table)}
+            WHERE lower(CAST(SOURCEACTIVITYTYPE AS VARCHAR))='inspection'
+              AND lower(CAST(DESTACTIVITYTYPE AS VARCHAR))='inspection'
+              AND (
+                regexp_replace(CAST(SOURCEACTIVITYID AS VARCHAR), '\\.0+$', '') IN ({inspection_placeholders})
+                OR regexp_replace(CAST(DESTACTIVITYID AS VARCHAR), '\\.0+$', '') IN ({inspection_placeholders})
+              )
+            """,
+            [*inspection_values, *inspection_values],
+        )) if inspection_values else []
+        investigation_refs: dict[str, set[tuple[str, str]]] = {}
+        investigation_related: dict[tuple[str, tuple[str, str]], set[str]] = {}
+        for link in inspection_links:
+            source_id = _id(link.get("SOURCEACTIVITYID"))
+            destination_id = _id(link.get("DESTACTIVITYID"))
+            if source_id in inspection_refs and destination_id not in inspection_refs:
+                direct_id, investigation_id = source_id, destination_id
+            elif destination_id in inspection_refs and source_id not in inspection_refs:
+                direct_id, investigation_id = destination_id, source_id
+            else:
+                continue
+            for asset_ref in inspection_refs[direct_id]:
+                investigation_refs.setdefault(investigation_id, set()).add(asset_ref)
+                investigation_related.setdefault((investigation_id, asset_ref), set()).add(direct_id)
+        investigation_raw = {
+            _id(row.get("INSPECTIONID")): row
+            for row in _fetch_by_ids(connection, inspection_table, "INSPECTIONID", investigation_refs)
+        }
+
+        request_refs: dict[str, set[tuple[str, str]]] = {}
+        request_paths: dict[tuple[str, tuple[str, str]], set[str]] = {}
+        request_related: dict[tuple[str, tuple[str, str]], set[str]] = {}
+
+        def add_request(request_id: Any, asset_ref: tuple[str, str], path_label: str, related: Any = "") -> None:
+            normalized = _id(request_id)
+            if not normalized:
+                return
+            request_refs.setdefault(normalized, set()).add(asset_ref)
+            request_paths.setdefault((normalized, asset_ref), set()).add(path_label)
+            if _id(related):
+                request_related.setdefault((normalized, asset_ref), set()).add(_id(related))
+
+        for row in inspections:
+            asset_ref = (str(row["__asset_type"]), _id(row["__asset_id"]))
+            add_request(row.get("REQUESTID"), asset_ref, "Asset inspection", row.get("INSPECTIONID"))
+        for investigation_id, raw in investigation_raw.items():
+            for asset_ref in investigation_refs.get(investigation_id, set()):
+                add_request(raw.get("REQUESTID"), asset_ref, "Investigation", investigation_id)
+
+        work_order_placeholders, work_order_values = _in(work_order_refs)
+        work_order_requests = _rows(connection.execute(
+            f"SELECT * FROM {_quote(request_table)} WHERE regexp_replace(CAST(WORKORDERID AS VARCHAR), '\\.0+$', '') IN ({work_order_placeholders})",
+            work_order_values,
+        )) if work_order_values else []
+        for raw in work_order_requests:
+            work_order_id = _id(raw.get("WORKORDERID"))
+            for asset_ref in work_order_refs.get(work_order_id, set()):
+                add_request(raw.get("REQUESTID"), asset_ref, "Direct asset work order", work_order_id)
+
+        all_inspection_refs = dict(inspection_refs)
+        for investigation_id, refs in investigation_refs.items():
+            all_inspection_refs.setdefault(investigation_id, set()).update(refs)
+        related_inspection_placeholders, related_inspection_values = _in(all_inspection_refs)
+        predicates: list[str] = []
+        parameters: list[str] = []
+        if related_inspection_values:
+            for side in ("SOURCE", "DEST"):
+                predicates.append(
+                    f"(lower(CAST({side}ACTIVITYTYPE AS VARCHAR))='inspection' AND regexp_replace(CAST({side}ACTIVITYID AS VARCHAR), '\\.0+$', '') IN ({related_inspection_placeholders}))"
+                )
+                parameters.extend(related_inspection_values)
+        if work_order_values:
+            for side in ("SOURCE", "DEST"):
+                predicates.append(
+                    f"(lower(replace(CAST({side}ACTIVITYTYPE AS VARCHAR), ' ', ''))='workorder' AND regexp_replace(CAST({side}ACTIVITYID AS VARCHAR), '\\.0+$', '') IN ({work_order_placeholders}))"
+                )
+                parameters.extend(work_order_values)
+        related_links = _rows(connection.execute(
+            f"SELECT * FROM {_quote(link_table)} WHERE {' OR '.join(predicates)}",
+            parameters,
+        )) if predicates else []
+        for link in related_links:
+            source_type = _activity_type(link.get("SOURCEACTIVITYTYPE"))
+            destination_type = _activity_type(link.get("DESTACTIVITYTYPE"))
+            source_id = _id(link.get("SOURCEACTIVITYID"))
+            destination_id = _id(link.get("DESTACTIVITYID"))
+            if source_type == "service_request" and destination_type == "inspection":
+                for asset_ref in all_inspection_refs.get(destination_id, set()):
+                    add_request(source_id, asset_ref, "Asset inspection" if destination_id in inspection_refs else "Investigation", destination_id)
+            elif destination_type == "service_request" and source_type == "inspection":
+                for asset_ref in all_inspection_refs.get(source_id, set()):
+                    add_request(destination_id, asset_ref, "Asset inspection" if source_id in inspection_refs else "Investigation", source_id)
+            elif source_type == "service_request" and destination_type == "work_order":
+                for asset_ref in work_order_refs.get(destination_id, set()):
+                    add_request(source_id, asset_ref, "Direct asset work order", destination_id)
+            elif destination_type == "service_request" and source_type == "work_order":
+                for asset_ref in work_order_refs.get(source_id, set()):
+                    add_request(destination_id, asset_ref, "Direct asset work order", source_id)
+        request_raw = {
+            _id(row.get("REQUESTID")): row
+            for row in _fetch_by_ids(connection, request_table, "REQUESTID", request_refs)
+        }
+
+    try:
+        inspection_risks = _inspection_risk_by_id(inspection_refs)
+    except HTTPException:
+        inspection_risks = {}
+    for raw in inspections:
+        asset_type = str(raw.pop("__asset_type"))
+        asset_id = _id(raw.pop("__asset_id"))
+        record = _common("inspection", raw, "Direct asset inspection")
+        record.update({"asset_type": asset_type, "asset_id": asset_id})
+        scored = inspection_risks.get(record["record_id"], {})
+        for key in ("condition_risk", "flood_risk", "clogging_risk", "risk"):
+            record[key] = scored.get(key)
+        record["source_attributes"].update({
+            "COND_RISK": scored.get("condition_risk"),
+            "FLOOD_RISK": scored.get("flood_risk"),
+            "CLOG_RISK": scored.get("clogging_risk"),
+            "RISK": scored.get("risk"),
+        })
+        result["inspections"].append(record)
+    for raw in work_orders:
+        asset_type = str(raw.pop("__asset_type"))
+        asset_id = _id(raw.pop("__asset_id"))
+        record = _common("work_order", raw, "Direct asset work order")
+        record.update({"asset_type": asset_type, "asset_id": asset_id})
+        result["work_orders"].append(record)
+    for investigation_id, raw in investigation_raw.items():
+        if "asset insp" in str(raw.get("INSPTEMPLATENAME") or "").casefold():
+            continue
+        for asset_ref in investigation_refs.get(investigation_id, set()):
+            related = ", ".join(sorted(investigation_related.get((investigation_id, asset_ref), set())))
+            record = _common("investigation", raw, "Linked investigation", related)
+            record.update({"asset_type": asset_ref[0], "asset_id": asset_ref[1]})
+            result["investigations"].append(record)
+    for request_id, raw in request_raw.items():
+        for asset_ref in request_refs.get(request_id, set()):
+            paths = sorted(request_paths.get((request_id, asset_ref), set()))
+            related = ", ".join(sorted(request_related.get((request_id, asset_ref), set())))
+            record = _common("service_request", raw, ", ".join(paths), related)
+            record.update({"asset_type": asset_ref[0], "asset_id": asset_ref[1], "relationship_paths": paths})
+            result["service_requests"].append(record)
+    return result
 
 
 def record_detail(kind: str, record_id: str, *, work_zone_id: str = "") -> dict[str, Any]:

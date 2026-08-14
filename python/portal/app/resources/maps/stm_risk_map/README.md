@@ -45,3 +45,18 @@ histograms now read the current scored source tables directly:
 The risk endpoints derive field metadata from those live tables, apply spatial
 filters to their `geometry` columns, and do not require the generated
 `stm_risk.duckdb` snapshot or its `_datasets`/`_fields` catalog.
+
+The map's Terrain Profile tool samples the active local `terrain.dem` source
+(`mecklenburg_dem.tif`) for analytical ground elevations. Drawn lines are
+sampled directly; selected pipes and drainage lines resolve their geometry from
+the active inventory DuckDB. Pipe profiles also use `US_INVERT` and `DS_INVERT`
+after orienting the line upstream-to-downstream. Terrain-RGB PMTiles remain a
+rendering source and are not used for elevation analysis. See
+`docs/STORM_WATER_TERRAIN_PROFILE_DESIGN.md` for the complete workflow.
+
+The map's Failure Consequence tool is also read-only. It evaluates the latest
+ITPipes and latest Cityworks defects independently, supports a session-only
+simulated defect, applies the Step 300 `3 ft + 2 x relative depth` ZOI rule, and
+queries only intersecting consequence features from configured local DuckDB
+sources. It never falls back to an older inspection. See
+`docs/STORM_WATER_ASSET_FAILURE_CONSEQUENCE_DESIGN.md` for the full contract.

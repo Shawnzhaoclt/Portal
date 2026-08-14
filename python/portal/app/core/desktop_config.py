@@ -32,6 +32,8 @@ _MAP_SOURCE_ENVIRONMENT_KEYS = frozenset(
         "PORTAL_MAP_CONFIG_FILE",
         "PORTAL_MAP_TERRAIN_ROOT",
         "PORTAL_MAP_TERRAIN_ARCHIVE",
+        "PORTAL_MAP_TERRAIN_DEM",
+        "PORTAL_MAP_TERRAIN_DEM_SOURCE_ID",
         "PORTAL_MAP_REPORTS_ROOT",
     }
 )
@@ -183,6 +185,69 @@ def configured_pmtiles_detail_sources() -> dict[str, dict[str, str]]:
     return configured
 
 
+def configured_asset_extract_boundary_sources() -> dict[str, dict[str, Any]]:
+    config = load_desktop_config()
+    maps = config.get("maps")
+    raw_sources = maps.get("assetExtractBoundarySources") if isinstance(maps, dict) else None
+    if not isinstance(raw_sources, list):
+        raise RuntimeError("maps.assetExtractBoundarySources must be a list in portal.settings.json.")
+
+    configured: dict[str, dict[str, Any]] = {}
+    for index, raw_source in enumerate(raw_sources):
+        if not isinstance(raw_source, dict):
+            raise RuntimeError(f"maps.assetExtractBoundarySources[{index}] must be an object.")
+        source = dict(raw_source)
+        source_id = str(source.get("id") or "").strip().lower()
+        label = str(source.get("label") or "").strip()
+        database_source_id = str(source.get("databaseSourceId") or "").strip()
+        database_fallback = str(source.get("database") or "").strip()
+        schema = str(source.get("schema") or "").strip()
+        table = str(source.get("table") or "").strip()
+        geometry_column = str(source.get("geometryColumn") or "geometry").strip()
+        feature_id_column = str(source.get("featureIdColumn") or "").strip()
+        search_fields = source.get("searchFields")
+        display_fields = source.get("displayFields")
+        if not all((source_id, label, database_source_id, database_fallback, table, feature_id_column)):
+            raise RuntimeError(
+                f"maps.assetExtractBoundarySources[{index}] is missing a required setting."
+            )
+        if not isinstance(search_fields, list) or not all(
+            isinstance(item, str) and item.strip() for item in search_fields
+        ):
+            raise RuntimeError(f"Asset extract boundary source {source_id} has invalid searchFields.")
+        if not isinstance(display_fields, list) or not all(
+            isinstance(item, str) and item.strip() for item in display_fields
+        ):
+            raise RuntimeError(f"Asset extract boundary source {source_id} has invalid displayFields.")
+        if source_id in configured:
+            raise RuntimeError(f"Duplicate asset extract boundary source id: {source_id}")
+        try:
+            source_srid = int(source.get("sourceSrid") or 2264)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"Asset extract boundary source {source_id} has an invalid sourceSrid."
+            ) from error
+        configured[source_id] = {
+            **source,
+            "id": source_id,
+            "label": label,
+            "databaseSourceId": database_source_id,
+            "database": resolve_source(
+                database_source_id,
+                database_fallback,
+                label=f"Asset extract boundary source {source_id}",
+            ),
+            "schema": schema,
+            "table": table,
+            "geometryColumn": geometry_column,
+            "featureIdColumn": feature_id_column,
+            "sourceSrid": source_srid,
+            "searchFields": [str(item).strip() for item in search_fields],
+            "displayFields": [str(item).strip() for item in display_fields],
+        }
+    return configured
+
+
 def configured_asset_history() -> dict[str, Any]:
     """Resolve the read-only sources and schema contract for Asset History."""
 
@@ -212,6 +277,35 @@ def configured_asset_history() -> dict[str, Any]:
             label=f"Asset History {key} source",
         )
     return result
+
+
+def configured_failure_consequence_sources() -> dict[str, dict[str, Any]]:
+    """Resolve the read-only spatial sources used by map consequence screening."""
+
+    config = load_desktop_config()
+    maps = config.get("maps")
+    raw = maps.get("failureConsequenceSources") if isinstance(maps, dict) else None
+    if not isinstance(raw, dict) or not raw:
+        raise RuntimeError("maps.failureConsequenceSources must be configured in portal.settings.json.")
+    configured: dict[str, dict[str, Any]] = {}
+    for key, value in raw.items():
+        if not isinstance(value, dict):
+            raise RuntimeError(f"maps.failureConsequenceSources.{key} must be an object.")
+        item = _expanded(dict(value))
+        source_id = str(item.get("databaseSourceId") or "").strip()
+        fallback = str(item.get("database") or "").strip()
+        if not source_id or not fallback:
+            raise RuntimeError(
+                f"maps.failureConsequenceSources.{key} must define databaseSourceId and database."
+            )
+        item["databaseSourceId"] = source_id
+        item["database"] = resolve_source(
+            source_id,
+            fallback,
+            label=f"Failure consequence {key} source",
+        )
+        configured[str(key)] = item
+    return configured
 
 
 def configure_environment() -> dict[str, Any]:
@@ -266,6 +360,8 @@ def configure_environment() -> dict[str, Any]:
         "PORTAL_MAP_CONFIG_FILE": _value(config, "maps", "projectConfigFile"),
         "PORTAL_MAP_TERRAIN_ROOT": _value(config, "maps", "terrainRoot"),
         "PORTAL_MAP_TERRAIN_ARCHIVE": _value(config, "maps", "terrainArchive"),
+        "PORTAL_MAP_TERRAIN_DEM": _value(config, "maps", "terrainDem"),
+        "PORTAL_MAP_TERRAIN_DEM_SOURCE_ID": _value(config, "maps", "terrainDemSourceId"),
         "PORTAL_MAP_REPORTS_ROOT": _value(config, "maps", "reportsRoot"),
         "PORTAL_BUSINESS_BACKUP_ROOT": _value(config, "business", "backupRoot"),
         "PORTAL_BUSINESS_INBOX_ROOT": _value(config, "business", "inboxRoot"),
@@ -372,6 +468,8 @@ def configured_paths() -> dict[str, str]:
         "map_configuration_root": str(Path(map_configuration_file).parent) if map_configuration_file else "",
         "terrain_root": os.getenv("PORTAL_MAP_TERRAIN_ROOT", _value(config, "maps", "terrainRoot")),
         "terrain_archive": os.getenv("PORTAL_MAP_TERRAIN_ARCHIVE", _value(config, "maps", "terrainArchive")),
+        "terrain_dem": os.getenv("PORTAL_MAP_TERRAIN_DEM", _value(config, "maps", "terrainDem")),
+        "terrain_dem_source_id": os.getenv("PORTAL_MAP_TERRAIN_DEM_SOURCE_ID", _value(config, "maps", "terrainDemSourceId")),
         "map_reports_root": os.getenv("PORTAL_MAP_REPORTS_ROOT", _value(config, "maps", "reportsRoot")),
         "business_backup_root": os.getenv("PORTAL_BUSINESS_BACKUP_ROOT", _value(config, "business", "backupRoot")),
         "business_inbox_root": os.getenv("PORTAL_BUSINESS_INBOX_ROOT", _value(config, "business", "inboxRoot")),

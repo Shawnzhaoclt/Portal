@@ -60,6 +60,7 @@ import {
   getDataCacheStatus,
   getDesktopContext,
   isDesktopRuntime,
+  reportDesktopOpenResourceCount,
   type DataCacheStatus,
 } from './desktop/runtime'
 import { appConfirm } from './components/messageDialogService'
@@ -1043,6 +1044,15 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [dataCacheError, setDataCacheError] = useState('')
 
   useEffect(() => {
+    if (desktopRuntime) reportDesktopOpenResourceCount(desktopResourceTabs.length)
+  }, [desktopResourceTabs.length, desktopRuntime])
+
+  useEffect(() => {
+    if (!desktopRuntime) return
+    return () => reportDesktopOpenResourceCount(0)
+  }, [desktopRuntime])
+
+  useEffect(() => {
     if (!desktopRuntime) return
     let cancelled = false
     setApplicationVersionLoading(true)
@@ -1174,6 +1184,17 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       document.removeEventListener('keydown', handleKeyDown)
     }
   }, [popupResource])
+
+  useEffect(() => {
+    function handleResourceNavigation(event: MessageEvent) {
+      if (event.origin !== window.location.origin || event.data?.type !== 'portal:activate-home') return
+      setPopupResource(null)
+      setActiveDesktopResourceId(null)
+    }
+
+    window.addEventListener('message', handleResourceNavigation)
+    return () => window.removeEventListener('message', handleResourceNavigation)
+  }, [])
 
   function handlePortalSignOut() {
     clearPortalTestAccess()

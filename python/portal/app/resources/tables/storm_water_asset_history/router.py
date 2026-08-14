@@ -77,7 +77,7 @@ def _all(asset_type: str, asset_id: str) -> dict[str, Any]:
     for values in history.values():
         for item in values:
             item["source_url"] = _cityworks_url(item["kind"], item["record_id"])
-    timeline = timeline_events(history)
+    timeline = timeline_events(history, asset)
     return {
         "asset": asset,
         "assignment": assignment,
@@ -229,7 +229,7 @@ def get_asset_summary(
     try:
         history = activity_history(asset_type, asset["asset_id"])
         counts = {key: len(value) for key, value in history.items()}
-        counts["timeline"] = len(timeline_events(history))
+        counts["timeline"] = len(timeline_events(history, asset))
     except HTTPException as error:
         errors["history"] = str(error.detail if getattr(error, "detail", None) else error)
         counts = {key: 0 for key in ("service_requests", "investigations", "inspections", "work_orders", "timeline")}
@@ -306,7 +306,7 @@ def get_asset_records(
             "items": rows[start:start + page_size],
         }
     history = activity_history(asset_type, asset["asset_id"])
-    timeline = timeline_events(history)
+    timeline = timeline_events(history, asset)
     rows = timeline if kind == "timeline" else history[kind]
     for item in rows:
         item["source_url"] = _cityworks_url(item["kind"], item["record_id"])
@@ -329,11 +329,23 @@ def get_record_detail(
     kind: str,
     record_id: str,
     work_zone_id: str = Query(default=""),
+    asset_type: str = Query(default=""),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     _require_view(db, current_user)
-    result = record_detail(kind, record_id, work_zone_id=work_zone_id)
+    if kind == "asset":
+        if asset_type.casefold() not in {"structure", "pipe", "channel"}:
+            raise HTTPException(status_code=422, detail="Asset type is required for an inventory record.")
+        asset = asset_summary(asset_type, record_id)
+        result = {
+            "kind": "asset",
+            "record_id": asset["asset_id"],
+            "fields": asset["all_fields"],
+            "questions": [],
+        }
+    else:
+        result = record_detail(kind, record_id, work_zone_id=work_zone_id)
     result["source_url"] = _cityworks_url(kind, record_id)
     return result
 

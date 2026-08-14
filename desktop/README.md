@@ -54,11 +54,20 @@ otherwise startup stops with a clear message. Cache-backed DuckDB and PMTiles se
 use logical source IDs, and the portable build rejects any cache-backed fallback that
 points to `PORTAL_SHARED_DATA_ROOT`.
 
+When all non-blocking source updates finish in the background, Portal asks the user to
+restart only if a resource tab is already open. Restarting reloads those open resources
+with the newly activated dataset. If no resource is open, no prompt is needed because
+the next resource opened resolves the latest active source automatically.
+
 ## Shared Release Distribution
 
 Publish portable releases to the shared release folder with an explicitly selected
 update scope. The package `VERSION` is the only software version entered into the
 release workflow.
+
+Set the Desktop version once in `src-tauri/tauri.conf.json` before building. The
+portable build embeds that value in the native host and writes the same value to
+the package `VERSION` file, which the publisher and installed About page use.
 
 ```powershell
 # First release or any mixed/runtime/structural change.
@@ -100,8 +109,11 @@ configuration only; data synchronization owns the data directory.
 
 On startup, Portal checks the current `portal-release.json` after validating the
 shared data drive. When its version is newer, Portal closes itself, starts the
-bundled updater, applies the selected payload, and restarts. The updater records
-the applied release in `config\update-state.json`.
+bundled updater, stops and waits for the bundled Python worker, applies the selected
+payload, and restarts. The updater retries application-folder activation while
+Windows releases runtime file locks, records the applied release in
+`config\update-state.json`, and writes diagnostics to
+`data\logs\portal-updater.log`.
 
 Portal is temporarily unavailable during the daily maintenance window from 10:00 PM through
 5:00 AM local time. A launch during that window shows the maintenance splash for

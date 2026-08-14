@@ -45,7 +45,8 @@
         {"id":"intermediate.planning","displayName":"Planning model data","path":"intermediate/planning/planning.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":56,"readOnly":true},
         {"id":"intermediate.prioritypipes","displayName":"Priority pipes model data","path":"intermediate/prioritypipes/prioritypipes.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":57,"readOnly":true},
         {"id":"intermediate.proactive","displayName":"Proactive team data","path":"intermediate/proactive/proactive.duckdb","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":58,"readOnly":true},
-        {"id":"intermediate.riskranking","displayName":"Risk ranking data","path":"intermediate/riskranking/riskranking.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":59,"readOnly":true}
+        {"id":"intermediate.riskranking","displayName":"Risk ranking data","path":"intermediate/riskranking/riskranking.db","format":"duckdb","updateClass":"daily","activationGroup":"stm-risk-intermediate","desktopEnabled":true,"priority":59,"readOnly":true},
+        {"id":"reference.consequence","displayName":"Consequence and work-zone reference data","path":"databases_local/consequence.duckdb","format":"duckdb","updateClass":"event-driven","activationGroup":"reference-consequence","desktopEnabled":true,"priority":60,"readOnly":true,"requiredTables":["geo.WorkZones","geo.row_city","geo.eop_city_thoroughfare_py","geo.eop_city_collector_py","geo.eop_city_local_py","geo.city_eop_local_limited_estimate","geo.eop_state_thoroughfare_py","geo.eop_state_collector_py","geo.eop_state_local_py","geo.eop_state_freeway_py"]}
       ]
     },
     "portal-serving-data": {

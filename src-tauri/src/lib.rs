@@ -8,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::{Duration, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, StatusCode};
 use tauri::Manager;
@@ -17,11 +17,23 @@ mod business_sync;
 mod data_cache;
 
 #[cfg(target_os = "windows")]
-use std::os::windows::{ffi::OsStrExt, process::CommandExt};
+use std::os::windows::{
+    ffi::{OsStrExt, OsStringExt},
+    process::CommandExt,
+};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::SYSTEMTIME;
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::Storage::FileSystem::{
+    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::System::SystemInformation::GetLocalTime;
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::UI::Controls::Dialogs::{
+    CommDlgExtendedError, GetSaveFileNameW, OFN_NOCHANGEDIR, OFN_OVERWRITEPROMPT,
+    OFN_PATHMUSTEXIST, OPENFILENAMEW,
+};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 #[cfg(target_os = "windows")]
@@ -31,6 +43,7 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAINTENANCE_SPLASH_DURATION: Duration = Duration::from_secs(15);
 const MAINTENANCE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_EXCEL_EXPORT_BYTES: usize = 100 * 1024 * 1024;
+const MAX_FILE_EXPORT_BYTES: usize = 512 * 1024 * 1024;
 
 fn is_scheduled_maintenance_hour(hour: u16) -> bool {
     hour >= 22 || hour < 5
@@ -326,6 +339,20 @@ impl Drop for PythonWorker {
 }
 
 static PYTHON_WORKER: OnceLock<Mutex<Option<PythonWorker>>> = OnceLock::new();
+
+fn shutdown_python_worker() -> Result<(), String> {
+    let Some(worker_state) = PYTHON_WORKER.get() else {
+        return Ok(());
+    };
+    let mut worker = worker_state
+        .lock()
+        .map_err(|_| "The Python worker lock is unavailable during Portal shutdown.".to_string())?;
+    // Dropping PythonWorker kills and waits for the bundled worker. This must
+    // happen before the updater renames the installed app directory on Windows,
+    // otherwise portal-python.exe can keep runtime files locked.
+    *worker = None;
+    Ok(())
+}
 
 fn spawn_python_worker() -> Result<PythonWorker, String> {
     let worker = python_worker_path()?;
@@ -1097,11 +1124,20 @@ fn packaged_application_version(root: &Path) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn embedded_application_version() -> &'static str {
+    option_env!("PORTAL_PACKAGE_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 fn installed_application_version() -> String {
-    installation_root()
+    executable_root()
         .ok()
         .and_then(|root| packaged_application_version(&root))
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+        .or_else(|| {
+            installation_root()
+                .ok()
+                .and_then(|root| packaged_application_version(&root))
+        })
+        .unwrap_or_else(|| embedded_application_version().to_string())
 }
 
 fn portal_config_path() -> Result<PathBuf, String> {
@@ -1314,7 +1350,7 @@ fn release_is_newer(candidate: &str, current: &str) -> bool {
 }
 
 fn installed_release_version() -> String {
-    let fallback = env!("CARGO_PKG_VERSION").to_string();
+    let fallback = embedded_application_version().to_string();
     let Ok(root) = installation_root() else {
         return fallback;
     };
@@ -1422,6 +1458,7 @@ fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
         .arg("--restart");
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
+    shutdown_python_worker()?;
     command
         .spawn()
         .map_err(|error| format!("Could not start Portal updater: {error}"))?;
@@ -1509,6 +1546,11 @@ fn exit_application(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+fn restart_application(app: tauri::AppHandle) {
+    app.restart();
+}
+
+#[tauri::command]
 fn open_external_url(url: String) -> Result<(), String> {
     let parsed =
         url::Url::parse(&url).map_err(|error| format!("The external URL is invalid: {error}"))?;
@@ -1552,6 +1594,206 @@ fn open_external_url(url: String) -> Result<(), String> {
 struct ExcelExportRequest {
     file_name: String,
     bytes: Vec<u8>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileExportRequest {
+    file_name: String,
+    bytes: Vec<u8>,
+    format: String,
+    open_after_save: bool,
+}
+
+fn validated_file_export(candidate: &str, format: &str) -> Result<(String, &'static str), String> {
+    let candidate = candidate.trim();
+    let expected_extension = match format.trim().to_ascii_lowercase().as_str() {
+        "excel" => "xlsx",
+        "geopackage" => "gpkg",
+        "jpg" => "jpg",
+        _ => return Err("The requested export format is not supported.".to_string()),
+    };
+    if candidate.is_empty() {
+        return Err("The export file name is empty.".to_string());
+    }
+    let path = Path::new(candidate);
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The export file name is invalid.".to_string())?;
+    if file_name != candidate || candidate.ends_with('.') || candidate.ends_with(' ') {
+        return Err("The export file name must not contain a folder path.".to_string());
+    }
+    if candidate.chars().any(|value| {
+        value < ' ' || matches!(value, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+    }) {
+        return Err("The export file name contains an invalid character.".to_string());
+    }
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(expected_extension))
+    {
+        return Err(format!(
+            "The export file must use the .{expected_extension} extension."
+        ));
+    }
+    Ok((file_name.to_string(), expected_extension))
+}
+
+#[cfg(target_os = "windows")]
+fn select_export_path(
+    app: &tauri::AppHandle,
+    file_name: &str,
+    format: &str,
+) -> Result<Option<PathBuf>, String> {
+    let (_, extension) = validated_file_export(file_name, format)?;
+    let mut file_buffer = vec![0u16; 32_768];
+    let suggested = std::ffi::OsStr::new(file_name)
+        .encode_wide()
+        .collect::<Vec<_>>();
+    if suggested.len() + 1 >= file_buffer.len() {
+        return Err("The suggested export file name is too long.".to_string());
+    }
+    file_buffer[..suggested.len()].copy_from_slice(&suggested);
+
+    let (filter_text, title_text) = match extension {
+        "xlsx" => (
+            "Excel workbook (*.xlsx)\0*.xlsx\0All files (*.*)\0*.*\0\0",
+            "Save Excel workbook",
+        ),
+        "jpg" => (
+            "JPEG image (*.jpg)\0*.jpg\0All files (*.*)\0*.*\0\0",
+            "Save terrain profile graph",
+        ),
+        _ => (
+            "GeoPackage (*.gpkg)\0*.gpkg\0All files (*.*)\0*.*\0\0",
+            "Save Asset Data Extract GeoPackage",
+        ),
+    };
+    let filter = std::ffi::OsStr::new(filter_text)
+        .encode_wide()
+        .collect::<Vec<_>>();
+    let title = std::ffi::OsStr::new(title_text)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let default_extension = std::ffi::OsStr::new(extension)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let initial_directory = excel_export_download_directory(app).ok().map(|path| {
+        path.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>()
+    });
+    let owner = app
+        .get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+        .map(|handle| handle.0)
+        .unwrap_or(std::ptr::null_mut());
+    let mut dialog: OPENFILENAMEW = unsafe { std::mem::zeroed() };
+    dialog.lStructSize = std::mem::size_of::<OPENFILENAMEW>() as u32;
+    dialog.hwndOwner = owner;
+    dialog.lpstrFilter = filter.as_ptr();
+    dialog.nFilterIndex = 1;
+    dialog.lpstrFile = file_buffer.as_mut_ptr();
+    dialog.nMaxFile = file_buffer.len() as u32;
+    dialog.lpstrInitialDir = initial_directory
+        .as_ref()
+        .map_or(std::ptr::null(), |value| value.as_ptr());
+    dialog.lpstrTitle = title.as_ptr();
+    dialog.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    dialog.lpstrDefExt = default_extension.as_ptr();
+
+    if unsafe { GetSaveFileNameW(&mut dialog) } == 0 {
+        let error = unsafe { CommDlgExtendedError() };
+        return if error == 0 {
+            Ok(None)
+        } else {
+            Err(format!(
+                "Windows could not open the Save As dialog (error 0x{error:08X})."
+            ))
+        };
+    }
+    let length = file_buffer
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file_buffer.len());
+    Ok(Some(PathBuf::from(std::ffi::OsString::from_wide(
+        &file_buffer[..length],
+    ))))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn select_export_path(
+    _app: &tauri::AppHandle,
+    _file_name: &str,
+    _format: &str,
+) -> Result<Option<PathBuf>, String> {
+    Err("Native Save As exports are supported only by the Windows desktop build.".to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn atomically_save_export(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .filter(|value| value.is_dir())
+        .ok_or_else(|| "The selected export folder does not exist.".to_string())?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Portal-export");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_nanos())
+        .unwrap_or(0);
+    let temporary = parent.join(format!(".{file_name}.{}-{nonce}.tmp", std::process::id()));
+    let write_result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("Could not create the temporary export file: {error}"))?;
+        file.write_all(bytes)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| format!("Could not write the export file: {error}"))?;
+        let temporary_wide = temporary
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let destination_wide = path
+            .as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        if unsafe {
+            MoveFileExW(
+                temporary_wide.as_ptr(),
+                destination_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "Could not finalize the export at {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            ));
+        }
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    write_result
+}
+
+#[cfg(not(target_os = "windows"))]
+fn atomically_save_export(_path: &Path, _bytes: &[u8]) -> Result<(), String> {
+    Err("Native Save As exports are supported only by the Windows desktop build.".to_string())
 }
 
 fn validated_excel_export_file_name(candidate: &str) -> Result<String, String> {
@@ -1673,6 +1915,37 @@ fn open_excel_export(_path: &Path) -> Result<(), String> {
     Err("Opening Excel exports is supported only by the Windows desktop build.".to_string())
 }
 
+#[cfg(target_os = "windows")]
+fn open_export_with_default_application(path: &Path) -> Result<(), String> {
+    let wide_path = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            wide_path.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize <= 32 {
+        return Err(format!(
+            "Windows could not open the exported file (error {}).",
+            result as isize
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_export_with_default_application(_path: &Path) -> Result<(), String> {
+    Err("Opening exported files is supported only by the Windows desktop build.".to_string())
+}
+
 fn excel_export_download_directory(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     if let Ok(path) = app.path().download_dir() {
         return Ok(path);
@@ -1727,6 +2000,76 @@ async fn save_and_open_excel_export(
     })
     .await
     .map_err(|error| format!("The Excel export task failed: {error}"))?
+}
+
+#[tauri::command]
+async fn save_export_as(
+    app: tauri::AppHandle,
+    request: FileExportRequest,
+) -> Result<Option<String>, String> {
+    if request.bytes.is_empty() {
+        return Err("The generated export file is empty.".to_string());
+    }
+    if request.bytes.len() > MAX_FILE_EXPORT_BYTES {
+        return Err(format!(
+            "The generated export exceeds the {} MB file limit.",
+            MAX_FILE_EXPORT_BYTES / (1024 * 1024)
+        ));
+    }
+    let (file_name, _) = validated_file_export(&request.file_name, &request.format)?;
+    let Some(path) = select_export_path(&app, &file_name, &request.format)? else {
+        return Ok(None);
+    };
+    let selected_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| "The selected export path is invalid.".to_string())?;
+    validated_file_export(selected_name, &request.format)?;
+    let open_after_save = request.open_after_save;
+    let export_format = request.format.trim().to_ascii_lowercase();
+    tauri::async_runtime::spawn_blocking(move || {
+        atomically_save_export(&path, &request.bytes)?;
+        if open_after_save {
+            let open_result = if export_format == "excel" {
+                open_excel_export(&path)
+            } else {
+                open_export_with_default_application(&path)
+            };
+            open_result.map_err(|error| {
+                format!(
+                    "The export was saved to {}, but it could not be opened. {error}",
+                    path.display()
+                )
+            })?;
+        }
+        Ok(Some(path.display().to_string()))
+    })
+    .await
+    .map_err(|error| format!("The file export task failed: {error}"))?
+}
+
+#[tauri::command]
+fn open_file_location(path: String) -> Result<(), String> {
+    let path = PathBuf::from(path);
+    if !path.is_file() {
+        return Err("The exported file no longer exists.".to_string());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map_err(|error| format!("Windows could not open the export location: {error}"))?;
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err(
+            "Opening an export location is supported only by the Windows desktop build."
+                .to_string(),
+        )
+    }
 }
 
 fn system_database_path() -> Result<PathBuf, String> {
@@ -1874,6 +2217,7 @@ pub fn run() {
             data_cache_status,
             desktop_startup_session,
             exit_application,
+            restart_application,
             check_portal_update,
             install_portal_update,
             desktop_context,
@@ -1881,6 +2225,8 @@ pub fn run() {
             business_sync_status,
             open_external_url,
             save_and_open_excel_export,
+            save_export_as,
+            open_file_location,
             python_health_check,
             python_request
         ])
@@ -1891,9 +2237,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        configure_system_database_access, file_response_range, is_scheduled_maintenance_hour,
-        packaged_application_version, save_excel_export, validated_excel_export_file_name,
-        INITIAL_MEDIA_CHUNK_BYTES,
+        atomically_save_export, configure_system_database_access, file_response_range,
+        is_scheduled_maintenance_hour, packaged_application_version, save_excel_export,
+        validated_excel_export_file_name, validated_file_export, INITIAL_MEDIA_CHUNK_BYTES,
     };
     use std::{env, fs, process, time::SystemTime};
 
@@ -1905,6 +2251,36 @@ mod tests {
         assert!(is_scheduled_maintenance_hour(4));
         assert!(!is_scheduled_maintenance_hour(5));
         assert!(!is_scheduled_maintenance_hour(21));
+    }
+
+    #[test]
+    fn file_export_validation_requires_the_requested_extension() {
+        assert!(validated_file_export("Asset Extract.xlsx", "excel").is_ok());
+        assert!(validated_file_export("Asset Extract.gpkg", "geopackage").is_ok());
+        assert!(validated_file_export("Terrain Profile.jpg", "jpg").is_ok());
+        assert!(validated_file_export("Terrain Profile.png", "jpg").is_err());
+        assert!(validated_file_export("Asset Extract.gpkg", "excel").is_err());
+        assert!(validated_file_export("folder/Asset Extract.xlsx", "excel").is_err());
+    }
+
+    #[test]
+    fn atomic_export_replaces_the_selected_file() {
+        let unique = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("portal-file-export-{}-{unique}", process::id()));
+        fs::create_dir_all(&root).expect("create test directory");
+        let path = root.join("Asset Extract.gpkg");
+        fs::write(&path, b"old").expect("old export");
+
+        atomically_save_export(&path, b"SQLite format 3\0new").expect("replace export");
+
+        assert_eq!(
+            fs::read(&path).expect("saved export"),
+            b"SQLite format 3\0new"
+        );
+        fs::remove_dir_all(root).expect("remove test directory");
     }
 
     #[test]

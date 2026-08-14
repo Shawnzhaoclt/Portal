@@ -6,6 +6,14 @@ declare global {
   }
 }
 
+export const DESKTOP_RESOURCE_COUNT_EVENT = 'portal:desktop-resource-count'
+
+export function reportDesktopOpenResourceCount(count: number) {
+  window.dispatchEvent(new CustomEvent<number>(DESKTOP_RESOURCE_COUNT_EVENT, {
+    detail: Math.max(0, Math.trunc(count)),
+  }))
+}
+
 export type DesktopContext = {
   applicationName: string
   applicationVersion: string
@@ -83,6 +91,12 @@ export type DataCacheStartupResult = {
   message: string
 }
 
+export type DataCacheUpdateCompleted = {
+  publicationId: string
+  updatedSourceCount: number
+  updatedSourceIds: string[]
+}
+
 export type DataCacheStatus = {
   enabled: boolean
   offline: boolean
@@ -137,6 +151,11 @@ export async function exitDesktopApplication() {
   await invoke('exit_application')
 }
 
+export async function restartDesktopApplication() {
+  if (!isDesktopRuntime()) return
+  await invoke('restart_application')
+}
+
 export async function checkPortalUpdate() {
   if (!isDesktopRuntime()) throw new Error('Portal updates are available only inside Tauri.')
   return invoke<PortalUpdateCheck>('check_portal_update')
@@ -176,4 +195,26 @@ export async function saveAndOpenExcelExport(fileName: string, bytes: Uint8Array
       bytes: Array.from(bytes),
     },
   })
+}
+
+export async function saveExportAs(
+  fileName: string,
+  bytes: Uint8Array,
+  format: 'excel' | 'geopackage' | 'jpg',
+  openAfterSave = false,
+) {
+  if (!isDesktopRuntime()) throw new Error('Native Save As exports are available only inside Tauri.')
+  return invoke<string | null>('save_export_as', {
+    request: {
+      fileName,
+      bytes: Array.from(bytes),
+      format,
+      openAfterSave,
+    },
+  })
+}
+
+export async function openFileLocation(path: string) {
+  if (!isDesktopRuntime()) return
+  await invoke('open_file_location', { path })
 }
