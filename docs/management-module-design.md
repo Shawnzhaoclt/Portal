@@ -109,6 +109,7 @@ Suggested resource fields:
 - Description
 - Public access flag
 - Active flag
+- Released flag, release timestamp, and releasing system administrator
 - Created and updated timestamps
 
 Suggested resource types:
@@ -120,7 +121,16 @@ Suggested resource types:
 - `admin`
 - `api`
 
-Some resources may allow public access. Public resources should be visible without a user-specific permission assignment.
+Some resources may allow public access. Public resources do not need a user-specific permission assignment, but public access never bypasses the active or released gates.
+
+`is_active` and `is_released` have separate meanings:
+
+- **Active** controls whether the resource is operational. Inactive resources are hidden from every Desktop role, including system administrators.
+- **Released** controls whether the resource is approved for general Desktop use. Newly registered or discovered resources start unreleased.
+- An active unreleased resource is visible only to a user currently operating in the System Admin role and is labeled as an unreleased preview.
+- Portal Admin and User roles cannot list, feature, grant, or open unreleased resources.
+- Releasing or withdrawing a resource is an explicit, audited System Admin action. It is not a generic editable checkbox.
+- After changing release state, the system catalog must be published so Desktop clients can receive the new catalog state.
 
 ### Team Featured and My Favorites
 
@@ -175,13 +185,15 @@ Suggested permission policy:
 
 When a user requests a resource:
 
-1. If the resource is public, allow view access.
-2. If the user is a system admin, allow all access.
-3. If the request is for a management function and the user is a portal admin, allow management access, except for protected system admin actions.
-4. Check permissions from the user's team.
-5. Include permissions inherited from parent teams.
-6. Check direct user permissions for the resource.
-7. Combine all permission types found into the effective permission set.
+1. If the resource is inactive, deny access for every Desktop role.
+2. If the resource is unreleased, allow access only when the currently selected role is System Admin; otherwise deny access.
+3. If the resource is public, grant view access.
+4. If the selected role is System Admin, allow all access.
+5. If the request is for a management function and the selected role is Portal Admin, allow management access except for protected System Admin actions.
+6. Check permissions from the user's team.
+7. Include permissions inherited from parent teams.
+8. Check direct user permissions for the resource.
+9. Combine all permission types found into the effective permission set.
 
 If no matching permission is found, deny access.
 
@@ -377,7 +389,7 @@ CREATE TABLE SYS_RESOURCES (
   resource_key TEXT NOT NULL UNIQUE,
   name TEXT NOT NULL,
   resource_type TEXT NOT NULL CHECK (
-    resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'dataset', 'service', 'admin', 'api')
+    resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'form', 'dataset', 'service', 'admin', 'api')
   ),
   url TEXT NOT NULL UNIQUE,
   description TEXT,
@@ -385,8 +397,12 @@ CREATE TABLE SYS_RESOURCES (
   icon TEXT,
   is_public INTEGER NOT NULL DEFAULT 0 CHECK (is_public IN (0, 1)),
   is_active INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0, 1)),
+  is_released INTEGER NOT NULL DEFAULT 0 CHECK (is_released IN (0, 1)),
+  released_at TEXT,
+  released_by_user_id INTEGER,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (released_by_user_id) REFERENCES SYS_USERS(id) ON DELETE SET NULL
 );
 ```
 
@@ -397,6 +413,8 @@ Notes:
 - `url` is the route path, such as `/map_stm_risk`.
 - Public resources do not need explicit user or team permissions for view access.
 - Disabled resources should not appear in the portal catalog or featured items.
+- Existing rows are backfilled as released when this gate is introduced, preserving current behavior. New and newly discovered rows default to unreleased.
+- `released_at` and `released_by_user_id` record the most recent release approval. Withdrawing release clears both fields and writes an audit event.
 
 Resource ID format:
 
@@ -582,6 +600,8 @@ CREATE INDEX idx_sys_teams_manager_user_id ON SYS_TEAMS(manager_user_id);
 
 CREATE INDEX idx_sys_resources_type_active ON SYS_RESOURCES(resource_type, is_active);
 CREATE INDEX idx_sys_resources_public_active ON SYS_RESOURCES(is_public, is_active);
+CREATE INDEX idx_sys_resources_is_released ON SYS_RESOURCES(is_released);
+CREATE INDEX idx_sys_resources_active_released ON SYS_RESOURCES(is_active, is_released);
 
 CREATE INDEX idx_sys_resource_permissions_resource_id ON SYS_RESOURCE_PERMISSIONS(resource_id);
 CREATE INDEX idx_sys_resource_permissions_user_id ON SYS_RESOURCE_PERMISSIONS(user_id);

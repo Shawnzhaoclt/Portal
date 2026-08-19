@@ -84,9 +84,16 @@ One row per pending Asset Inspection Form:
 - `investigation_status`
 
 The sync resolves the latest Critical Asset Inspection work order for the asset and
-the latest linked investigation. The Planning Pending AIF QA/QC resource reads this
-table. Team assignment remains an application concern because it comes from the
-current system catalog and can change independently of source publication.
+the latest linked investigation. Planning Team QA/AC Tables reads this data in
+its Pending AIF QA/QC table. Team assignment remains an application concern because
+it comes from the current system catalog and can change independently of source
+publication. Record visibility is enforced by the API: `Manage` or `Admin`
+permission exposes all pending AIFs, while `View` permission exposes only records
+assigned to the viewer's active team or one of its descendant teams. The hierarchy
+is read from `SYS_TEAMS.parent_team_id`; for example, Asset Management Team members
+can view Asset Management, Critical Team, and Proactive Team records without
+hard-coded team-name exceptions. Unmapped records remain hidden from team-scoped
+viewers.
 
 ### 3.3 `asset_inspection_events`
 
@@ -123,6 +130,10 @@ contains:
 - overall serving-data content fingerprint;
 - row count and fingerprint for each serving table;
 - source profile and validation result.
+
+Every Critical Team chart and table displays the manifest publication timestamp as
+`Last available data`. The UI never substitutes browser render time for source-data
+freshness.
 
 ## 4. No Source-Table Replication
 

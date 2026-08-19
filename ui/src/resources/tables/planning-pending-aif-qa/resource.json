@@ -2,10 +2,10 @@
   "resource_id": "TABT946I",
   "resource_slug": "planning_pending_aif_qa",
   "type": "tab",
-  "name": "Planning Pending AIF QA/QC",
+  "name": "Planning Team QA/AC Tables",
   "url": "/tab_planning_pending_aif_qa",
   "category": "Planning",
-  "description": "Pending Asset Inspection Form records for planning team QA/QC review.",
+  "description": "Planning team QA/AC tables for pending Asset Inspection Form review and related Cityworks activity.",
   "presentation": {
     "thumbnail_light": "assets/portal-thumbnails/planning-pending-aif-qa.png",
     "thumbnail_dark": "assets/portal-thumbnails/planning-pending-aif-qa-dark.png"

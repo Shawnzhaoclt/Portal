@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, LoaderCircle, LogOut, RotateCw } from 'lucide-react'
+import { AlertTriangle, Download, LoaderCircle, LogOut, RotateCw } from 'lucide-react'
 import stormwaterLogo from '../assets/stormwater-logo.png'
 import { formatLocalClock } from '../lib/dateTime'
 import {
@@ -24,6 +24,9 @@ type DesktopStartupSplashProps = {
   maintenance?: boolean
   onExit?: () => void
   onRetry?: () => void
+  updateCountdownSeconds?: number
+  updateReleaseVersion?: string | null
+  updateStarting?: boolean
 }
 
 function formatBytes(value: number) {
@@ -39,19 +42,30 @@ function formatEta(seconds: number | null) {
   return `${Math.ceil(seconds / 60)} min remaining`
 }
 
-export default function DesktopStartupSplash({ dataCacheProgress, error, message, maintenance = false, onExit, onRetry }: DesktopStartupSplashProps) {
+export default function DesktopStartupSplash({
+  dataCacheProgress,
+  error,
+  message,
+  maintenance = false,
+  onExit,
+  onRetry,
+  updateCountdownSeconds,
+  updateReleaseVersion,
+  updateStarting = false,
+}: DesktopStartupSplashProps) {
   const [messageIndex, setMessageIndex] = useState(0)
   const [maintenanceSecondsRemaining, setMaintenanceSecondsRemaining] = useState(MAINTENANCE_SPLASH_DURATION_SECONDS)
   const maintenanceStart = formatLocalClock(MAINTENANCE_START_HOUR * 60)
   const maintenanceEnd = formatLocalClock(MAINTENANCE_END_HOUR * 60)
+  const updating = updateCountdownSeconds !== undefined || updateStarting
 
   useEffect(() => {
-    if (error || maintenance) return
+    if (error || maintenance || updating) return
     const timer = window.setInterval(() => {
       setMessageIndex((current) => Math.min(current + 1, STARTUP_MESSAGES.length - 1))
     }, 1800)
     return () => window.clearInterval(timer)
-  }, [error, maintenance])
+  }, [error, maintenance, updating])
 
   useEffect(() => {
     if (!maintenance) return
@@ -63,11 +77,39 @@ export default function DesktopStartupSplash({ dataCacheProgress, error, message
 
   return (
     <main className="desktop-startup-screen">
-      <section className={`desktop-startup-content${maintenance ? ' maintenance' : ''}`} aria-live="polite">
+      <section className={`desktop-startup-content${maintenance || updating ? ' maintenance' : ''}`} aria-live="polite">
         <img className="desktop-startup-logo" src={stormwaterLogo} alt="Charlotte-Mecklenburg Storm Water Services" />
         <div className="desktop-startup-rule" />
         <h1>Storm Water Asset Intelligence Portal</h1>
-        {maintenance ? (
+        {updating ? (
+          <>
+            {updateStarting ? (
+              <LoaderCircle className="desktop-startup-spinner desktop-startup-update-icon" aria-hidden="true" />
+            ) : (
+              <Download className="desktop-startup-update-icon" aria-hidden="true" />
+            )}
+            <h2>{updateStarting ? 'Starting Portal update' : 'Portal update required'}</h2>
+            <p className="desktop-startup-maintenance-message">
+              {updateStarting
+                ? `Portal is closing now. The newer version${updateReleaseVersion ? ` (${updateReleaseVersion})` : ''} will download and install automatically.`
+                : `A newer Portal version${updateReleaseVersion ? ` (${updateReleaseVersion})` : ''} is ready. Portal must close before the update can be downloaded and installed.`}
+            </p>
+            {updateStarting ? (
+              <div className="desktop-startup-progress" aria-hidden="true">
+                <span />
+              </div>
+            ) : (
+              <div
+                className="desktop-startup-countdown"
+                role="timer"
+                aria-label={`Portal will close to update in ${updateCountdownSeconds} seconds`}
+              >
+                <strong>{updateCountdownSeconds}</strong>
+                <span>seconds until Portal closes to update</span>
+              </div>
+            )}
+          </>
+        ) : maintenance ? (
           <>
             <AlertTriangle className="desktop-startup-maintenance-icon" aria-hidden="true" />
             <h2>System under maintenance</h2>

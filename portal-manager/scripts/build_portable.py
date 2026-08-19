@@ -34,7 +34,7 @@ def main() -> int:
     coordinator_source = PORTAL_ROOT / "python" / "portal"
     portal_settings_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "portal.settings.json"
     portal_project_config_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "project.toml"
-    portal_system_database_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "config" / "system.db"
+    portal_system_database_seed = PORTAL_ROOT / "python" / "portal" / "data" / "portal_system.sqlite3"
     portal_python_source = PORTAL_ROOT / "dist" / "Portal-Desktop" / "runtime" / "portal-python"
     sync_settings_source = PROJECT_ROOT / "sync" / "sync.settings.json"
 
@@ -46,8 +46,8 @@ def main() -> int:
         raise FileNotFoundError(f"Portal settings were not found: {portal_settings_source}")
     if not portal_project_config_source.is_file():
         raise FileNotFoundError(f"Portal project configuration was not found: {portal_project_config_source}")
-    if not portal_system_database_source.is_file():
-        raise FileNotFoundError(f"Portal system database was not found: {portal_system_database_source}")
+    if not portal_system_database_seed.is_file():
+        raise FileNotFoundError(f"Portal system database seed was not found: {portal_system_database_seed}")
     if not (portal_python_source / "portal-python.exe").is_file():
         raise FileNotFoundError(
             "The packaged Portal Python worker was not found. Build Portal-Desktop before packaging PortalManager."
@@ -97,7 +97,7 @@ def main() -> int:
     copy_required(portal_project_config_source, config_directory / "project.toml")
     manager_system_database = config_directory / "system.db"
     if not manager_system_database.is_file():
-        copy_required(portal_system_database_source, manager_system_database)
+        copy_required(portal_system_database_seed, manager_system_database)
     manager_system_database.chmod(manager_system_database.stat().st_mode | stat.S_IWRITE)
 
     coordinator_directory = output_directory / "coordinator"

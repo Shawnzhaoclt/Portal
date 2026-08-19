@@ -170,8 +170,15 @@ def seed_resources(db: Session) -> None:
         if resource is not None and key_match is not None and resource.id != key_match.id:
             raise ValueError(f"Resource ID {resource_string_id} and slug {resource_slug} are already registered to different resources.")
         resource = resource or key_match
+        is_new_resource = resource is None
         if resource is None:
-            resource = Resource(resource_key=resource_slug, resource_id=resource_string_id)
+            resource = Resource(
+                resource_key=resource_slug,
+                resource_id=resource_string_id,
+                is_active=1 if item.get("is_active", True) else 0,
+                is_public=1 if item.get("is_public", False) else 0,
+                is_released=0,
+            )
             db.add(resource)
         elif resource.resource_id != resource_string_id:
             ensure_id_available(resource, resource_string_id)
@@ -183,8 +190,12 @@ def seed_resources(db: Session) -> None:
         resource.description = item.get("description")
         resource.category = item.get("category")
         resource.icon = item.get("icon")
-        resource.is_active = 1 if item.get("is_active", True) else 0
-        resource.is_public = 1 if item.get("is_public", False) else 0
+        # is_active and is_public become administrator-owned after the first
+        # registration. Startup metadata reconciliation may refresh resource
+        # identity and display fields, but must not undo saved Manager choices.
+        if is_new_resource:
+            resource.is_active = 1 if item.get("is_active", True) else 0
+            resource.is_public = 1 if item.get("is_public", False) else 0
         db.flush()
 
 

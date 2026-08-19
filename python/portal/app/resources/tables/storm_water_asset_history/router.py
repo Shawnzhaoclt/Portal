@@ -33,22 +33,32 @@ from .source import (
 
 
 RESOURCE_KEY = "storm_water_asset_history"
+PARENT_RESOURCE_KEY = "stm_risk_map"
 router = APIRouter(prefix="/api/tables/storm-water-asset-history", tags=["Storm Water Asset History"])
 
 
-def _resource(db: Session) -> Resource | None:
-    return db.scalar(select(Resource).where(Resource.resource_key == RESOURCE_KEY, Resource.is_active == 1))
+def _resources(db: Session) -> list[Resource]:
+    return list(
+        db.scalars(
+            select(Resource).where(
+                Resource.resource_key.in_((RESOURCE_KEY, PARENT_RESOURCE_KEY)),
+                Resource.is_active == 1,
+            )
+        )
+    )
 
 
 def _require_view(db: Session, user: User) -> None:
     if selected_user_role(user) in ADMIN_ROLES:
         return
-    resource = _resource(db)
-    if resource is None:
-        raise HTTPException(status_code=503, detail="Storm Water Asset History is not registered in the Portal catalog.")
-    permission = effective_resource_permission(db, user, resource)
-    if "view" not in set((permission or {}).get("permission_types") or []):
-        raise HTTPException(status_code=403, detail="This resource requires View permission.")
+    resources = _resources(db)
+    if not resources:
+        raise HTTPException(status_code=503, detail="Storm Water Asset History and its Risk Map parent are unavailable.")
+    for resource in resources:
+        permission = effective_resource_permission(db, user, resource)
+        if "view" in set((permission or {}).get("permission_types") or []):
+            return
+    raise HTTPException(status_code=403, detail="This tool requires View permission on Asset History or the Storm Water Asset Risk Map.")
 
 
 def _display_name(user: User) -> str:

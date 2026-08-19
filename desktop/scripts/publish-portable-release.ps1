@@ -46,11 +46,28 @@ function New-PortalInstallationArchive {
         [string]$Destination
     )
 
-    $temporaryArchive = "$Destination.part"
+    # tar.exe -a chooses the archive format from the output extension. Keep
+    # .zip as the final suffix while staging; a .part suffix creates an
+    # uncompressed TAR that is only named .zip after publication.
+    $temporaryArchive = "$Destination.part.zip"
     Remove-Item -LiteralPath $temporaryArchive -Force -ErrorAction SilentlyContinue
-    & tar.exe -a -c -f $temporaryArchive --exclude=data --exclude=./data -C $Source .
+    & tar.exe -a -c -f $temporaryArchive `
+        --exclude=data `
+        --exclude=./data `
+        --exclude=config/system.db `
+        --exclude=./config/system.db `
+        -C $Source .
     if ($LASTEXITCODE -ne 0) {
         throw "Windows tar.exe could not create the complete Portal installation package."
+    }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $archive = [System.IO.Compression.ZipFile]::OpenRead($temporaryArchive)
+    try {
+        if ($archive.Entries.Count -eq 0) {
+            throw "The Portal installation ZIP is empty."
+        }
+    } finally {
+        $archive.Dispose()
     }
     Move-Item -LiteralPath $temporaryArchive -Destination $Destination -Force
 }
@@ -74,13 +91,16 @@ if (-not $SourceDirectory) {
 $SourceDirectory = (Resolve-Path -LiteralPath $SourceDirectory).Path
 $versionPath = Join-Path $SourceDirectory "VERSION"
 $portalExecutable = Join-Path $SourceDirectory "Portal.exe"
-$systemDatabase = Join-Path $SourceDirectory "config\system.db"
 $updater = Join-Path $SourceDirectory "runtime\PortalUpdater.exe"
 $spatialExtension = Join-Path $SourceDirectory "runtime\duckdb\extensions\spatial.duckdb_extension"
-foreach ($required in @($versionPath, $portalExecutable, $systemDatabase, $updater, $spatialExtension)) {
+foreach ($required in @($versionPath, $portalExecutable, $updater, $spatialExtension)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Portable release source is missing $required"
     }
+}
+$systemDatabase = Join-Path $SourceDirectory "config\system.db"
+if (Test-Path -LiteralPath $systemDatabase) {
+    throw "Portable release source contains config\system.db. Rebuild Portal Desktop so no plaintext catalog is distributed."
 }
 
 $packagedVersion = (Get-Content -LiteralPath $versionPath -Raw).Trim()
@@ -110,7 +130,10 @@ $manifest = Get-PayloadManifest `
     -Mode $UpdateMode `
     -PayloadPath $payloadPath `
     -InstallationPayloadPath $installationPayloadPath
-Copy-Item -LiteralPath $updater -Destination (Join-Path $ReleaseRoot "PortalUpdater.exe") -Force
+$publishedUpdater = Join-Path $ReleaseRoot "PortalUpdater.exe"
+$temporaryUpdater = "$publishedUpdater.part"
+Copy-Item -LiteralPath $updater -Destination $temporaryUpdater -Force
+Move-Item -LiteralPath $temporaryUpdater -Destination $publishedUpdater -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\release\Download-Portal.bat") -Destination (Join-Path $ReleaseRoot "Download-Portal.bat") -Force
 Copy-Item -LiteralPath (Join-Path $projectRoot "desktop\release\Remove-Portal.bat") -Destination (Join-Path $ReleaseRoot "Remove-Portal.bat") -Force
 $legacyInstaller = Join-Path $ReleaseRoot "Install-Portal.bat"

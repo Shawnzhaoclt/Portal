@@ -1954,6 +1954,8 @@ function SheetBody({
   onDownloadAllDetails: () => void
 }) {
   const chartRef = useRef<EChartHandle | null>(null)
+  const sourceTimestamp = source?.metadata.published_at_utc ?? source?.metadata.imported_at_utc
+  const sourceTime = formatSourceTimestamp(sourceTimestamp)
   const filterAction =
     sheet.kind !== 'overview' && sheet.kind !== 'details' ? (
       <FloatingFilterButton
@@ -1971,7 +1973,7 @@ function SheetBody({
       <Overview
         data={overviewData}
         fallbackSummary={summary}
-        sourceTimestamp={source?.metadata.published_at_utc ?? source?.metadata.imported_at_utc}
+        sourceTimestamp={sourceTimestamp}
         filters={overviewFilters}
         options={options}
         onFiltersChange={onOverviewFiltersChange}
@@ -1987,6 +1989,7 @@ function SheetBody({
           icon={<BarChart3 size={18} />}
           title={sheet.title}
           description={sheet.description}
+          meta={sourceTime ? `Last available data: ${sourceTime}` : undefined}
           actions={
             <>
               <ChartExportButton chartRef={chartRef} title={sheet.title} />
@@ -2000,13 +2003,21 @@ function SheetBody({
   }
 
   if (sheet.kind === 'table') {
-    return <PivotTable title={sheet.title} description={sheet.description} data={sheetData} filterAction={filterAction} />
+    return (
+      <PivotTable
+        title={sheet.title}
+        description={sheet.description}
+        data={sheetData}
+        filterAction={filterAction}
+        sourceTimestamp={sourceTimestamp}
+      />
+    )
   }
 
   return (
     <DetailTable
       details={details}
-      sourceTimestamp={source?.metadata.published_at_utc ?? source?.metadata.imported_at_utc}
+      sourceTimestamp={sourceTimestamp}
       loading={loadingDetails}
       columnFilters={detailColumnFilters}
       pageSize={detailPageSize}
@@ -2148,6 +2159,7 @@ function Overview({
             icon={<BarChart3 size={18} />}
             title="Trend"
             description="Monthly totals for project starts, inspection completions, report completions, and review completions."
+            meta={sourceTime ? `Last available data: ${sourceTime}` : undefined}
           />
           <EChart option={makeOverviewTrendOption(data, filters)} height="100%" />
         </div>
@@ -2702,11 +2714,13 @@ function PivotTable({
   description,
   data,
   filterAction,
+  sourceTimestamp,
 }: {
   title: string
   description: string
   data: CriticalTeamSheetResponse | null
   filterAction?: ReactNode
+  sourceTimestamp: string | null | undefined
 }) {
   const pivot = pivotRows(data)
   const yearGroups = pivotHeaderGroups(pivot.months, 'year')
@@ -2717,6 +2731,8 @@ function PivotTable({
   const [exportingPivot, setExportingPivot] = useState(false)
   const [pivotExportError, setPivotExportError] = useState('')
   const sortedGroups = sortPivotGroups(pivot.groups, pivot.months, pivotSort)
+  const sourceTime = formatSourceTimestamp(sourceTimestamp)
+  const tableSize = `${formatNumber(pivot.groups.length)} rows | ${formatNumber(pivot.months.length)} months`
 
   useEffect(() => {
     setPivotSort(null)
@@ -2782,7 +2798,7 @@ function PivotTable({
         icon={<Table2 size={18} />}
         title={title}
         description={description}
-        meta={`${formatNumber(pivot.groups.length)} rows | ${formatNumber(pivot.months.length)} months`}
+        meta={sourceTime ? `Last available data: ${sourceTime} | ${tableSize}` : tableSize}
         actions={
           <>
             <Button
@@ -3202,8 +3218,8 @@ function DetailTable({
       <PanelHeader
         icon={<ClipboardList size={18} />}
         title="Work Order Detail"
-        description={sourceTime ? `Last available data: ${sourceTime}. ${formatNumber(total)} work orders.` : 'Review operational Cityworks work orders, risk, ownership, and milestone dates.'}
-        meta={`${formatNumber(total)} work orders`}
+        description="Review operational Cityworks work orders, risk, ownership, and milestone dates."
+        meta={sourceTime ? `Last available data: ${sourceTime} | ${formatNumber(total)} work orders` : `${formatNumber(total)} work orders`}
       />
       <div className="detail-toolbar work-order-detail-toolbar">
         <div className="work-order-search">

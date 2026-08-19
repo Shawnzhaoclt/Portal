@@ -207,7 +207,7 @@ function visibleCellHref(row: PendingAifRow, column: PendingAifColumn) {
 
 function createXlsx(rows: PendingAifRow[]) {
   return createPortalExcelWorkbook({
-    title: `Planning Pending AIF QA/QC - ${formatNumber(rows.length)} Pending ${rows.length === 1 ? 'AIF' : 'AIFs'}`,
+    title: `Planning Team QA/AC Tables - Pending AIF QA/QC - ${formatNumber(rows.length)} Pending ${rows.length === 1 ? 'AIF' : 'AIFs'}`,
     sheetName: 'Pending AIF QA QC',
     columns: PENDING_AIF_COLUMNS.map((column) => ({
       heading: column.label,
@@ -573,7 +573,7 @@ function PlanningPendingAifQaTable() {
             <div>
               <ClipboardCheck size={18} />
               <div className="panel-title-copy">
-                <h2>Planning Pending AIF QA/QC</h2>
+                <h2>Planning Team QA/AC Tables</h2>
                 <p>{sourceTimestamp ? `Last available data: ${sourceTimestamp}. ${formatNumber(total)} pending AIF records.` : `Review ${formatNumber(total)} pending Asset Inspection Forms and related Cityworks activity.`}</p>
               </div>
             </div>

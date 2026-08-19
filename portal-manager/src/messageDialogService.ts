@@ -47,6 +47,19 @@ function requestDialog(type: DialogType, message: string, options: DialogOptions
   });
 }
 
+type DialogHostWindow = Window & {
+  __portalMessageDialogHost?: (type: DialogType, message: string, options?: DialogOptions) => Promise<DialogResult>;
+};
+
+export function installMessageDialogHost() {
+  const portalWindow = window as DialogHostWindow;
+  const host = (type: DialogType, message: string, options: DialogOptions = {}) => requestDialog(type, message, options);
+  portalWindow.__portalMessageDialogHost = host;
+  return () => {
+    if (portalWindow.__portalMessageDialogHost === host) delete portalWindow.__portalMessageDialogHost;
+  };
+}
+
 export function dialogSnapshot() {
   return requests;
 }

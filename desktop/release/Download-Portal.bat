@@ -9,10 +9,11 @@ if not exist "%RELEASE_ROOT%\PortalUpdater.exe" (
   exit /b 1
 )
 
-"%RELEASE_ROOT%\PortalUpdater.exe" --bootstrap --manifest "portal-release.json" --release-root "%RELEASE_ROOT%" --restart
+"%RELEASE_ROOT%\PortalUpdater.exe" --bootstrap --manifest "portal-release.json" --release-root "%RELEASE_ROOT%" --channel "production" --restart
 if errorlevel 1 (
   echo.
   echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.
+  echo Diagnostic log: %LOCALAPPDATA%\StormWaterPortal\data\logs\portal-updater.log
   pause
   exit /b 1
 )
@@ -20,4 +21,3 @@ if errorlevel 1 (
 echo.
 echo Storm Water Asset Intelligence Portal is ready to use.
 echo A Desktop shortcut has been created and Portal is starting.
-msg "%USERNAME%" "Storm Water Asset Intelligence Portal is ready to use." >nul 2>&1

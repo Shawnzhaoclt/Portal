@@ -209,13 +209,14 @@ requests that started immediately before a five-minute publication switch.
 - Portal Manager owns the authoritative writable database.
 - A System Admin publishes it from **Portal Administration > System Catalog**.
 - Publication requires no software version or manually entered data version.
-- Manager publishes a verified read-only Desktop copy through the same central data
-  publication manifest used by DuckDB and PMTiles sources.
+- Manager publishes the verified authoritative content through the same central data
+  publication manifest used by DuckDB and PMTiles sources. Desktop converts that
+  verified source to a per-user SQLCipher artifact before local activation.
 - The data publisher generates the immutable content version from publication time and
   checksum; unchanged content retains the existing version.
 - The data manifest carries its content version, checksum, schema fingerprint, and
   compatibility information.
-- Desktop must activate a required `system.db` update before user authentication.
+- Desktop must activate an encrypted required `system.db` update before user authentication.
 - Desktop must not replace `system.db` silently after authentication in the same
   session.
 - A packaged, compatible copy remains available for installation and recovery in
@@ -439,7 +440,7 @@ The publication calls occur at these exact workflow boundaries:
 | Portal Manager Saturday branch | After backup, SDW spatial clone, four PMTiles builds, sidecars, and cross-file validation complete | `manager-weekly-sdw-map` |
 | STM Risk `main.py` | Step 1100, immediately after Step 1000 QA/QC log cleaning succeeds | `stm-risk-intermediate` |
 | Portal Source Data | After the immutable serving SQLite version and pointer validate | `portal-serving-data` |
-| Portal Manager catalog publisher | After the Desktop read-only `system.db` copy validates | `system-catalog` |
+| Portal Manager catalog publisher | After the authoritative catalog validates | `system-catalog` |
 | Terrain publisher | After both the DEM COG and terrain PMTiles validate | `terrain` |
 
 The daily Manager release may be published independently before the Saturday-only
@@ -841,7 +842,14 @@ physical paths or versions.
 ## 15. Security and Integrity
 
 - Local source files are read-only for the Desktop runtime.
-- `system.db` is distributed read-only and opened read-only.
+- The Manager publishes `system.catalog` from its writable authoritative SQLite file.
+  Desktop converts the verified source directly to SQLCipher before local activation;
+  a plaintext catalog is never staged or included in the software package.
+- The random 256-bit catalog key is unique per Windows user and protected with
+  user-scoped Windows DPAPI at
+  `%LOCALAPPDATA%\StormWaterPortal\config\system-catalog.key`. The key is never stored
+  in source, settings, manifests, or the executable.
+- The encrypted cache artifact and its current `config/system.db` mirror are read-only.
 - `stormwater.db` remains writable and is never substituted for or by `system.db`.
 - Relative manifest paths are normalized and must remain inside the configured shared
   root.
@@ -933,8 +941,10 @@ Portal Manager provides administrative visibility and publication controls:
   `system.db` as the logical `system.catalog` data source;
 - generate the catalog data version automatically and never request a software or
   manually authored version number;
-- copy and verify the read-only Desktop bootstrap catalog independently of the
-  software release workflow;
+- publish the authoritative catalog independently of the software release workflow;
+  Desktop performs per-user SQLCipher conversion after checksum verification and,
+  after activation, atomically mirrors the encrypted artifact into
+  `config/system.db` with its read-only attribute restored;
 - validate central manifest and source availability;
 - expose scheduled workflow results;
 - never manually edit generated version IDs.
@@ -1097,8 +1107,10 @@ The design is complete when all of the following are verified:
     `portal.serving` is the only permitted direct-network exception.
 14. Only the newest active version remains after leases and deferred cleanup finish.
 15. `system.db` is published from the Manager System Catalog page without a software
-    version, registered as `system.catalog`, and consumed read-only; `stormwater.db`
-    remains local and writable.
+    version and registered as `system.catalog`. Desktop verifies the source, converts
+    it to SQLCipher using its DPAPI-protected per-user key, keeps the encrypted
+    versioned cache as its activation boundary, and mirrors only that ciphertext into
+    `config/system.db`; `stormwater.db` remains local and writable.
 16. The Manager task publishes an independent daily mirror release on every successful
     run.
 17. The weekly SDW DuckDB and four vector PMTiles archives always publish and activate

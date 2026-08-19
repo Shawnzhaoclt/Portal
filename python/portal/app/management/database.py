@@ -208,6 +208,9 @@ def _create_resource_indexes(connection, table_name: str = RESOURCE_TABLE) -> No
     connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_resource_type ON {quoted_table} (resource_type)"))
     connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_is_public ON {quoted_table} (is_public)"))
     connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_is_active ON {quoted_table} (is_active)"))
+    if "is_released" in _table_columns(connection, table_name):
+        connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_is_released ON {quoted_table} (is_released)"))
+        connection.execute(text(f"CREATE INDEX IF NOT EXISTS ix_{table_name}_active_released ON {quoted_table} (is_active, is_released)"))
 
 
 def _create_resource_permission_indexes(connection, table_name: str = "SYS_RESOURCE_PERMISSIONS") -> None:
@@ -261,14 +264,30 @@ def _resources_table_allows_current_types(connection, table_name: str = RESOURCE
     return not sql or all(resource_type in sql for resource_type in ("'report'", "'form'", "'dataset'", "'service'"))
 
 
+def _resources_table_has_release_actor_foreign_key(connection, table_name: str = RESOURCE_TABLE) -> bool:
+    if "released_by_user_id" not in _table_columns(connection, table_name):
+        return True
+    foreign_keys = connection.execute(
+        text(f"PRAGMA foreign_key_list({_quote_identifier(table_name)})")
+    ).mappings().all()
+    return any(
+        row.get("from") == "released_by_user_id" and row.get("table") == "SYS_USERS"
+        for row in foreign_keys
+    )
+
+
 def _migrate_resource_types() -> None:
     with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as connection:
         if not _table_exists(connection, RESOURCE_TABLE):
             return
-        if _resources_table_allows_current_types(connection):
+        if _resources_table_allows_current_types(connection) and _resources_table_has_release_actor_foreign_key(connection):
             return
 
         _ensure_resource_ids(connection, RESOURCE_TABLE)
+        source_columns = _table_columns(connection, RESOURCE_TABLE)
+        release_value = "is_released" if "is_released" in source_columns else "1"
+        released_at_value = "released_at" if "released_at" in source_columns else "CURRENT_TIMESTAMP"
+        released_by_value = "released_by_user_id" if "released_by_user_id" in source_columns else "NULL"
         quoted_table = _quote_identifier(RESOURCE_TABLE)
         replacement_table = f"{RESOURCE_TABLE}_NEW"
         quoted_replacement = _quote_identifier(replacement_table)
@@ -297,12 +316,16 @@ def _migrate_resource_types() -> None:
                         icon VARCHAR,
                         is_public INTEGER NOT NULL,
                         is_active INTEGER NOT NULL,
+                        is_released INTEGER NOT NULL DEFAULT 0,
+                        released_at VARCHAR,
+                        released_by_user_id INTEGER REFERENCES SYS_USERS(id) ON DELETE SET NULL,
                         created_at VARCHAR DEFAULT CURRENT_TIMESTAMP NOT NULL,
                         updated_at VARCHAR DEFAULT CURRENT_TIMESTAMP NOT NULL,
                         CONSTRAINT ck_resources_type CHECK (resource_type IN ('dashboard', 'map', 'tab', 'doc', 'report', 'form', 'dataset', 'service', 'admin', 'api')),
                         CONSTRAINT ck_resources_resource_id_format CHECK (resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'),
                         CONSTRAINT ck_resources_is_public CHECK (is_public IN (0, 1)),
                         CONSTRAINT ck_resources_is_active CHECK (is_active IN (0, 1)),
+                        CONSTRAINT ck_resources_is_released CHECK (is_released IN (0, 1)),
                         UNIQUE (resource_id),
                         UNIQUE (resource_key),
                         UNIQUE (url)
@@ -315,11 +338,11 @@ def _migrate_resource_types() -> None:
                     f"""
                     INSERT INTO {quoted_replacement} (
                         id, resource_id, resource_key, name, resource_type, url, description, category, icon,
-                        is_public, is_active, created_at, updated_at
+                        is_public, is_active, is_released, released_at, released_by_user_id, created_at, updated_at
                     )
                     SELECT
                         id, resource_id, resource_key, name, resource_type, url, description, category, icon,
-                        is_public, is_active, created_at, updated_at
+                        is_public, is_active, {release_value}, {released_at_value}, {released_by_value}, created_at, updated_at
                     FROM {quoted_table}
                     """
                 )
@@ -337,6 +360,41 @@ def _migrate_resource_types() -> None:
 
 def _resources_table_has_column(connection, column_name: str) -> bool:
     return column_name in _table_columns(connection, RESOURCE_TABLE)
+
+
+def _migrate_resource_release_status() -> None:
+    """Add the release gate without hiding resources that predate it."""
+
+    with engine.begin() as connection:
+        if not _table_exists(connection, RESOURCE_TABLE):
+            return
+        quoted_table = _quote_identifier(RESOURCE_TABLE)
+        columns = _table_columns(connection, RESOURCE_TABLE)
+        added_release_flag = "is_released" not in columns
+        if added_release_flag:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} ADD COLUMN is_released INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (is_released IN (0, 1))"
+                )
+            )
+        if "released_at" not in columns:
+            connection.execute(text(f"ALTER TABLE {quoted_table} ADD COLUMN released_at VARCHAR"))
+        if "released_by_user_id" not in columns:
+            connection.execute(
+                text(
+                    f"ALTER TABLE {quoted_table} ADD COLUMN released_by_user_id INTEGER "
+                    "REFERENCES SYS_USERS(id) ON DELETE SET NULL"
+                )
+            )
+        if added_release_flag:
+            connection.execute(
+                text(
+                    f"UPDATE {quoted_table} "
+                    "SET is_released = 1, released_at = COALESCE(updated_at, created_at, CURRENT_TIMESTAMP)"
+                )
+            )
+        _create_resource_indexes(connection, RESOURCE_TABLE)
 
 
 def _migrate_resource_ids() -> None:
@@ -799,6 +857,7 @@ def create_management_schema() -> None:
     _migrate_weekly_time_types_to_dictionary()
     _migrate_legacy_management_tables()
     _migrate_resource_types()
+    _migrate_resource_release_status()
     _migrate_resource_ids()
     _migrate_resource_permission_resource_ids()
     _migrate_resource_link_column_names()

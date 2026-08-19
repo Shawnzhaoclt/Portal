@@ -59,6 +59,8 @@ struct ManagerSettings {
     data_publication_script: Option<String>,
     #[serde(default)]
     data_publication_settings_file: Option<String>,
+    #[serde(default)]
+    release_test_machines: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -142,7 +144,6 @@ struct PortalReleasePaths {
     release_root: PathBuf,
     portal_exe: PathBuf,
     system_db: PathBuf,
-    desktop_system_db: PathBuf,
     updater: PathBuf,
     remover: PathBuf,
     version_file: PathBuf,
@@ -158,10 +159,12 @@ struct PortalReleaseStatus {
     current_update_mode: Option<String>,
     portal_exe: String,
     system_db: String,
-    desktop_system_db: String,
     manager_system_db_writable: bool,
-    desktop_system_db_read_only: bool,
-    desktop_system_db_current: bool,
+    desktop_catalog_protection: String,
+    channel: String,
+    published_version: Option<String>,
+    allowed_machines: Vec<String>,
+    configured_test_machines: Vec<String>,
 }
 
 struct PortalRuntimePaths {
@@ -878,13 +881,11 @@ fn portal_release_paths() -> Result<PortalReleasePaths, String> {
     }
     let release_root = resolve_configured_path(&expanded, config_directory);
     let manager_system_db = manager_config_directory.join("system.db");
-    let desktop_system_db = portable_root.join("config").join("system.db");
     let paths = PortalReleasePaths {
         portable_root: portable_root.clone(),
         release_root,
         portal_exe: portable_root.join("Portal.exe"),
         system_db: manager_system_db,
-        desktop_system_db,
         updater: portable_root.join("runtime").join("PortalUpdater.exe"),
         remover: portable_root.join("Remove-Portal.bat"),
         version_file: portable_root.join("VERSION"),
@@ -906,54 +907,16 @@ fn portal_release_paths() -> Result<PortalReleasePaths, String> {
     Ok(paths)
 }
 
-fn synchronize_manager_system_database_to_desktop(
+fn verify_desktop_release_excludes_system_database(
     paths: &PortalReleasePaths,
 ) -> Result<(), String> {
     set_system_database_writable(&paths.system_db, true)?;
-    let same_database = match (
-        paths.system_db.canonicalize(),
-        paths.desktop_system_db.canonicalize(),
-    ) {
-        (Ok(authoritative), Ok(desktop)) => authoritative == desktop,
-        _ => false,
-    };
-    if same_database {
-        return Err(
-            "The authoritative Manager system database and Desktop distribution database must be different files."
-                .to_string(),
-        );
-    }
-    if let Some(parent) = paths.desktop_system_db.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            format!("Could not create the Portal system database folder: {error}")
-        })?;
-    }
-    if paths.desktop_system_db.exists() {
-        set_system_database_writable(&paths.desktop_system_db, true)?;
-    }
-    let copy_result = fs::copy(&paths.system_db, &paths.desktop_system_db)
-        .map_err(|error| format!("Could not update the Portal Desktop system.db: {error}"));
-    let readonly_result = if paths.desktop_system_db.is_file() {
-        set_system_database_writable(&paths.desktop_system_db, false)
-    } else {
-        Ok(())
-    };
-    copy_result?;
-    readonly_result?;
-    let authoritative_hash = file_sha256(&paths.system_db)?;
-    let desktop_hash = file_sha256(&paths.desktop_system_db)?;
-    if authoritative_hash != desktop_hash {
-        return Err(
-            "The Portal Desktop system.db does not match the authoritative Manager copy."
-                .to_string(),
-        );
-    }
-    let desktop_is_read_only = fs::metadata(&paths.desktop_system_db)
-        .map_err(|error| format!("Could not verify the Portal Desktop system.db: {error}"))?
-        .permissions()
-        .readonly();
-    if !desktop_is_read_only {
-        return Err("The Portal Desktop system.db was not made read-only.".to_string());
+    let packaged_database = paths.portable_root.join("config").join("system.db");
+    if packaged_database.exists() {
+        return Err(format!(
+            "The Desktop package contains system.db. Rebuild Portal Desktop so the plaintext catalog is excluded: {}",
+            packaged_database.display()
+        ));
     }
     Ok(())
 }
@@ -1010,26 +973,83 @@ fn manifest_string(path: &Path, name: &str) -> Option<String> {
         .and_then(|value| value.get(name).and_then(Value::as_str).map(str::to_string))
 }
 
-fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
+fn normalize_release_channel(value: Option<&str>) -> Result<String, String> {
+    let channel = value.unwrap_or("production").trim().to_ascii_lowercase();
+    if matches!(channel.as_str(), "production" | "test") {
+        Ok(channel)
+    } else {
+        Err("Portal release channel must be production or test.".to_string())
+    }
+}
+
+fn release_channel_root(base: &Path, channel: &str) -> PathBuf {
+    if channel == "test" {
+        base.join("test")
+    } else {
+        base.to_path_buf()
+    }
+}
+
+fn normalized_machine_names(values: Vec<String>) -> Result<Vec<String>, String> {
+    let mut names = values
+        .into_iter()
+        .flat_map(|value| {
+            value
+                .split([',', ';', '\n', '\r'])
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_ascii_uppercase)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    for name in &names {
+        if name.len() > 63
+            || !name.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+            })
+        {
+            return Err(format!("Invalid test computer name: {name}"));
+        }
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
+}
+
+fn portal_release_status_value(channel: Option<&str>) -> Result<PortalReleaseStatus, String> {
+    let (settings, _) = manager_settings()?;
     let paths = portal_release_paths()?;
+    let channel = normalize_release_channel(channel)?;
+    let channel_root = release_channel_root(&paths.release_root, &channel);
     let release_version = release_version_from_file(&paths.version_file)?;
-    let current_manifest = paths.release_root.join("portal-release.json");
+    let current_manifest = channel_root.join("portal-release.json");
     let published_version = manifest_string(&current_manifest, "version");
     let published = published_version.as_deref() == Some(release_version.as_str());
+    let allowed_machines = if channel == "test" {
+        read_json(&current_manifest)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("allowedMachines")
+                    .and_then(Value::as_array)
+                    .cloned()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let configured_test_machines = normalized_machine_names(settings.release_test_machines)
+        .unwrap_or_else(|_| allowed_machines.clone());
     let manager_system_db_writable = !fs::metadata(&paths.system_db)
         .map_err(|error| format!("Could not inspect the authoritative system.db: {error}"))?
         .permissions()
         .readonly();
-    let desktop_system_db_read_only = paths
-        .desktop_system_db
-        .metadata()
-        .map(|metadata| metadata.permissions().readonly())
-        .unwrap_or(false);
-    let desktop_system_db_current = paths.desktop_system_db.is_file()
-        && file_sha256(&paths.system_db)? == file_sha256(&paths.desktop_system_db)?;
     Ok(PortalReleaseStatus {
         portable_root: paths.portable_root.display().to_string(),
-        release_root: paths.release_root.display().to_string(),
+        release_root: channel_root.display().to_string(),
         release_version,
         published,
         current_update_mode: published
@@ -1037,10 +1057,12 @@ fn portal_release_status_value() -> Result<PortalReleaseStatus, String> {
             .flatten(),
         portal_exe: paths.portal_exe.display().to_string(),
         system_db: paths.system_db.display().to_string(),
-        desktop_system_db: paths.desktop_system_db.display().to_string(),
         manager_system_db_writable,
-        desktop_system_db_read_only,
-        desktop_system_db_current,
+        desktop_catalog_protection: "SQLCipher with per-user Windows DPAPI key".to_string(),
+        channel,
+        published_version,
+        allowed_machines,
+        configured_test_machines,
     })
 }
 
@@ -1088,7 +1110,12 @@ fn create_release_zip(source: &Path, archive: &Path) -> Result<(), String> {
     let status = Command::new("tar.exe")
         .args(["-a", "-c", "-f"])
         .arg(&temporary)
-        .args(["--exclude=data", "--exclude=./data"])
+        .args([
+            "--exclude=data",
+            "--exclude=./data",
+            "--exclude=config/system.db",
+            "--exclude=./config/system.db",
+        ])
         .arg("-C")
         .arg(source)
         .arg(".")
@@ -1107,8 +1134,8 @@ fn create_release_zip(source: &Path, archive: &Path) -> Result<(), String> {
         .map_err(|error| format!("Could not publish Portal release ZIP: {error}"))
 }
 
-fn installer_batch() -> &'static str {
-    "@echo off\r\nsetlocal\r\nset \"RELEASE_ROOT=%~dp0\"\r\nif \"%RELEASE_ROOT:~-1%\"==\"\\\" set \"RELEASE_ROOT=%RELEASE_ROOT:~0,-1%\"\r\n\r\nif not exist \"%RELEASE_ROOT%\\PortalUpdater.exe\" (\r\n  echo PortalUpdater.exe was not found beside this downloader.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\n\"%RELEASE_ROOT%\\PortalUpdater.exe\" --bootstrap --manifest \"portal-release.json\" --release-root \"%RELEASE_ROOT%\" --restart\r\nif errorlevel 1 (\r\n  echo.\r\n  echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\necho.\r\necho Storm Water Asset Intelligence Portal is ready to use.\r\necho A Desktop shortcut has been created and Portal is starting.\r\nmsg \"%USERNAME%\" \"Storm Water Asset Intelligence Portal is ready to use.\" >nul 2>&1\r\n"
+fn installer_batch(channel: &str) -> String {
+    format!("@echo off\r\nsetlocal\r\nset \"RELEASE_ROOT=%~dp0\"\r\nif \"%RELEASE_ROOT:~-1%\"==\"\\\" set \"RELEASE_ROOT=%RELEASE_ROOT:~0,-1%\"\r\n\r\nif not exist \"%RELEASE_ROOT%\\PortalUpdater.exe\" (\r\n  echo PortalUpdater.exe was not found beside this downloader.\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\n\"%RELEASE_ROOT%\\PortalUpdater.exe\" --bootstrap --manifest \"portal-release.json\" --release-root \"%RELEASE_ROOT%\" --channel \"{channel}\" --restart\r\nif errorlevel 1 (\r\n  echo.\r\n  echo Portal download failed. Review the message above and contact the Portal developer if the issue continues.\r\n  echo Diagnostic log: %LOCALAPPDATA%\\StormWaterPortal\\data\\logs\\portal-updater.log\r\n  pause\r\n  exit /b 1\r\n)\r\n\r\necho.\r\necho Storm Water Asset Intelligence Portal is ready to use.\r\necho A Desktop shortcut has been created and Portal is starting.\r\n")
 }
 
 fn release_payload(path: &Path) -> Result<Value, String> {
@@ -1128,6 +1155,8 @@ fn emit_release_progress(app: &AppHandle, message: &str) {
 fn publish_portal_release_value(
     app: &AppHandle,
     update_mode: &str,
+    channel: &str,
+    allowed_machines: Vec<String>,
 ) -> Result<PortalReleaseStatus, String> {
     emit_release_progress(
         app,
@@ -1138,14 +1167,31 @@ fn publish_portal_release_value(
     }
     require_manager_system_admin()?;
     let paths = portal_release_paths()?;
+    let channel = normalize_release_channel(Some(channel))?;
+    let allowed_machines = normalized_machine_names(allowed_machines)?;
+    if channel == "test" && allowed_machines.is_empty() {
+        return Err("A test release must target at least one computer.".to_string());
+    }
+    save_release_test_machines(&allowed_machines)?;
+    let release_root = release_channel_root(&paths.release_root, &channel);
     let version = release_version_from_file(&paths.version_file)?;
     if !is_semantic_version(&version) {
         return Err("Release version must use semantic version format, such as 0.2.1.".to_string());
     }
+    if channel == "test" {
+        let production_manifest = paths.release_root.join("portal-release.json");
+        if let Some(production_version) = manifest_string(&production_manifest, "version") {
+            if !version_is_newer(&version, &production_version) {
+                return Err(format!(
+                    "Test release {version} must be newer than production release {production_version}."
+                ));
+            }
+        }
+    }
     emit_release_progress(app, "Preparing the shared release directory.");
-    fs::create_dir_all(&paths.release_root)
+    fs::create_dir_all(&release_root)
         .map_err(|error| format!("Could not create shared release folder: {error}"))?;
-    let current_manifest_path = paths.release_root.join("portal-release.json");
+    let current_manifest_path = release_root.join("portal-release.json");
     if let Some(current) = manifest_string(&current_manifest_path, "version") {
         let unified_manifest = read_json(&current_manifest_path)
             .ok()
@@ -1160,21 +1206,22 @@ fn publish_portal_release_value(
     // Every software release includes one complete installation/recovery artifact.
     // Existing clients may still apply the smaller executable-only update artifact.
     close_portal_python_worker()?;
-    emit_release_progress(app, "Refreshing the read-only installation catalog.");
-    synchronize_manager_system_database_to_desktop(&paths)?;
+    emit_release_progress(
+        app,
+        "Verifying the installation excludes a plaintext system catalog.",
+    );
+    verify_desktop_release_excludes_system_database(&paths)?;
     emit_release_progress(
         app,
         "Creating the complete installation package. This can take a few minutes.",
     );
-    let installation_artifact = paths
-        .release_root
-        .join(format!("Portal-Desktop-{version}.zip"));
+    let installation_artifact = release_root.join(format!("Portal-Desktop-{version}.zip"));
     create_release_zip(&paths.portable_root, &installation_artifact)?;
 
     let update_artifact = match update_mode {
         "portal-exe" => {
             emit_release_progress(app, "Copying Portal.exe to the shared release folder.");
-            let destination = paths.release_root.join(format!("Portal-{version}.exe"));
+            let destination = release_root.join(format!("Portal-{version}.exe"));
             fs::copy(&paths.portal_exe, &destination)
                 .map_err(|error| format!("Could not publish Portal.exe: {error}"))?;
             destination
@@ -1188,8 +1235,8 @@ fn publish_portal_release_value(
     );
     let update_payload = release_payload(&update_artifact)?;
     let installation_payload = release_payload(&installation_artifact)?;
-    let manifest = serde_json::json!({
-        "schemaVersion": 1,
+    let mut manifest = serde_json::json!({
+        "schemaVersion": if channel == "test" { 2 } else { 1 },
         "version": version,
         "updateMode": update_mode,
         "payload": update_payload,
@@ -1197,31 +1244,194 @@ fn publish_portal_release_value(
         "preservePaths": ["data"],
         "publishedAtUnixSeconds": StdSystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
     });
+    if channel == "test" {
+        manifest["channel"] = Value::String("test".to_string());
+        manifest["allowedMachines"] = serde_json::to_value(&allowed_machines)
+            .map_err(|error| format!("Could not serialize test computer names: {error}"))?;
+    }
     emit_release_progress(app, "Refreshing the Portal updater and installer.");
-    fs::copy(&paths.updater, paths.release_root.join("PortalUpdater.exe"))
+    fs::copy(&paths.updater, release_root.join("PortalUpdater.exe"))
         .map_err(|error| format!("Could not publish PortalUpdater.exe: {error}"))?;
-    fs::copy(&paths.remover, paths.release_root.join("Remove-Portal.bat"))
+    fs::copy(&paths.remover, release_root.join("Remove-Portal.bat"))
         .map_err(|error| format!("Could not publish Remove-Portal.bat: {error}"))?;
-    let legacy_installer = paths.release_root.join("Install-Portal.bat");
+    let legacy_installer = release_root.join("Install-Portal.bat");
     if legacy_installer.exists() {
         fs::remove_file(&legacy_installer)
             .map_err(|error| format!("Could not remove legacy Install-Portal.bat: {error}"))?;
     }
     fs::write(
-        paths.release_root.join("Download-Portal.bat"),
-        installer_batch(),
+        release_root.join(if channel == "test" {
+            "Download-Portal-Test.bat"
+        } else {
+            "Download-Portal.bat"
+        }),
+        installer_batch(&channel),
     )
     .map_err(|error| format!("Could not publish Download-Portal.bat: {error}"))?;
     emit_release_progress(app, "Publishing the release manifest.");
-    write_json_replace(&paths.release_root.join("portal-release.json"), &manifest)?;
-    let legacy_bootstrap_manifest = paths.release_root.join("portal-bootstrap.json");
+    write_json_replace(&release_root.join("portal-release.json"), &manifest)?;
+    let legacy_bootstrap_manifest = release_root.join("portal-bootstrap.json");
     if legacy_bootstrap_manifest.exists() {
         fs::remove_file(&legacy_bootstrap_manifest).map_err(|error| {
             format!("Could not remove the legacy Portal bootstrap manifest: {error}")
         })?;
     }
     emit_release_progress(app, "Release published successfully.");
-    portal_release_status_value()
+    portal_release_status_value(Some(&channel))
+}
+
+fn manifest_payload_info(manifest: &Value, field: &str) -> Result<(String, String, u64), String> {
+    let payload = manifest
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| format!("The test release manifest does not define {field}."))?;
+    let file = payload
+        .get("file")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("The test release manifest has an invalid {field}.file."))?;
+    let candidate = Path::new(&file);
+    if candidate.components().count() != 1 || candidate.file_name().is_none() {
+        return Err(format!(
+            "The test release manifest {field}.file must be a file name."
+        ));
+    }
+    let sha256 = payload
+        .get("sha256")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| format!("The test release manifest has an invalid {field}.sha256."))?;
+    let size = payload
+        .get("size")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("The test release manifest has an invalid {field}.size."))?;
+    Ok((file, sha256, size))
+}
+
+fn copy_verified_release_artifact(
+    source_root: &Path,
+    destination_root: &Path,
+    file: &str,
+    expected_sha256: &str,
+    expected_size: u64,
+) -> Result<(), String> {
+    let source = source_root.join(file);
+    if !source.is_file() {
+        return Err(format!(
+            "The tested release artifact is missing: {}",
+            source.display()
+        ));
+    }
+    let size = fs::metadata(&source)
+        .map_err(|error| format!("Could not inspect {}: {error}", source.display()))?
+        .len();
+    if size != expected_size || !file_sha256(&source)?.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!(
+            "The tested release artifact failed verification: {}",
+            source.display()
+        ));
+    }
+    let destination = destination_root.join(file);
+    fs::copy(&source, &destination)
+        .map_err(|error| format!("Could not promote {}: {error}", source.display()))?;
+    if !file_sha256(&destination)?.eq_ignore_ascii_case(expected_sha256) {
+        return Err(format!(
+            "The promoted release artifact failed verification: {}",
+            destination.display()
+        ));
+    }
+    Ok(())
+}
+
+fn promote_test_release_value(app: &AppHandle) -> Result<PortalReleaseStatus, String> {
+    require_manager_system_admin()?;
+    let paths = portal_release_paths()?;
+    let test_root = release_channel_root(&paths.release_root, "test");
+    let test_manifest_path = test_root.join("portal-release.json");
+    let test_manifest = read_json(&test_manifest_path)?;
+    if test_manifest.get("schemaVersion").and_then(Value::as_u64) != Some(2)
+        || test_manifest.get("channel").and_then(Value::as_str) != Some("test")
+    {
+        return Err("The test channel does not contain a valid targeted test release.".to_string());
+    }
+    let version = test_manifest
+        .get("version")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "The test release manifest does not define a version.".to_string())?;
+    let update_mode = test_manifest
+        .get("updateMode")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| "The test release manifest does not define updateMode.".to_string())?;
+    if !matches!(update_mode.as_str(), "portal-exe" | "full") {
+        return Err("The test release updateMode is not supported.".to_string());
+    }
+    let production_manifest_path = paths.release_root.join("portal-release.json");
+    if let Some(current) = manifest_string(&production_manifest_path, "version") {
+        if !version_is_newer(&version, &current) {
+            return Err(format!(
+                "Test release {version} must be newer than production release {current}."
+            ));
+        }
+    }
+    emit_release_progress(app, "Verifying the tested release artifacts.");
+    fs::create_dir_all(&paths.release_root)
+        .map_err(|error| format!("Could not create production release folder: {error}"))?;
+    let payload = manifest_payload_info(&test_manifest, "payload")?;
+    let installation_payload = manifest_payload_info(&test_manifest, "installationPayload")?;
+    copy_verified_release_artifact(
+        &test_root,
+        &paths.release_root,
+        &payload.0,
+        &payload.1,
+        payload.2,
+    )?;
+    if installation_payload.0 != payload.0 {
+        copy_verified_release_artifact(
+            &test_root,
+            &paths.release_root,
+            &installation_payload.0,
+            &installation_payload.1,
+            installation_payload.2,
+        )?;
+    }
+    for file in ["PortalUpdater.exe", "Remove-Portal.bat"] {
+        let source = test_root.join(file);
+        if !source.is_file() {
+            return Err(format!("The tested release is missing {file}."));
+        }
+        fs::copy(&source, paths.release_root.join(file))
+            .map_err(|error| format!("Could not promote {file}: {error}"))?;
+    }
+    fs::write(
+        paths.release_root.join("Download-Portal.bat"),
+        installer_batch("production"),
+    )
+    .map_err(|error| format!("Could not publish Download-Portal.bat: {error}"))?;
+    let production_manifest = serde_json::json!({
+        "schemaVersion": 1,
+        "version": version,
+        "updateMode": update_mode,
+        "payload": test_manifest.get("payload").cloned().unwrap_or(Value::Null),
+        "installationPayload": test_manifest.get("installationPayload").cloned().unwrap_or(Value::Null),
+        "preservePaths": ["data"],
+        "publishedAtUnixSeconds": StdSystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+        "promotedFromTest": true,
+    });
+    emit_release_progress(app, "Promoting the tested manifest to production.");
+    write_json_replace(&production_manifest_path, &production_manifest)?;
+    emit_release_progress(app, "Tested release promoted to production successfully.");
+    portal_release_status_value(Some("production"))
+}
+
+fn save_release_test_machines(machines: &[String]) -> Result<(), String> {
+    let path = configuration_path()?;
+    let mut settings = read_json(&path)?;
+    settings["releaseTestMachines"] = serde_json::to_value(machines)
+        .map_err(|error| format!("Could not serialize saved test computer names: {error}"))?;
+    write_json_replace(&path, &settings)
+        .map_err(|error| format!("Could not save test computer names: {error}"))
 }
 
 fn sync_paths() -> Result<SyncPaths, String> {
@@ -2645,8 +2855,8 @@ fn browse_repository_folder(initial_path: Option<String>) -> Result<Option<Strin
 }
 
 #[tauri::command]
-fn portal_release_status() -> Result<PortalReleaseStatus, String> {
-    portal_release_status_value()
+fn portal_release_status(channel: Option<String>) -> Result<PortalReleaseStatus, String> {
+    portal_release_status_value(channel.as_deref())
 }
 
 #[tauri::command]
@@ -2655,13 +2865,11 @@ fn publish_system_catalog_data() -> Result<Value, String> {
     // Flush pending catalog writes before copying the authoritative database.
     close_portal_python_worker()?;
     let paths = portal_release_paths()?;
-    synchronize_manager_system_database_to_desktop(&paths)?;
     let publication = publish_system_catalog(&paths.system_db)?;
     Ok(serde_json::json!({
         "status": "succeeded",
-        "message": "The read-only system catalog was published as Portal data.",
-        "publication": publication,
-        "desktopSystemDatabase": paths.desktop_system_db.display().to_string()
+        "message": "The system catalog was published as Portal data. Desktop encrypts it with SQLCipher during local activation.",
+        "publication": publication
     }))
 }
 
@@ -2669,8 +2877,23 @@ fn publish_system_catalog_data() -> Result<Value, String> {
 fn publish_portal_release(
     app: AppHandle,
     update_mode: String,
+    channel: String,
+    allowed_machines: Vec<String>,
 ) -> Result<PortalReleaseStatus, String> {
-    publish_portal_release_value(&app, &update_mode)
+    publish_portal_release_value(&app, &update_mode, &channel, allowed_machines)
+}
+
+#[tauri::command]
+fn save_portal_release_test_machines(machines: Vec<String>) -> Result<PortalReleaseStatus, String> {
+    require_manager_system_admin()?;
+    let machines = normalized_machine_names(machines)?;
+    save_release_test_machines(&machines)?;
+    portal_release_status_value(Some("test"))
+}
+
+#[tauri::command]
+fn promote_test_release(app: AppHandle) -> Result<PortalReleaseStatus, String> {
+    promote_test_release_value(&app)
 }
 
 #[tauri::command]
@@ -3000,6 +3223,8 @@ pub fn run() {
             portal_release_status,
             publish_system_catalog_data,
             publish_portal_release,
+            save_portal_release_test_machines,
+            promote_test_release,
             schema_status,
             schema_catalog,
             save_schema_draft,
@@ -3046,13 +3271,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_release_zip, display_timestamp, set_system_database_writable,
-        synchronize_manager_system_database_to_desktop, PortalReleasePaths,
+        create_release_zip, display_timestamp, normalized_machine_names, release_channel_root,
+        verify_desktop_release_excludes_system_database, PortalReleasePaths,
     };
     use std::{env, fs, process, process::Command, time::SystemTime};
 
     #[test]
-    fn desktop_release_database_is_refreshed_and_made_read_only() {
+    fn desktop_release_must_not_contain_a_system_database() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("test time")
@@ -3069,14 +3294,12 @@ mod tests {
             .expect("desktop directory");
         fs::write(&manager_database, b"authoritative-system-catalog")
             .expect("authoritative database");
-        fs::write(&desktop_database, b"stale-desktop-catalog").expect("desktop database");
 
         let paths = PortalReleasePaths {
             portable_root: root.join("desktop"),
             release_root: root.join("release"),
             portal_exe: root.join("desktop").join("Portal.exe"),
             system_db: manager_database.clone(),
-            desktop_system_db: desktop_database.clone(),
             updater: root
                 .join("desktop")
                 .join("runtime")
@@ -3085,23 +3308,31 @@ mod tests {
             version_file: root.join("desktop").join("VERSION"),
         };
 
-        synchronize_manager_system_database_to_desktop(&paths).expect("database synchronization");
-
-        assert_eq!(
-            fs::read(&desktop_database).expect("distributed database"),
-            fs::read(&manager_database).expect("authoritative database")
-        );
+        verify_desktop_release_excludes_system_database(&paths).expect("release without database");
         assert!(!fs::metadata(&manager_database)
             .expect("manager metadata")
             .permissions()
             .readonly());
-        assert!(fs::metadata(&desktop_database)
-            .expect("desktop metadata")
-            .permissions()
-            .readonly());
+        fs::write(&desktop_database, b"plaintext catalog").expect("desktop database");
+        assert!(verify_desktop_release_excludes_system_database(&paths).is_err());
 
-        set_system_database_writable(&desktop_database, true).expect("unlock cleanup file");
         fs::remove_dir_all(root).expect("test cleanup");
+    }
+
+    #[test]
+    fn test_release_targets_are_normalized_and_deduplicated() {
+        assert_eq!(
+            normalized_machine_names(vec![
+                " test-pc-02,TEST-PC-01 ".to_string(),
+                "test-pc-01".to_string()
+            ])
+            .expect("valid names"),
+            vec!["TEST-PC-01".to_string(), "TEST-PC-02".to_string()]
+        );
+        assert!(normalized_machine_names(vec!["bad\\computer".to_string()]).is_err());
+        let root = std::path::Path::new(r"G:\PortalRelease");
+        assert_eq!(release_channel_root(root, "production"), root);
+        assert_eq!(release_channel_root(root, "test"), root.join("test"));
     }
 
     #[test]
@@ -3119,10 +3350,12 @@ mod tests {
         fs::create_dir_all(source.join("data")).expect("data directory");
         fs::create_dir_all(source.join("config")).expect("config directory");
         fs::write(source.join("Portal.exe"), b"portal").expect("application file");
-        fs::write(source.join("config").join("system.db"), b"catalog")
-            .expect("catalog file");
-        fs::write(source.join("data").join("keep-me.db"), b"user data")
-            .expect("data file");
+        fs::write(
+            source.join("config").join("system.db"),
+            b"user-specific catalog",
+        )
+        .expect("runtime catalog");
+        fs::write(source.join("data").join("keep-me.db"), b"user data").expect("data file");
 
         create_release_zip(&source, &archive).expect("release archive");
         let listing = Command::new("tar.exe")
@@ -3133,7 +3366,7 @@ mod tests {
         assert!(listing.status.success());
         let entries = String::from_utf8_lossy(&listing.stdout).replace('\\', "/");
         assert!(entries.contains("Portal.exe"));
-        assert!(entries.contains("config/system.db"));
+        assert!(!entries.contains("config/system.db"));
         assert!(!entries.contains("data/"));
         assert!(!entries.contains("keep-me.db"));
 

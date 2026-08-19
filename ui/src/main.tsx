@@ -36,6 +36,7 @@ import { applyAppTheme, getInitialTheme } from './theme'
 
 const root = createRoot(document.getElementById('root')!)
 const MAINTENANCE_MONITOR_INTERVAL_MS = 5_000
+const UPDATE_SHUTDOWN_COUNTDOWN_SECONDS = 10
 let dataRestartPromptPending = false
 let openDesktopResourceCount = 0
 
@@ -100,6 +101,31 @@ async function showMaintenanceSplashThenExit() {
   )
   await new Promise<void>((resolve) => window.setTimeout(resolve, MAINTENANCE_SPLASH_DURATION_MS))
   await exitDesktopApplication()
+}
+
+async function showUpdateCountdownThenInstall(releaseVersion: string | null) {
+  for (let secondsRemaining = UPDATE_SHUTDOWN_COUNTDOWN_SECONDS; secondsRemaining > 0; secondsRemaining -= 1) {
+    root.render(
+      <StrictMode>
+        <DesktopStartupSplash
+          updateCountdownSeconds={secondsRemaining}
+          updateReleaseVersion={releaseVersion}
+        />
+      </StrictMode>,
+    )
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1_000))
+  }
+
+  root.render(
+    <StrictMode>
+      <DesktopStartupSplash
+        updateReleaseVersion={releaseVersion}
+        updateStarting
+      />
+    </StrictMode>,
+  )
+  await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
+  await installPortalUpdate()
 }
 
 function monitorScheduledMaintenance() {
@@ -173,13 +199,7 @@ async function bootstrap() {
       }
       const update = await checkPortalUpdate()
       if (update.available) {
-        root.render(
-          <StrictMode>
-            <DesktopStartupSplash message={`Updating Portal to ${update.releaseVersion}...`} />
-          </StrictMode>,
-        )
-        await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
-        await installPortalUpdate()
+        await showUpdateCountdownThenInstall(update.releaseVersion)
         return
       }
     } catch (error) {

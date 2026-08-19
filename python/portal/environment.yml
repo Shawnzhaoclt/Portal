@@ -33,3 +33,6 @@ dependencies:
   - xarray
   # SQL Server connectivity; also install Microsoft ODBC Driver 18 for SQL Server.
   - pyodbc
+  - pip:
+      # SQLCipher is used only for the encrypted Desktop system catalog.
+      - sqlcipher3==0.6.2

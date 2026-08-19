@@ -1,11 +1,11 @@
-import { type ChangeEvent, type FormEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, type KeyboardEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import * as echarts from "echarts";
-import { lineString, nearestPointOnLine, point } from "@turf/turf";
+import { area as turfArea, length as turfLength, lineString, nearestPointOnLine, point, polygon as turfPolygon } from "@turf/turf";
 import maplibregl, { type GeoJSONSource, type Map as MapLibreMap, type MapGeoJSONFeature, type MapMouseEvent, type MapOptions } from "maplibre-gl";
 import { toast } from "sonner";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./MapTilesViewer.css";
-import { formatDateTime } from "../../../lib/dateTime";
+import { openPortalResource } from "../../../lib/portalNavigation";
 import {
   Activity,
   Database,
@@ -29,11 +29,13 @@ import {
   BarChart3,
   ChartArea,
   Route,
+  Ruler,
   Search,
   ShieldAlert,
   Sun,
   Trash2,
   Type,
+  Undo2,
   Waves,
   X,
 } from "lucide-react";
@@ -56,8 +58,11 @@ import {
   type TerrainProfileResult,
 } from "./terrainProfile";
 import { clientSetting } from "../../../desktop/settings";
-import { openExternalUrl } from "../../../desktop/runtime";
+import { isDesktopRuntime, openExternalUrl, saveExportAs } from "../../../desktop/runtime";
 import stormwaterLogoUrl from "./assets/stormwater-logo.png";
+import engineeringPlanSheetTemplate from "./map-templates/engineering-plan-sheet.json";
+import operationsFieldMapTemplate from "./map-templates/operations-field-map.json";
+import executiveBriefingMapTemplate from "./map-templates/executive-briefing-map.json";
 import {
   DEFAULT_VIEW,
   ScaleRatioControl,
@@ -108,7 +113,24 @@ import type {
 } from "./types";
 
 const northArrowCompassUrl = new URL("./assets/north-arrow-compass.svg", import.meta.url).href;
-const MAP_PDF_FRAME_ASPECT_RATIO = 660 / 584;
+
+type MapPdfPageSizeId = "letter" | "legal" | "tabloid" | "ansi-c";
+type MapPdfOrientation = "landscape" | "portrait";
+type MapPdfQualityDpi = 150 | 300;
+type MapPdfDetailsStep = "template" | "setup";
+
+const MAP_PDF_PAGE_SIZES: Array<{
+  id: MapPdfPageSizeId;
+  label: string;
+  shortLabel: string;
+  widthInches: number;
+  heightInches: number;
+}> = [
+  { id: "letter", label: "US Letter (8.5 x 11 in)", shortLabel: "US Letter", widthInches: 8.5, heightInches: 11 },
+  { id: "legal", label: "US Legal (8.5 x 14 in)", shortLabel: "US Legal", widthInches: 8.5, heightInches: 14 },
+  { id: "tabloid", label: "US Tabloid (11 x 17 in)", shortLabel: "US Tabloid", widthInches: 11, heightInches: 17 },
+  { id: "ansi-c", label: "ANSI C (17 x 22 in)", shortLabel: "ANSI C", widthInches: 17, heightInches: 22 },
+];
 
 type IdentifyFeature = SelectedFeature & {
   featureLabel: string;
@@ -126,6 +148,7 @@ type MapViewMode = "single" | "dual" | "swipe";
 type CompareTarget = "primary" | "comparison";
 type DrawTool = "select" | "polygon" | "circle" | "rectangle";
 type DrawShape = Exclude<DrawTool, "select">;
+type MeasureMode = "distance" | "area";
 type BasemapId =
   | "cltex"
   | "mecklenburg-aerial-2025";
@@ -314,7 +337,7 @@ const BUILDING_3D_SOURCE_LAYER = "buildings_py";
 // Extruding the countywide building inventory below neighborhood scale can
 // overwhelm the WebView GPU. Keep broader 3D views terrain-only and introduce
 // the one-level footprints when individual buildings are useful.
-const BUILDING_3D_MIN_ZOOM = 15;
+const BUILDING_3D_MIN_ZOOM = 16;
 const LEGACY_PMTILES_SOURCE_ID = "planning_project";
 const DUCKDB_GEOJSON_SOURCE_CONFIGS = [
   { sourceLayer: "culverts", datasetId: "culverts", sourceId: "duckdb-geojson-culverts", limit: 25_000 },
@@ -398,6 +421,12 @@ const DRAW_SELECTED_LINE_LAYER_ID = "user-drawings-selected-line";
 const DRAW_DRAFT_FILL_LAYER_ID = "user-drawings-draft-fill";
 const DRAW_DRAFT_LINE_LAYER_ID = "user-drawings-draft-line";
 const DRAW_DRAFT_POINT_LAYER_ID = "user-drawings-draft-point";
+const MEASURE_SOURCE_ID = "map-measurement";
+const MEASURE_FILL_LAYER_ID = `${MEASURE_SOURCE_ID}-fill`;
+const MEASURE_LINE_CASING_LAYER_ID = `${MEASURE_SOURCE_ID}-line-casing`;
+const MEASURE_LINE_LAYER_ID = `${MEASURE_SOURCE_ID}-line`;
+const MEASURE_POINT_LAYER_ID = `${MEASURE_SOURCE_ID}-points`;
+const MEASURE_LABEL_LAYER_ID = `${MEASURE_SOURCE_ID}-label`;
 const ASSET_EXTRACT_SOURCE_ID = "asset-extract-preview";
 const ASSET_EXTRACT_STRUCTURE_LAYER_ID = `${ASSET_EXTRACT_SOURCE_ID}-structures`;
 const ASSET_EXTRACT_PIPE_LAYER_ID = `${ASSET_EXTRACT_SOURCE_ID}-pipes`;
@@ -534,26 +563,106 @@ type MapPdfSelectionRect = {
   overlayHeight: number;
 };
 
-type MapPdfExportDetails = {
+type MapPdfExportSettings = {
+  templateId: string;
   mapName: string;
+  subtitle: string;
   author: string;
+  pageSize: MapPdfPageSizeId;
+  orientation: MapPdfOrientation;
+  qualityDpi: MapPdfQualityDpi;
 };
+
+type MapPdfTemplateDefinition = {
+  id: string;
+  name: string;
+  description: string;
+  category: "engineering" | "operations" | "briefing";
+  page: {
+    size: MapPdfPageSizeId;
+    orientation: MapPdfOrientation;
+    qualityDpi: MapPdfQualityDpi;
+    marginInches: number;
+  };
+  titleBlock: {
+    placement: "right" | "bottom";
+    sizePercent: number;
+    background: string;
+    borderColor: string;
+    borderWidthPoints: number;
+    cells?: Array<{ id: string; sizePercent: number; background: string }>;
+  };
+  typography: {
+    title: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string; orientation: "horizontal" | "vertical" };
+    subtitle: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string; orientation: "horizontal" | "vertical" };
+    label: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string };
+    value: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string };
+    scale: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string };
+    footer: { sizePoints: number; weight: 400 | 500 | 600 | 700; color: string };
+  };
+  metadata: {
+    showPageNumber: boolean;
+    usageLabel: string;
+  };
+  defaults: {
+    title: string;
+    subtitle: string;
+    scaleSnap: number;
+  };
+};
+
+type MapPdfTitleBlockCells = {
+  northArrow: number;
+  identity: number;
+  metadata: number;
+  branding: number;
+};
+
+type MapPdfMetadataCell = {
+  label: string;
+  values: Array<{
+    text: string;
+    kind: "value" | "scale" | "footer";
+  }>;
+};
+
+const MAP_PDF_TEMPLATES: MapPdfTemplateDefinition[] = [
+  engineeringPlanSheetTemplate as MapPdfTemplateDefinition,
+  operationsFieldMapTemplate as MapPdfTemplateDefinition,
+  executiveBriefingMapTemplate as MapPdfTemplateDefinition,
+];
 
 type MapPdfScaleInfo = {
   groundWidthFeet: number;
+  scaleDenominator: number;
   scaleBarFeet: number;
   scaleBarLabel: string;
   scaleBarWidthRatio: number;
 };
 
-type MapPdfSelectionDragMode = "move" | "resize-nw" | "resize-ne" | "resize-sw" | "resize-se";
+type MapPdfLayout = {
+  pageWidth: number;
+  pageHeight: number;
+  margin: number;
+  titleBlockGap: number;
+  titleBlockPlacement: "right" | "bottom";
+  titleBlockX: number;
+  titleBlockY: number;
+  titleBlockWidth: number;
+  titleBlockHeight: number;
+  mapFrameX: number;
+  mapFrameY: number;
+  mapFrameWidth: number;
+  mapFrameHeight: number;
+};
 
-type MapPdfSelectionDragState = {
-  pointerId: number;
-  mode: MapPdfSelectionDragMode;
-  startX: number;
-  startY: number;
-  startFrame: MapPdfSelectionRect;
+type MapPdfPreparedExport = {
+  pdf: Blob;
+  mapImageUrl: string;
+  generatedAt: Date;
+  mapBearing: number;
+  scaleInfo: MapPdfScaleInfo;
+  settings: MapPdfExportSettings;
 };
 
 export default function App() {
@@ -623,6 +732,11 @@ export default function App() {
   const drawModeActiveRef = useRef(false);
   const selectedDrawIdRef = useRef<string | null>(null);
   const drawToolRef = useRef<DrawTool>("select");
+  const measureOpenRef = useRef(false);
+  const measureModeRef = useRef<MeasureMode>("distance");
+  const measurePointsRef = useRef<LngLatPair[]>([]);
+  const measureHoverPointRef = useRef<LngLatPair | null>(null);
+  const measureCompleteRef = useRef(false);
   const assetExtractOpenRef = useRef(false);
   const assetExtractPreviewRef = useRef<AssetExtractPreview | null>(null);
   const terrainProfileOpenRef = useRef(false);
@@ -641,11 +755,14 @@ export default function App() {
   const failureConsequenceAbortRef = useRef<AbortController | null>(null);
   const polygonClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const swipeDragRef = useRef<{ pointerId: number } | null>(null);
-  const mapPdfSelectionDragRef = useRef<MapPdfSelectionDragState | null>(null);
-  const mapPdfDetailsRef = useRef<MapPdfExportDetails>({
-    mapName: "Storm Water Asset Risk Map",
-    author: "",
-  });
+  const mapPdfScaleSnappingRef = useRef(false);
+  const mapPdfInitialCameraRef = useRef<{
+    center: [number, number];
+    zoom: number;
+    bearing: number;
+    pitch: number;
+  } | null>(null);
+  const mapPdfSettingsRef = useRef<MapPdfExportSettings>(defaultMapPdfExportSettings());
   const defaultWidgetLayoutAppliedRef = useRef(false);
 
   const [manifest, setManifest] = useState<Manifest | null>(null);
@@ -672,6 +789,11 @@ export default function App() {
   const [drawTool, setDrawTool] = useState<DrawTool>("select");
   const [drawFeatures, setDrawFeatures] = useState<DrawGeoJsonFeature[]>([]);
   const [selectedDrawId, setSelectedDrawId] = useState<string | null>(null);
+  const [measureOpen, setMeasureOpen] = useState(false);
+  const [measureMode, setMeasureMode] = useState<MeasureMode>("distance");
+  const [measurePoints, setMeasurePoints] = useState<LngLatPair[]>([]);
+  const [measureComplete, setMeasureComplete] = useState(false);
+  const [measureResultLabel, setMeasureResultLabel] = useState("Click the map to begin");
   const [assetExtractOpen, setAssetExtractOpen] = useState(false);
   const [assetExtractPreview, setAssetExtractPreview] = useState<AssetExtractPreview | null>(null);
   const [terrainProfileOpen, setTerrainProfileOpen] = useState(false);
@@ -719,8 +841,11 @@ export default function App() {
   const [mapPdfExporting, setMapPdfExporting] = useState(false);
   const [mapPdfExportSelecting, setMapPdfExportSelecting] = useState(false);
   const [mapPdfDetailsOpen, setMapPdfDetailsOpen] = useState(false);
-  const [mapPdfForm, setMapPdfForm] = useState<MapPdfExportDetails>(mapPdfDetailsRef.current);
+  const [mapPdfDetailsStep, setMapPdfDetailsStep] = useState<MapPdfDetailsStep>("template");
+  const [mapPdfForm, setMapPdfForm] = useState<MapPdfExportSettings>(() => defaultMapPdfExportSettings());
   const [mapPdfSelectionFrame, setMapPdfSelectionFrame] = useState<MapPdfSelectionRect | null>(null);
+  const [mapPdfScaleDenominator, setMapPdfScaleDenominator] = useState(5_000);
+  const [mapPdfPreparedExport, setMapPdfPreparedExport] = useState<MapPdfPreparedExport | null>(null);
   const [layerRecords, setLayerRecords] = useState<StyleLayer[]>([]);
   const [layerNameFilter, setLayerNameFilter] = useState("");
   const [layerVisibility, setLayerVisibilityState] = useState<Record<string, boolean>>({});
@@ -862,14 +987,45 @@ export default function App() {
   }, [drawModeActive, drawTool]);
 
   useEffect(() => {
+    measureOpenRef.current = measureOpen;
+    measureModeRef.current = measureMode;
+    measurePointsRef.current = measurePoints;
+    measureCompleteRef.current = measureComplete;
+    const activePoints = measureOpen ? measurePoints : [];
+    updateMeasurementGraphicsOnMaps(
+      [mapRef.current, splitMapRef.current],
+      measureMode,
+      activePoints,
+      measureOpen ? measureHoverPointRef.current : null,
+      measureComplete,
+    );
+    [mapRef.current, splitMapRef.current].forEach((map) => {
+      if (!map) return;
+      if (measureOpen) {
+        map.doubleClickZoom.disable();
+        map.getCanvas().style.cursor = "crosshair";
+      } else {
+        if (!drawModeActiveRef.current || drawToolRef.current !== "polygon") {
+          map.doubleClickZoom.enable();
+        }
+        if (!terrainProfileOpenRef.current && !failureConsequenceOpenRef.current) {
+          map.getCanvas().style.cursor = "";
+        }
+      }
+    });
+  }, [measureComplete, measureMode, measureOpen, measurePoints, primaryMapReadyCounter, splitMapReadyCounter]);
+
+  useEffect(() => {
     terrainProfileOpenRef.current = terrainProfileOpen;
     terrainProfileModeRef.current = terrainProfileMode;
     const profileDrawing = terrainProfileOpen && terrainProfileMode === "draw";
     [mapRef.current, splitMapRef.current].forEach((map) => {
       if (!map) return;
-      if (profileDrawing) map.doubleClickZoom.disable();
+      if (measureOpenRef.current || profileDrawing) map.doubleClickZoom.disable();
       else if (!drawModeActiveRef.current || drawToolRef.current !== "polygon") map.doubleClickZoom.enable();
-      map.getCanvas().style.cursor = terrainProfileOpen ? (profileDrawing ? "crosshair" : "pointer") : "";
+      map.getCanvas().style.cursor = measureOpenRef.current
+        ? "crosshair"
+        : terrainProfileOpen ? (profileDrawing ? "crosshair" : "pointer") : "";
     });
     if (!terrainProfileOpen) {
       terrainProfileDrawPointsRef.current = [];
@@ -895,9 +1051,11 @@ export default function App() {
     failureConsequenceSimulatingRef.current = failureConsequenceSimulating;
     [mapRef.current, splitMapRef.current].forEach((map) => {
       if (!map) return;
-      map.getCanvas().style.cursor = failureConsequenceOpen
-        ? failureConsequenceSimulating ? "crosshair" : "pointer"
-        : terrainProfileOpenRef.current ? "pointer" : "";
+      map.getCanvas().style.cursor = measureOpenRef.current
+        ? "crosshair"
+        : failureConsequenceOpen
+          ? failureConsequenceSimulating ? "crosshair" : "pointer"
+          : terrainProfileOpenRef.current ? "pointer" : "";
     });
   }, [failureConsequenceOpen, failureConsequenceSimulating]);
 
@@ -1670,7 +1828,7 @@ export default function App() {
 
   const showClickedFeature = useCallback(
     (event: MapMouseEvent) => {
-      if (drawModeActiveRef.current || terrainProfileOpenRef.current || failureConsequenceOpenRef.current) {
+      if (drawModeActiveRef.current || measureOpenRef.current || terrainProfileOpenRef.current || failureConsequenceOpenRef.current) {
         return;
       }
       const map = mapRef.current;
@@ -2092,6 +2250,140 @@ export default function App() {
     else openFailureConsequence(selectedFeature?.assetHistory);
   }, [closeFailureConsequence, openFailureConsequence, selectedFeature?.assetHistory]);
 
+  const syncMeasurementGraphics = useCallback((
+    points = measurePointsRef.current,
+    hoverPoint = measureHoverPointRef.current,
+    complete = measureCompleteRef.current,
+  ) => {
+    updateMeasurementGraphicsOnMaps(
+      [mapRef.current, splitMapRef.current],
+      measureModeRef.current,
+      points,
+      hoverPoint,
+      complete,
+    );
+    setMeasureResultLabel(measurementResultLabel(measureModeRef.current, points, hoverPoint, complete));
+  }, []);
+
+  const clearMeasurement = useCallback(() => {
+    measurePointsRef.current = [];
+    measureHoverPointRef.current = null;
+    measureCompleteRef.current = false;
+    setMeasurePoints([]);
+    setMeasureComplete(false);
+    setMeasureResultLabel("Click the map to begin");
+    updateMeasurementGraphicsOnMaps([mapRef.current, splitMapRef.current], measureModeRef.current, [], null, false);
+  }, []);
+
+  const closeMeasurement = useCallback(() => {
+    measureOpenRef.current = false;
+    setMeasureOpen(false);
+    clearMeasurement();
+  }, [clearMeasurement]);
+
+  const openMeasurement = useCallback(() => {
+    if (assetExtractOpenRef.current) closeAssetExtract();
+    if (terrainProfileOpenRef.current) closeTerrainProfile();
+    if (failureConsequenceOpenRef.current) closeFailureConsequence();
+    drawModeActiveRef.current = false;
+    setDrawModeActive(false);
+    setMapViewMenuOpen(false);
+    setPanelOpen(false);
+    setBasemapPanelOpen(false);
+    setSelectedFeature(null);
+    setSelectedFeatureOptions([]);
+    measureOpenRef.current = true;
+    setMeasureOpen(true);
+    clearMeasurement();
+  }, [clearMeasurement, closeAssetExtract, closeFailureConsequence, closeTerrainProfile]);
+
+  const toggleMeasurement = useCallback(() => {
+    if (measureOpenRef.current) closeMeasurement();
+    else openMeasurement();
+  }, [closeMeasurement, openMeasurement]);
+
+  const changeMeasurementMode = useCallback((mode: MeasureMode) => {
+    measureModeRef.current = mode;
+    setMeasureMode(mode);
+    clearMeasurement();
+  }, [clearMeasurement]);
+
+  const finishMeasurement = useCallback((candidatePoints?: LngLatPair[]) => {
+    const points = removeNearbyDuplicatePoints(candidatePoints || measurePointsRef.current);
+    const minimumPoints = measureModeRef.current === "distance" ? 2 : 3;
+    if (points.length < minimumPoints) {
+      toast.info(measureModeRef.current === "distance" ? "Add at least two points to measure distance." : "Add at least three points to measure area.");
+      return;
+    }
+    measurePointsRef.current = points;
+    measureHoverPointRef.current = null;
+    measureCompleteRef.current = true;
+    setMeasurePoints(points);
+    setMeasureComplete(true);
+    syncMeasurementGraphics(points, null, true);
+  }, [syncMeasurementGraphics]);
+
+  const undoMeasurementPoint = useCallback(() => {
+    const nextPoints = measurePointsRef.current.slice(0, -1);
+    measurePointsRef.current = nextPoints;
+    measureHoverPointRef.current = null;
+    measureCompleteRef.current = false;
+    setMeasurePoints(nextPoints);
+    setMeasureComplete(false);
+    syncMeasurementGraphics(nextPoints, null, false);
+  }, [syncMeasurementGraphics]);
+
+  const handleMeasureClick = useCallback((event: MapMouseEvent) => {
+    if (!measureOpenRef.current) return;
+    event.preventDefault();
+    event.originalEvent.preventDefault();
+    const nextPoint: LngLatPair = [event.lngLat.lng, event.lngLat.lat];
+    const basePoints = measureCompleteRef.current ? [] : measurePointsRef.current;
+    const nextPoints = removeNearbyDuplicatePoints([...basePoints, nextPoint]);
+    measurePointsRef.current = nextPoints;
+    measureHoverPointRef.current = null;
+    measureCompleteRef.current = false;
+    setMeasurePoints(nextPoints);
+    setMeasureComplete(false);
+    syncMeasurementGraphics(nextPoints, null, false);
+  }, [syncMeasurementGraphics]);
+
+  const handleMeasureMouseMove = useCallback((event: MapMouseEvent) => {
+    if (!measureOpenRef.current || measureCompleteRef.current || !measurePointsRef.current.length) return;
+    const hoverPoint: LngLatPair = [event.lngLat.lng, event.lngLat.lat];
+    measureHoverPointRef.current = hoverPoint;
+    syncMeasurementGraphics(measurePointsRef.current, hoverPoint, false);
+  }, [syncMeasurementGraphics]);
+
+  const handleMeasureDoubleClick = useCallback((event: MapMouseEvent) => {
+    if (!measureOpenRef.current) return;
+    event.preventDefault();
+    event.originalEvent.preventDefault();
+    event.originalEvent.stopPropagation();
+    const finalPoint: LngLatPair = [event.lngLat.lng, event.lngLat.lat];
+    const points = removeNearbyDuplicatePoints([...measurePointsRef.current, finalPoint]);
+    finishMeasurement(points);
+  }, [finishMeasurement]);
+
+  useEffect(() => {
+    if (!measureOpen) return;
+    const handleKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        finishMeasurement();
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        if (measurePointsRef.current.length) clearMeasurement();
+        else closeMeasurement();
+      } else if (event.key === "Backspace" || ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z")) {
+        event.preventDefault();
+        undoMeasurementPoint();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [clearMeasurement, closeMeasurement, finishMeasurement, measureOpen, undoMeasurementPoint]);
+
   const analyzeSelectedFeature = useCallback(() => {
     if (!selectedFeature?.assetHistory) return;
     openFailureConsequence(selectedFeature.assetHistory);
@@ -2329,7 +2621,7 @@ export default function App() {
       assetType: selectedFeature.assetHistory.assetType,
       returnTo: "map",
     });
-    window.location.assign(`/asset-history?${query}`);
+    openPortalResource(`/asset-history?${query}`);
   }, [selectedFeature]);
 
   const zoomToSearchResult = useCallback((result: AssetSearchResult) => {
@@ -2957,6 +3249,7 @@ export default function App() {
         applyAttributeFiltersToMap(map);
         refreshDuckDbGeoJsonSources(map);
         updateDrawDataOnMaps([map], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateMeasurementGraphicsOnMaps([map], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
         updateTerrainProfileGraphicsOnMaps([map], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         updateBearing();
         refreshCurrentZoom();
@@ -2976,6 +3269,7 @@ export default function App() {
         applyAttributeFiltersToMap(map);
         refreshDuckDbGeoJsonSources(map);
         updateDrawDataOnMaps([map], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateMeasurementGraphicsOnMaps([map], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
         updateTerrainProfileGraphicsOnMaps([map], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         updateBearing();
         refreshCurrentZoom();
@@ -3002,14 +3296,17 @@ export default function App() {
         refreshDuckDbGeoJsonSourcesOnMaps();
       });
       map.on("click", showClickedFeature);
+      map.on("click", handleMeasureClick);
       map.on("click", handleFailureConsequenceClick);
       map.on("click", handleTerrainProfileClick);
       map.on("click", handleDrawClick);
       map.on("dblclick", handleTerrainProfileDoubleClick);
       map.on("dblclick", handleDrawDoubleClick);
+      map.on("dblclick", handleMeasureDoubleClick);
       map.on("mousedown", handleDrawMouseDown);
       map.on("mousemove", handleDrawMouseMove);
       map.on("mousemove", handleTerrainProfileMouseMove);
+      map.on("mousemove", handleMeasureMouseMove);
       map.on("mouseup", handleDrawMouseUp);
       map.on("error", (event) => showError(new Error(event.error?.message || "MapLibre reported an error.")));
       return;
@@ -3022,6 +3319,7 @@ export default function App() {
       applyAttributeFiltersToMap(mapRef.current);
       refreshDuckDbGeoJsonSources(mapRef.current);
       updateDrawDataOnMaps([mapRef.current], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+      updateMeasurementGraphicsOnMaps([mapRef.current], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
       updateTerrainProfileGraphicsOnMaps([mapRef.current], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
       refreshCurrentZoom();
       refreshLayerPanel();
@@ -3044,6 +3342,9 @@ export default function App() {
     handleDrawMouseDown,
     handleDrawMouseMove,
     handleDrawMouseUp,
+    handleMeasureClick,
+    handleMeasureDoubleClick,
+    handleMeasureMouseMove,
     handleTerrainProfileClick,
     handleTerrainProfileDoubleClick,
     handleTerrainProfileMouseMove,
@@ -3093,6 +3394,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMap);
         refreshDuckDbGeoJsonSources(splitMap);
         updateDrawDataOnMaps([splitMap], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateMeasurementGraphicsOnMaps([splitMap], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
         updateTerrainProfileGraphicsOnMaps([splitMap], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         syncMapCamera(primaryMap, splitMap);
         setSplitMapReadyCounter((counter) => counter + 1);
@@ -3104,6 +3406,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMap);
         refreshDuckDbGeoJsonSources(splitMap);
         updateDrawDataOnMaps([splitMap], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateMeasurementGraphicsOnMaps([splitMap], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
         updateTerrainProfileGraphicsOnMaps([splitMap], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         setSplitMapReadyCounter((counter) => counter + 1);
       });
@@ -3116,12 +3419,15 @@ export default function App() {
         refreshDuckDbGeoJsonSources(splitMap);
       });
       splitMap.on("click", handleDrawClick);
+      splitMap.on("click", handleMeasureClick);
       splitMap.on("click", handleFailureConsequenceClick);
       splitMap.on("click", handleTerrainProfileClick);
       splitMap.on("dblclick", handleDrawDoubleClick);
+      splitMap.on("dblclick", handleMeasureDoubleClick);
       splitMap.on("dblclick", handleTerrainProfileDoubleClick);
       splitMap.on("mousedown", handleDrawMouseDown);
       splitMap.on("mousemove", handleDrawMouseMove);
+      splitMap.on("mousemove", handleMeasureMouseMove);
       splitMap.on("mousemove", handleTerrainProfileMouseMove);
       splitMap.on("mouseup", handleDrawMouseUp);
       splitMap.on("error", (event) => showError(new Error(event.error?.message || "Split map reported an error.")));
@@ -3137,6 +3443,7 @@ export default function App() {
         applyAttributeFiltersToMap(splitMapRef.current);
         refreshDuckDbGeoJsonSources(splitMapRef.current);
         updateDrawDataOnMaps([splitMapRef.current], drawFeaturesRef.current, drawDraftFeaturesRef.current, selectedDrawIdRef.current);
+        updateMeasurementGraphicsOnMaps([splitMapRef.current], measureModeRef.current, measureOpenRef.current ? measurePointsRef.current : [], measureHoverPointRef.current, measureCompleteRef.current);
         updateTerrainProfileGraphicsOnMaps([splitMapRef.current], terrainProfileResultRef.current, terrainProfileDrawPointsRef.current, terrainProfileDraftPointRef.current, terrainProfileHoverIndexRef.current);
         syncMapCamera(primaryMap, splitMapRef.current);
         setSplitMapReadyCounter((counter) => counter + 1);
@@ -3159,6 +3466,9 @@ export default function App() {
     handleDrawMouseDown,
     handleDrawMouseMove,
     handleDrawMouseUp,
+    handleMeasureClick,
+    handleMeasureDoubleClick,
+    handleMeasureMouseMove,
     handleTerrainProfileClick,
     handleTerrainProfileDoubleClick,
     handleTerrainProfileMouseMove,
@@ -3245,22 +3555,30 @@ export default function App() {
   };
 
   const cancelMapPdfSelection = useCallback(() => {
-    mapPdfSelectionDragRef.current = null;
     setMapPdfExportSelecting(false);
     setMapPdfSelectionFrame(null);
   }, []);
 
-  const exportSelectedMapPdf = useCallback(async (selection: MapPdfSelectionRect) => {
+  const discardPreparedMapPdf = useCallback(() => {
+    setMapPdfPreparedExport((current) => {
+      if (current) {
+        URL.revokeObjectURL(current.mapImageUrl);
+      }
+      return null;
+    });
+  }, []);
+
+  const prepareSelectedMapPdf = useCallback(async (selection: MapPdfSelectionRect) => {
     const map = mapRef.current;
     if (!map || mapPdfExporting) {
       return;
     }
 
     setMapPdfExporting(true);
-    setMapPdfExportSelecting(false);
-    setMapPdfSelectionFrame(null);
-    mapPdfSelectionDragRef.current = null;
     try {
+      const settings = mapPdfSettingsRef.current;
+      const layout = getMapPdfLayout(settings);
+      const renderSize = getMapPdfRenderSize(layout, settings.qualityDpi);
       const exportStyle = structuredClone(map.getStyle()) as MapStyle;
       DUCKDB_GEOJSON_SOURCE_CONFIGS.forEach((config) => {
         const cached = duckDbGeoJsonCoverageRef.current[config.sourceId];
@@ -3269,7 +3587,14 @@ export default function App() {
           source.data = cached.data as unknown as typeof source.data;
         }
       });
-      const exportMap = await createExportMap(map, exportStyle, selection);
+      const exportMap = await createExportMap(
+        map,
+        exportStyle,
+        selection,
+        renderSize.width,
+        renderSize.height,
+        renderSize.pixelRatio,
+      );
       let image: MapPdfImage;
       try {
         const canvas = exportMap.getCanvas();
@@ -3289,37 +3614,62 @@ export default function App() {
         exportMap.remove();
         container.remove();
       }
-      const northArrowImage = await imageUrlToJpegImage(northArrowCompassUrl, 640);
-      const scaleInfo = getMapPdfScaleInfo(map, selection);
+      const [northArrowImage, departmentLogoImage] = await Promise.all([
+        imageUrlToJpegImage(northArrowCompassUrl, 640, "north arrow"),
+        imageUrlToJpegImage(stormwaterLogoUrl, 900, "department logo"),
+      ]);
+      const scaleInfo = getMapPdfScaleInfo(map, selection, settings);
       const generatedAt = new Date();
-      const details = mapPdfDetailsRef.current;
       const pdf = createMapPdfBlob({
         image,
         northArrowImage,
-        details,
+        departmentLogoImage,
+        settings,
         generatedAt,
         mapBearing: map.getBearing(),
         scaleInfo,
       });
-      downloadBlob(pdf, `${fileSafeMapName(details.mapName)}_${dateStamp(generatedAt)}.pdf`);
+      const imageBuffer = image.data.buffer.slice(
+        image.data.byteOffset,
+        image.data.byteOffset + image.data.byteLength,
+      ) as ArrayBuffer;
+      discardPreparedMapPdf();
+      setMapPdfPreparedExport({
+        pdf,
+        mapImageUrl: URL.createObjectURL(new Blob([imageBuffer], { type: "image/jpeg" })),
+        generatedAt,
+        mapBearing: map.getBearing(),
+        scaleInfo,
+        settings,
+      });
+      setMapPdfExportSelecting(false);
+      setMapPdfSelectionFrame(null);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Could not export the current map.";
       showError(new Error(message));
-      toast.error("Could not export the selected map area to PDF.", { description: message });
+      toast.error("Could not prepare the map PDF preview.", { description: message });
     } finally {
       setMapPdfExporting(false);
     }
-  }, [mapPdfExporting]);
+  }, [discardPreparedMapPdf, mapPdfExporting]);
 
   const startMapPdfSelection = useCallback(() => {
-    if (mapPdfExporting) {
+    const map = mapRef.current;
+    if (!map || mapPdfExporting) {
       return;
     }
     const mapBounds = mapNodeRef.current?.getBoundingClientRect();
+    const layout = getMapPdfLayout(mapPdfSettingsRef.current);
+    mapPdfInitialCameraRef.current = {
+      center: [map.getCenter().lng, map.getCenter().lat],
+      zoom: map.getZoom(),
+      bearing: map.getBearing(),
+      pitch: map.getPitch(),
+    };
     setMapPdfExportSelecting(true);
     setMapPdfSelectionFrame(
       mapBounds?.width && mapBounds.height
-        ? createInitialMapPdfSelectionFrame(mapBounds.width, mapBounds.height)
+        ? createInitialMapPdfSelectionFrame(mapBounds.width, mapBounds.height, layout.mapFrameWidth / layout.mapFrameHeight)
         : null,
     );
     setAssetSearchOpen(false);
@@ -3333,29 +3683,65 @@ export default function App() {
     if (mapPdfExporting) {
       return;
     }
-    setMapPdfForm(mapPdfDetailsRef.current);
+    discardPreparedMapPdf();
+    setMapPdfForm({
+      ...mapPdfSettingsRef.current,
+      author: portalUserDisplayNameFromUrl(),
+    });
+    setMapPdfDetailsStep("template");
     setMapPdfDetailsOpen(true);
     setAssetSearchOpen(false);
     setPanelOpen(false);
     setBasemapPanelOpen(false);
     setLayerFilterEditor(null);
     setMapViewMenuOpen(false);
-  }, [mapPdfExporting]);
+  }, [discardPreparedMapPdf, mapPdfExporting]);
 
   const cancelMapPdfDetailsDialog = useCallback(() => {
     setMapPdfDetailsOpen(false);
   }, []);
 
-  const submitMapPdfDetails = useCallback((details: MapPdfExportDetails) => {
+  const submitMapPdfDetails = useCallback((details: MapPdfExportSettings) => {
     const nextDetails = {
+      ...details,
       mapName: details.mapName.trim() || "Storm Water Asset Risk Map",
-      author: details.author.trim(),
+      subtitle: details.subtitle.trim(),
+      author: portalUserDisplayNameFromUrl(),
     };
-    mapPdfDetailsRef.current = nextDetails;
+    mapPdfSettingsRef.current = nextDetails;
     setMapPdfForm(nextDetails);
     setMapPdfDetailsOpen(false);
     startMapPdfSelection();
   }, [startMapPdfSelection]);
+
+  const returnToMapPdfSetup = useCallback(() => {
+    cancelMapPdfSelection();
+    setMapPdfForm(mapPdfSettingsRef.current);
+    setMapPdfDetailsStep("setup");
+    setMapPdfDetailsOpen(true);
+  }, [cancelMapPdfSelection]);
+
+  const resetMapPdfExtent = useCallback(() => {
+    const map = mapRef.current;
+    const camera = mapPdfInitialCameraRef.current;
+    if (map && camera) {
+      map.jumpTo(camera);
+    }
+  }, []);
+
+  const applyMapPdfScale = useCallback((targetScale: number) => {
+    const map = mapRef.current;
+    if (!mapPdfSelectionFrame || !map || !Number.isFinite(targetScale) || targetScale <= 0) {
+      return;
+    }
+    const snappedTargetScale = snapMapScaleToHundred(targetScale);
+    const currentScale = getMapScaleDenominator(map, mapPdfSelectionFrame, mapPdfSettingsRef.current);
+    const zoomDelta = Math.log2(currentScale / snappedTargetScale);
+    const targetZoom = clampNumber(map.getZoom() + zoomDelta, map.getMinZoom(), map.getMaxZoom());
+    mapPdfScaleSnappingRef.current = true;
+    map.jumpTo({ zoom: targetZoom });
+    setMapPdfScaleDenominator(snappedTargetScale);
+  }, [mapPdfSelectionFrame]);
 
   useEffect(() => {
     if (!mapPdfExportSelecting) {
@@ -3377,64 +3763,93 @@ export default function App() {
     const frameId = window.requestAnimationFrame(() => {
       const mapBounds = mapNodeRef.current?.getBoundingClientRect();
       if (mapBounds?.width && mapBounds.height) {
-        setMapPdfSelectionFrame(createInitialMapPdfSelectionFrame(mapBounds.width, mapBounds.height));
+        const layout = getMapPdfLayout(mapPdfSettingsRef.current);
+        setMapPdfSelectionFrame(createInitialMapPdfSelectionFrame(
+          mapBounds.width,
+          mapBounds.height,
+          layout.mapFrameWidth / layout.mapFrameHeight,
+        ));
       }
     });
     return () => window.cancelAnimationFrame(frameId);
   }, [mapPdfExportSelecting, mapPdfSelectionFrame]);
 
-  const startMapPdfSelectionFrameDrag = useCallback((mode: MapPdfSelectionDragMode, event: React.PointerEvent<HTMLElement>) => {
-    if (event.button !== 0 || mapPdfExporting || !mapPdfSelectionFrame) {
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapPdfExportSelecting || !mapPdfSelectionFrame || !map) {
       return;
     }
-    event.preventDefault();
-    event.stopPropagation();
-    mapPdfSelectionDragRef.current = {
-      pointerId: event.pointerId,
-      mode,
-      startX: event.clientX,
-      startY: event.clientY,
-      startFrame: mapPdfSelectionFrame,
+    const snapScale = () => {
+      const currentScale = getMapScaleDenominator(map, mapPdfSelectionFrame, mapPdfSettingsRef.current);
+      if (mapPdfScaleSnappingRef.current) {
+        mapPdfScaleSnappingRef.current = false;
+        setMapPdfScaleDenominator(snapMapScaleToHundred(currentScale));
+        return;
+      }
+      const snappedScale = snapMapScaleToHundred(currentScale);
+      if (Math.abs(currentScale - snappedScale) / snappedScale > 0.002) {
+        const zoomDelta = Math.log2(currentScale / snappedScale);
+        mapPdfScaleSnappingRef.current = true;
+        map.jumpTo({
+          zoom: clampNumber(map.getZoom() + zoomDelta, map.getMinZoom(), map.getMaxZoom()),
+        });
+      }
+      setMapPdfScaleDenominator(snappedScale);
     };
-    event.currentTarget.setPointerCapture(event.pointerId);
-  }, [mapPdfExporting, mapPdfSelectionFrame]);
+    const updateScale = () => {
+      setMapPdfScaleDenominator(snapMapScaleToHundred(
+        getMapScaleDenominator(map, mapPdfSelectionFrame, mapPdfSettingsRef.current),
+      ));
+    };
+    map.on("zoomend", snapScale);
+    map.on("moveend", updateScale);
+    snapScale();
+    return () => {
+      map.off("zoomend", snapScale);
+      map.off("moveend", updateScale);
+      mapPdfScaleSnappingRef.current = false;
+    };
+  }, [mapPdfExportSelecting, mapPdfSelectionFrame]);
 
-  const moveMapPdfSelectionFrame = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    const drag = mapPdfSelectionDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    setMapPdfSelectionFrame(
-      updateMapPdfSelectionFrameForDrag(
-        drag.startFrame,
-        drag.mode,
-        event.clientX - drag.startX,
-        event.clientY - drag.startY,
-      ),
-    );
-  }, []);
-
-  const finishMapPdfSelectionFrameDrag = useCallback((event: React.PointerEvent<HTMLElement>) => {
-    const drag = mapPdfSelectionDragRef.current;
-    if (!drag || drag.pointerId !== event.pointerId) {
-      return;
-    }
-    event.preventDefault();
-    event.stopPropagation();
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
-    }
-    mapPdfSelectionDragRef.current = null;
-  }, []);
-
-  const exportMapPdfSelectionFrame = useCallback(() => {
+  const previewMapPdfSelectionFrame = useCallback(() => {
     if (!mapPdfSelectionFrame || mapPdfExporting) {
       return;
     }
-    void exportSelectedMapPdf(mapPdfSelectionFrame);
-  }, [exportSelectedMapPdf, mapPdfExporting, mapPdfSelectionFrame]);
+    void prepareSelectedMapPdf(mapPdfSelectionFrame);
+  }, [mapPdfExporting, mapPdfSelectionFrame, prepareSelectedMapPdf]);
+
+  const returnToMapPdfExtent = useCallback(() => {
+    discardPreparedMapPdf();
+    startMapPdfSelection();
+  }, [discardPreparedMapPdf, startMapPdfSelection]);
+
+  const downloadPreparedMapPdf = useCallback(async () => {
+    const prepared = mapPdfPreparedExport;
+    if (!prepared) {
+      return;
+    }
+    const fileName = `${fileSafeMapName(prepared.settings.mapName)}_${dateStamp(prepared.generatedAt)}.pdf`;
+    try {
+      if (isDesktopRuntime()) {
+        const savedPath = await saveExportAs(
+          fileName,
+          new Uint8Array(await prepared.pdf.arrayBuffer()),
+          "pdf",
+          true,
+        );
+        if (!savedPath) {
+          return;
+        }
+      } else {
+        downloadBlob(prepared.pdf, fileName);
+      }
+      discardPreparedMapPdf();
+      toast.success(isDesktopRuntime() ? "The map PDF was saved and opened." : "The map PDF was exported.");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "The map PDF could not be saved or opened.";
+      toast.error("Could not export the map PDF.", { description: message });
+    }
+  }, [discardPreparedMapPdf, mapPdfPreparedExport]);
 
   const openLayerFilterEditor = useCallback((layer: StyleLayer) => {
     const target = layerFilterTarget(layer);
@@ -3745,9 +4160,20 @@ export default function App() {
       {mapPdfDetailsOpen ? (
         <MapPdfDetailsDialog
           details={mapPdfForm}
+          step={mapPdfDetailsStep}
           onCancel={cancelMapPdfDetailsDialog}
           onChange={setMapPdfForm}
+          onStepChange={setMapPdfDetailsStep}
           onSubmit={submitMapPdfDetails}
+        />
+      ) : null}
+
+      {mapPdfPreparedExport ? (
+        <MapPdfReviewDialog
+          prepared={mapPdfPreparedExport}
+          onBack={returnToMapPdfExtent}
+          onCancel={discardPreparedMapPdf}
+          onExport={downloadPreparedMapPdf}
         />
       ) : null}
 
@@ -3763,12 +4189,13 @@ export default function App() {
               <MapPdfSelectionOverlay
                 frame={mapPdfSelectionFrame}
                 exporting={mapPdfExporting}
+                scaleDenominator={mapPdfScaleDenominator}
+                settings={mapPdfForm}
+                onBack={returnToMapPdfSetup}
                 onCancel={cancelMapPdfSelection}
-                onExport={exportMapPdfSelectionFrame}
-                onPointerCancel={finishMapPdfSelectionFrameDrag}
-                onPointerDown={startMapPdfSelectionFrameDrag}
-                onPointerMove={moveMapPdfSelectionFrame}
-                onPointerUp={finishMapPdfSelectionFrameDrag}
+                onPreview={previewMapPdfSelectionFrame}
+                onReset={resetMapPdfExtent}
+                onScaleChange={applyMapPdfScale}
               />
             ) : null}
           </div>
@@ -3837,24 +4264,38 @@ export default function App() {
             drawActive={drawModeActive}
             drawFeatureCount={drawFeatures.length}
             drawTool={drawTool}
-            mapPdfExportActive={mapPdfExportSelecting}
+            mapPdfExportActive={mapPdfExportSelecting || mapPdfDetailsOpen || Boolean(mapPdfPreparedExport)}
             mapPdfExporting={mapPdfExporting}
             map3dActive={map3dEnabled}
             map3dTransitioning={map3dTransitioning}
             mapViewMenuOpen={mapViewMenuOpen}
+            measureActive={measureOpen}
             mode={mapViewMode}
             selectedDrawId={selectedDrawId}
             onClearDrawFeatures={clearDrawFeatures}
             onDeleteSelectedDrawFeature={deleteSelectedDrawFeature}
-            onDrawToggle={() => setDrawModeActive((active) => !active)}
+            onDrawToggle={() => {
+              if (measureOpenRef.current) closeMeasurement();
+              setDrawModeActive((active) => !active);
+            }}
             onDrawToolChange={setDrawTool}
             onMapPdfExportToggle={mapPdfExportSelecting ? cancelMapPdfSelection : openMapPdfDetailsDialog}
             onMap3dToggle={toggle3dMap}
             onMapViewMenuToggle={() => setMapViewMenuOpen((open) => !open)}
             onModeChange={changeMapViewMode}
-            onAssetExtractToggle={toggleAssetExtract}
-            onFailureConsequenceToggle={toggleFailureConsequence}
-            onTerrainProfileToggle={toggleTerrainProfile}
+            onAssetExtractToggle={() => {
+              if (measureOpenRef.current) closeMeasurement();
+              toggleAssetExtract();
+            }}
+            onFailureConsequenceToggle={() => {
+              if (measureOpenRef.current) closeMeasurement();
+              toggleFailureConsequence();
+            }}
+            onMeasureToggle={toggleMeasurement}
+            onTerrainProfileToggle={() => {
+              if (measureOpenRef.current) closeMeasurement();
+              toggleTerrainProfile();
+            }}
           />
           <div className="map-tiles-navigation-strip grid w-10 overflow-visible border-t border-[var(--control-border)] pt-1">
             <MapControlButton label="Zoom in" onClick={() => mapRef.current?.zoomIn({ duration: 180 })}>
@@ -3868,6 +4309,20 @@ export default function App() {
             </MapControlButton>
           </div>
         </div>
+
+        <MeasurePanel
+          canFinish={measurePoints.length >= (measureMode === "distance" ? 2 : 3)}
+          complete={measureComplete}
+          mode={measureMode}
+          open={measureOpen}
+          pointCount={measurePoints.length}
+          resultLabel={measureResultLabel}
+          onClear={clearMeasurement}
+          onClose={closeMeasurement}
+          onFinish={() => finishMeasurement()}
+          onModeChange={changeMeasurementMode}
+          onUndo={undoMeasurementPoint}
+        />
 
         {map3dTransitioning ? (
           <div className="pointer-events-none absolute left-1/2 top-4 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-[var(--panel-border)] bg-[color-mix(in_srgb,var(--panel-bg)_94%,transparent)] px-3 py-2 text-[12px] font-semibold text-[var(--panel-text)] shadow-[0_10px_28px_rgba(0,0,0,.2)] backdrop-blur-md" role="status" aria-live="polite">
@@ -4973,30 +5428,80 @@ function HeaderIconButton({
   );
 }
 
+function MapPdfTemplateThumbnail({ template }: { template: MapPdfTemplateDefinition }) {
+  const landscape = template.page.orientation === "landscape";
+  const titleBlockLabel = landscape ? "Right title block" : "Bottom title block";
+  return (
+    <span className="relative grid h-24 place-items-center border border-[var(--control-border)] bg-[var(--panel-soft)] pb-4 pt-2">
+      <span
+        className={`grid overflow-hidden border border-slate-500 bg-white shadow-sm ${
+          landscape
+            ? "h-[58px] w-[118px] grid-cols-[minmax(0,1fr)_24px]"
+            : "h-[72px] w-[54px] grid-rows-[minmax(0,1fr)_18px]"
+        }`}
+        aria-label={`${template.name}: ${titleBlockLabel.toLowerCase()}`}
+      >
+        <span className="relative overflow-hidden bg-[#dcebf3]">
+          <span className="absolute inset-[5px] border border-white/80 bg-gradient-to-br from-[#bed8e7] via-[#e8f1f6] to-[#b6cedc]">
+            <span className="absolute left-[12%] top-[24%] h-px w-[70%] rotate-[-13deg] bg-[#6b9bb4]" />
+            <span className="absolute bottom-[24%] left-[18%] h-px w-[65%] rotate-[17deg] bg-[#7ca8bd]" />
+          </span>
+          <span className="absolute inset-0 grid place-items-center text-[7px] font-black tracking-[.12em] text-[#355b70]">MAP</span>
+        </span>
+        <span className={`grid divide-slate-400 bg-white ${landscape ? "grid-rows-4 divide-y" : "grid-cols-4 divide-x"}`}>
+          <span className="grid place-items-center text-[5px] font-black text-slate-700">N</span>
+          <span className="bg-slate-50" />
+          <span className="grid place-items-center"><span className={landscape ? "h-3 w-px bg-slate-500" : "h-px w-3 bg-slate-500"} /></span>
+          <span className="bg-[#d7edf7]" />
+        </span>
+      </span>
+      <span className="absolute inset-x-0 bottom-1 text-center text-[8px] font-black uppercase tracking-[.07em] text-[var(--panel-muted)]">{titleBlockLabel}</span>
+    </span>
+  );
+}
+
 function MapPdfDetailsDialog({
   details,
+  step,
   onCancel,
   onChange,
+  onStepChange,
   onSubmit,
 }: {
-  details: MapPdfExportDetails;
+  details: MapPdfExportSettings;
+  step: MapPdfDetailsStep;
   onCancel: () => void;
-  onChange: (details: MapPdfExportDetails) => void;
-  onSubmit: (details: MapPdfExportDetails) => void;
+  onChange: (details: MapPdfExportSettings) => void;
+  onStepChange: (step: MapPdfDetailsStep) => void;
+  onSubmit: (details: MapPdfExportSettings) => void;
 }) {
-  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    onSubmit(details);
+  const selectedTemplate = mapPdfTemplate(details.templateId);
+
+  const chooseTemplate = (template: MapPdfTemplateDefinition) => {
+    onChange({
+      ...details,
+      templateId: template.id,
+      mapName: template.defaults.title,
+      subtitle: template.defaults.subtitle,
+      pageSize: template.page.size,
+      orientation: template.page.orientation,
+      qualityDpi: template.page.qualityDpi,
+    });
   };
 
   return (
     <div className="fixed inset-0 z-[70] grid place-items-center bg-[#001827]/35 px-4 backdrop-blur-sm" role="dialog" aria-modal="true">
-      <form
-        className="grid w-full max-w-[440px] border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_50px_rgba(0,0,0,.32)]"
-        onSubmit={handleSubmit}
+      <div
+        className="grid max-h-[calc(100vh-32px)] w-full max-w-[720px] overflow-hidden rounded-sm border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_18px_50px_rgba(0,0,0,.32)]"
       >
-        <header className="flex items-center justify-between border-b border-[var(--panel-border)] bg-[var(--brand-bg)] px-4 py-3 text-[var(--brand-fg)]">
-          <strong className="text-[13px] font-black uppercase tracking-[.08em]">Export Map PDF</strong>
+        <header className="flex items-center justify-between border-b border-[var(--panel-border)] bg-[var(--brand-bg)] px-5 py-4 text-[var(--brand-fg)]">
+          <div className="flex items-center gap-3">
+            <span className="grid h-9 w-9 place-items-center bg-white/12"><MapIcon className="h-5 w-5" /></span>
+            <div>
+              <strong className="block text-[15px] font-black">Export map</strong>
+              <span className="text-[11px] font-semibold text-white/75">{step === "template" ? "Step 1 of 4 · Choose a template" : "Step 2 of 4 · Page setup"}</span>
+            </div>
+          </div>
           <button
             className="grid h-8 w-8 place-items-center hover:bg-white/12"
             type="button"
@@ -5007,25 +5512,139 @@ function MapPdfDetailsDialog({
             <X className="h-4 w-4" />
           </button>
         </header>
-        <section className="grid gap-4 p-4">
+        <div className="grid grid-cols-4 border-b border-[var(--panel-border)] bg-[var(--panel-soft)] text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">
+          <button className={`px-4 py-3 text-left ${step === "template" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "hover:text-[var(--accent)]"}`} type="button" onClick={() => onStepChange("template")}>1 Template</button>
+          <button className={`px-4 py-3 text-left ${step === "setup" ? "border-b-2 border-[var(--accent)] text-[var(--accent)]" : "hover:text-[var(--accent)]"}`} type="button" onClick={() => onStepChange("setup")}>2 Page setup</button>
+          <span className="px-4 py-3">3 Map extent</span>
+          <span className="px-4 py-3">4 Review</span>
+        </div>
+        <section className="grid max-h-[calc(100vh-220px)] gap-5 overflow-y-auto p-5">
+          {step === "template" ? (
+            <div className="grid gap-4">
+              <div>
+                <p className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Choose a map template</p>
+                <h2 className="mt-1 text-[20px] font-black text-[var(--panel-text)]">Start with a layout for your audience</h2>
+                <p className="mt-1 text-[12px] leading-5 text-[var(--panel-muted)]">The template controls the title block, branding, and default page setup. You can refine the title and orientation in the next step.</p>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                {MAP_PDF_TEMPLATES.map((template) => (
+                  <button
+                    key={template.id}
+                    className={`group grid gap-3 border p-3 text-left transition-colors ${details.templateId === template.id ? "border-[var(--accent)] bg-[var(--accent)]/8 ring-2 ring-[var(--accent)]/25" : "border-[var(--control-border)] bg-[var(--control-bg)] hover:border-[var(--accent)] hover:bg-[var(--row-hover)]"}`}
+                    type="button"
+                    aria-pressed={details.templateId === template.id}
+                    onClick={() => chooseTemplate(template)}
+                  >
+                    <MapPdfTemplateThumbnail template={template} />
+                    <span>
+                      <strong className="block text-[14px] font-black text-[var(--panel-text)]">{template.name}</strong>
+                      <span className="mt-1 block text-[11px] leading-4 text-[var(--panel-muted)]">{template.description}</span>
+                    </span>
+                    <span className="text-[10px] font-black uppercase tracking-[.08em] text-[var(--accent)]">{mapPdfPageSize(template.page.size).shortLabel} · {template.page.orientation}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <>
+          <div>
+            <p className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Page setup</p>
+            <h2 className="mt-1 text-[20px] font-black text-[var(--panel-text)]">Configure the printed page</h2>
+            <p className="mt-1 text-[12px] leading-5 text-[var(--panel-muted)]">Choose the page size, orientation, title, description, and output quality before setting the map extent.</p>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 border border-[var(--control-border)] bg-[var(--panel-soft)] px-3 py-2">
+            <div><span className="block text-[10px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Selected template</span><strong className="text-[13px] text-[var(--panel-text)]">{selectedTemplate.name}</strong></div>
+                <button className="h-8 border border-[var(--control-border)] px-3 text-[11px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]" type="button" onClick={() => onStepChange("template")}>Change template</button>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1.5">
+              <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">US page size</span>
+              <select
+                className="h-11 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+                value={details.pageSize}
+                onChange={(event) => onChange({ ...details, pageSize: event.target.value as MapPdfPageSizeId })}
+              >
+                {MAP_PDF_PAGE_SIZES.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <div className="grid gap-1.5" role="group" aria-labelledby="map-pdf-orientation-label">
+              <span
+                id="map-pdf-orientation-label"
+                className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]"
+              >
+                Orientation
+              </span>
+              <div className="grid h-11 grid-cols-2 gap-2">
+                {(["landscape", "portrait"] as MapPdfOrientation[]).map((orientation) => (
+                  <button
+                    key={orientation}
+                    className={`border px-3 text-[13px] font-bold capitalize transition-colors ${
+                      details.orientation === orientation
+                        ? "border-[var(--accent)] bg-[var(--accent)] text-white"
+                        : "border-[var(--control-border)] bg-[var(--control-bg)] text-[var(--control-text)] hover:border-[var(--accent)]"
+                    }`}
+                    type="button"
+                    aria-pressed={details.orientation === orientation}
+                    onClick={() => onChange({ ...details, orientation })}
+                  >
+                    {orientation}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          <p className="-mt-2 text-[11px] font-semibold text-[var(--panel-muted)]">
+            The title and information block stays on the shorter page edge: right side for landscape and bottom for portrait.
+          </p>
           <label className="grid gap-1">
-            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Map name</span>
+            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Map title</span>
             <input
-              className="h-10 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+              className="h-11 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+              maxLength={100}
+              required
               value={details.mapName}
               onChange={(event) => onChange({ ...details, mapName: event.target.value })}
             />
           </label>
           <label className="grid gap-1">
-            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Author</span>
+            <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Subtitle or project description <span className="font-semibold normal-case tracking-normal">(optional)</span></span>
             <input
-              className="h-10 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
-              value={details.author}
-              onChange={(event) => onChange({ ...details, author: event.target.value })}
+              className="h-11 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+              maxLength={140}
+              value={details.subtitle}
+              onChange={(event) => onChange({ ...details, subtitle: event.target.value })}
             />
           </label>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="grid gap-1">
+              <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Prepared by</span>
+              <input
+                className="h-11 cursor-not-allowed border border-[var(--control-border)] bg-[var(--panel-soft)] px-3 text-[14px] font-semibold text-[var(--panel-muted)] outline-none"
+                readOnly
+                value={details.author}
+              />
+            </label>
+            <label className="grid gap-1">
+              <span className="text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">Output quality</span>
+              <select
+                className="h-11 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 text-[14px] font-semibold text-[var(--control-text)] outline-none focus:border-[var(--accent)]"
+                value={details.qualityDpi}
+                onChange={(event) => onChange({ ...details, qualityDpi: Number(event.target.value) as MapPdfQualityDpi })}
+              >
+                <option value={150}>Standard · 150 DPI</option>
+                <option value={300}>High quality · 300 DPI</option>
+              </select>
+            </label>
+          </div>
+          <div className="border-l-4 border-[var(--accent)] bg-[var(--panel-soft)] px-4 py-3 text-[12px] leading-5 text-[var(--panel-muted)]">
+            The Department logo, north arrow, scale bar, generated date, author, and page number are added automatically.
+          </div>
+            </>
+          )}
         </section>
-        <footer className="flex justify-end gap-2 border-t border-[var(--panel-border)] p-4">
+        <footer className="flex items-center justify-between gap-2 border-t border-[var(--panel-border)] p-4">
           <button
             className="h-9 border border-[var(--control-border)] px-4 text-[12px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]"
             type="button"
@@ -5033,11 +5652,30 @@ function MapPdfDetailsDialog({
           >
             Cancel
           </button>
-          <button className="h-9 bg-[var(--accent)] px-4 text-[12px] font-black text-white hover:brightness-105" type="submit">
-            Set export area
-          </button>
+          <div className="flex items-center gap-2">
+            {step === "setup" ? (
+              <button
+                className="flex h-9 items-center gap-2 border border-[var(--control-border)] px-4 text-[12px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]"
+                type="button"
+                onClick={() => onStepChange("template")}
+              >
+                <ChevronLeft className="h-4 w-4" /> Previous
+              </button>
+            ) : null}
+            {step === "template" ? (
+              <button
+                className="flex h-9 items-center gap-2 bg-[var(--accent)] px-4 text-[12px] font-black text-white hover:brightness-105"
+                type="button"
+                onClick={() => onStepChange("setup")}
+              >
+                Next <ChevronRight className="h-4 w-4" />
+              </button>
+            ) : (
+              <button className="flex h-9 items-center gap-2 bg-[var(--accent)] px-4 text-[12px] font-black text-white hover:brightness-105" type="button" onClick={() => onSubmit(details)}>Set map extent <ChevronRight className="h-4 w-4" /></button>
+            )}
+          </div>
         </footer>
-      </form>
+      </div>
     </div>
   );
 }
@@ -5045,99 +5683,299 @@ function MapPdfDetailsDialog({
 function MapPdfSelectionOverlay({
   frame,
   exporting,
+  scaleDenominator,
+  settings,
+  onBack,
   onCancel,
-  onExport,
-  onPointerCancel,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp,
+  onPreview,
+  onReset,
+  onScaleChange,
 }: {
   frame: MapPdfSelectionRect | null;
   exporting: boolean;
+  scaleDenominator: number;
+  settings: MapPdfExportSettings;
+  onBack: () => void;
   onCancel: () => void;
-  onExport: () => void;
-  onPointerCancel: (event: React.PointerEvent<HTMLElement>) => void;
-  onPointerDown: (mode: MapPdfSelectionDragMode, event: React.PointerEvent<HTMLElement>) => void;
-  onPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
-  onPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
+  onPreview: () => void;
+  onReset: () => void;
+  onScaleChange: (scale: number) => void;
 }) {
-  const handles: Array<{ mode: MapPdfSelectionDragMode; className: string; label: string }> = [
-    { mode: "resize-nw", className: "left-0 top-0 -translate-x-1/2 -translate-y-1/2 cursor-nwse-resize", label: "Resize export area from top left" },
-    { mode: "resize-ne", className: "right-0 top-0 translate-x-1/2 -translate-y-1/2 cursor-nesw-resize", label: "Resize export area from top right" },
-    { mode: "resize-sw", className: "bottom-0 left-0 -translate-x-1/2 translate-y-1/2 cursor-nesw-resize", label: "Resize export area from bottom left" },
-    { mode: "resize-se", className: "bottom-0 right-0 translate-x-1/2 translate-y-1/2 cursor-nwse-resize", label: "Resize export area from bottom right" },
-  ];
+  const pageSize = mapPdfPageSize(settings.pageSize);
 
   return (
     <div
-      className="absolute inset-0 z-30 bg-[#001827]/10"
+      className="pointer-events-none absolute inset-0 z-30"
       role="presentation"
-      style={{ touchAction: "none" }}
     >
-      <div className="absolute left-1/2 top-4 z-10 flex -translate-x-1/2 items-center gap-2 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--control-text)] shadow-[0_8px_24px_rgba(0,0,0,.22)]">
-        <span>
-          {exporting
-            ? "Exporting selected map area..."
-            : "Move or resize the PDF export frame, then export."}
+      <div className="pointer-events-auto absolute left-1/2 top-4 z-10 flex w-[min(960px,calc(100%-112px))] -translate-x-1/2 flex-wrap items-center gap-2 border border-[var(--control-border)] bg-[var(--control-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--control-text)] shadow-[0_8px_24px_rgba(0,0,0,.24)]">
+        <div className="mr-auto min-w-[220px]">
+          <strong className="block text-[12px] font-black text-[var(--panel-text)]">Step 3 of 4 · Set map extent</strong>
+          <span className="text-[var(--panel-muted)]">Pan or zoom the map beneath the fixed print frame.</span>
+        </div>
+        <span className="border border-[var(--control-border)] bg-[var(--panel-soft)] px-2 py-1.5 font-bold">
+          {pageSize.shortLabel} · {settings.orientation === "landscape" ? "Landscape" : "Portrait"}
         </span>
+        <label className="flex h-8 items-center gap-2 border border-[var(--control-border)] bg-[var(--panel-soft)] px-2">
+          <span className="font-black uppercase tracking-[.06em] text-[var(--panel-muted)]">Scale</span>
+          <input
+            className="h-7 w-[112px] bg-[var(--control-bg)] px-2 font-bold text-[var(--control-text)] outline-none"
+            type="number"
+            min={100}
+            step={100}
+            value={scaleDenominator}
+            onChange={(event) => onScaleChange(Number(event.target.value))}
+            aria-label="Map scale denominator"
+          />
+        </label>
         <button
-          className="h-7 bg-[var(--accent)] px-3 text-[10px] font-black uppercase tracking-[.08em] text-white disabled:cursor-wait disabled:opacity-70"
+          className="h-8 border border-[var(--control-border)] px-3 font-black text-[var(--accent)] hover:bg-[var(--row-hover)]"
           type="button"
-          disabled={exporting || !frame}
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onExport();
-          }}
+          onClick={onBack}
         >
-          Export PDF
+          Back
         </button>
         <button
-          className="h-7 border border-[var(--control-border)] px-2 text-[10px] font-black uppercase tracking-[.08em] text-[var(--accent)] hover:bg-[var(--row-hover)]"
+          className="h-8 border border-[var(--control-border)] px-3 font-black text-[var(--accent)] hover:bg-[var(--row-hover)]"
           type="button"
-          onClick={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            onCancel();
-          }}
+          onClick={onReset}
         >
-          Cancel
+          Reset extent
+        </button>
+        <button
+          className="flex h-8 items-center gap-1.5 bg-[var(--accent)] px-3 font-black text-white disabled:cursor-wait disabled:opacity-70"
+          type="button"
+          disabled={exporting || !frame}
+          onClick={onPreview}
+        >
+          {exporting ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <ChevronRight className="h-4 w-4" />}
+          {exporting ? "Preparing..." : "Preview"}
+        </button>
+        <button
+          className="grid h-8 w-8 place-items-center text-[var(--panel-muted)] hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
+          type="button"
+          title="Cancel map export"
+          aria-label="Cancel map export"
+          onClick={onCancel}
+        >
+          <X className="h-4 w-4" />
         </button>
       </div>
       {frame ? (
         <div
-          className="absolute cursor-move border-2 border-[var(--accent)] bg-[var(--accent)]/10 shadow-[0_0_0_9999px_rgba(0,24,39,.18)]"
+          className="pointer-events-none absolute border-2 border-[var(--accent)] bg-transparent shadow-[0_0_0_9999px_rgba(0,24,39,.28)]"
           style={{
             left: frame.left,
             top: frame.top,
             width: frame.width,
             height: frame.height,
           }}
-          onPointerCancel={onPointerCancel}
-          onPointerDown={(event) => onPointerDown("move", event)}
-          onPointerMove={onPointerMove}
-          onPointerUp={onPointerUp}
         >
-          <div className="pointer-events-none absolute left-0 right-0 top-1/2 border-t border-dashed border-white/80" />
-          <div className="pointer-events-none absolute bottom-0 top-0 left-1/2 border-l border-dashed border-white/80" />
-          <span className="pointer-events-none absolute left-2 top-2 bg-[#001827]/80 px-2 py-1 text-[10px] font-black uppercase tracking-[.08em] text-white">
-            PDF map area
+          <span className="absolute left-2 top-2 bg-[#001827]/82 px-2 py-1 text-[10px] font-black uppercase tracking-[.08em] text-white">
+            Printable map frame · 1:{scaleDenominator.toLocaleString("en-US")}
           </span>
-          {handles.map((handle) => (
-            <button
-              key={handle.mode}
-              className={`absolute h-4 w-4 border-2 border-white bg-[var(--accent)] shadow-[0_1px_6px_rgba(0,0,0,.35)] ${handle.className}`}
-              type="button"
-              title={handle.label}
-              aria-label={handle.label}
-              onPointerCancel={onPointerCancel}
-              onPointerDown={(event) => onPointerDown(handle.mode, event)}
-              onPointerMove={onPointerMove}
-              onPointerUp={onPointerUp}
-            />
-          ))}
+          <span className="absolute -left-1 -top-1 h-4 w-4 border-l-4 border-t-4 border-white" />
+          <span className="absolute -right-1 -top-1 h-4 w-4 border-r-4 border-t-4 border-white" />
+          <span className="absolute -bottom-1 -left-1 h-4 w-4 border-b-4 border-l-4 border-white" />
+          <span className="absolute -bottom-1 -right-1 h-4 w-4 border-b-4 border-r-4 border-white" />
         </div>
       ) : null}
+    </div>
+  );
+}
+
+function MapPdfReviewDialog({
+  prepared,
+  onBack,
+  onCancel,
+  onExport,
+}: {
+  prepared: MapPdfPreparedExport;
+  onBack: () => void;
+  onCancel: () => void;
+  onExport: () => void;
+}) {
+  const layout = getMapPdfLayout(prepared.settings);
+  const template = mapPdfTemplate(prepared.settings.templateId);
+  const pageScale = mapPdfPageScale(layout.pageWidth, layout.pageHeight);
+  const titleCells = mapPdfTitleBlockCells(
+    prepared.settings.templateId,
+    layout.titleBlockPlacement,
+    prepared.settings,
+    layout.titleBlockWidth,
+    pageScale,
+  );
+  const metadataCells = mapPdfMetadataCells(
+    prepared.settings.author,
+    prepared.generatedAt,
+    prepared.scaleInfo.scaleDenominator,
+  );
+  const metadataMaxLines = Math.max(...metadataCells.map((cell) => 1 + cell.values.length));
+  const documentFooter = mapPdfDocumentFooter(prepared.settings.templateId, prepared.mapBearing);
+  const pageSize = mapPdfPageSize(prepared.settings.pageSize);
+  const ptToPx = (points: number) => `${((points * pageScale * 4) / 3).toFixed(2)}px`;
+  const typography = template.typography;
+  const [pdfPreviewUrl, setPdfPreviewUrl] = useState("");
+
+  useEffect(() => {
+    const url = URL.createObjectURL(prepared.pdf);
+    setPdfPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [prepared.pdf]);
+
+  const asPercent = (value: number, total: number) => `${(value / total) * 100}%`;
+  const mapStyle = {
+    left: asPercent(layout.mapFrameX, layout.pageWidth),
+    bottom: asPercent(layout.mapFrameY, layout.pageHeight),
+    width: asPercent(layout.mapFrameWidth, layout.pageWidth),
+    height: asPercent(layout.mapFrameHeight, layout.pageHeight),
+  };
+  const titleStyle = {
+    left: asPercent(layout.titleBlockX, layout.pageWidth),
+    bottom: asPercent(layout.titleBlockY, layout.pageHeight),
+    width: asPercent(layout.titleBlockWidth, layout.pageWidth),
+    height: asPercent(layout.titleBlockHeight, layout.pageHeight),
+  };
+
+  return (
+    <div className="fixed inset-0 z-[75] grid place-items-center bg-[#001827]/48 px-4 py-4 backdrop-blur-sm" role="dialog" aria-modal="true">
+      <section className="grid max-h-full w-full max-w-[1120px] grid-rows-[auto_auto_minmax(0,1fr)_auto] overflow-hidden rounded-sm border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_22px_64px_rgba(0,0,0,.38)]">
+        <header className="flex items-center justify-between border-b border-[var(--panel-border)] bg-[var(--brand-bg)] px-5 py-4 text-[var(--brand-fg)]">
+          <div className="flex items-center gap-3">
+            <span className="grid h-9 w-9 place-items-center bg-white/12"><MapIcon className="h-5 w-5" /></span>
+            <div>
+              <strong className="block text-[15px] font-black">Review map layout</strong>
+              <span className="text-[11px] font-semibold text-white/75">Step 4 of 4 · Review and export</span>
+            </div>
+          </div>
+          <button className="grid h-8 w-8 place-items-center hover:bg-white/12" type="button" title="Cancel export" aria-label="Cancel export" onClick={onCancel}>
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+        <div className="grid grid-cols-4 border-b border-[var(--panel-border)] bg-[var(--panel-soft)] text-[11px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">
+          <span className="px-4 py-3">1 Template</span>
+          <span className="px-4 py-3">2 Page setup</span>
+          <span className="px-4 py-3">3 Map extent</span>
+          <span className="border-b-2 border-[var(--accent)] px-4 py-3 text-[var(--accent)]">4 Review</span>
+        </div>
+        <div className="grid min-h-0 content-start justify-items-center overflow-auto bg-[#dce6ed] p-5">
+          <div
+            className="relative w-full max-w-[980px] overflow-hidden bg-white shadow-[0_10px_35px_rgba(0,0,0,.25)]"
+            style={{ aspectRatio: `${layout.pageWidth} / ${layout.pageHeight}` }}
+          >
+            <div className="absolute overflow-hidden border border-slate-500 bg-slate-100" style={mapStyle}>
+              <img className="h-full w-full object-cover" src={prepared.mapImageUrl} alt="Map PDF preview" />
+              <div className="absolute bottom-[3%] right-[3%] min-w-[92px] border border-slate-700 bg-white/92 px-2 py-1 text-center text-[8px] font-bold text-slate-900">
+                Scale 1:{prepared.scaleInfo.scaleDenominator.toLocaleString("en-US")}
+              </div>
+            </div>
+            <div
+              className={`absolute overflow-hidden border border-slate-700 bg-white text-slate-900 ${
+                layout.titleBlockPlacement === "right" ? "flex flex-col" : "flex items-stretch"
+              }`}
+              style={titleStyle}
+            >
+              <div className={`${layout.titleBlockPlacement === "right" ? "shrink-0 border-b" : "border-r"} grid place-items-center border-slate-700 p-2`} style={layout.titleBlockPlacement === "right" ? { height: `${titleCells.northArrow}%` } : { width: `${titleCells.northArrow}%` }}>
+                <img
+                  className="max-h-[82%] max-w-[82%] object-contain"
+                  src={northArrowCompassUrl}
+                  alt="North arrow"
+                  style={{ transform: `rotate(${-prepared.mapBearing}deg)` }}
+                />
+              </div>
+              {layout.titleBlockPlacement === "right" ? (
+                <>
+                  <div className="flex min-h-0 shrink-0 flex-col items-center justify-center gap-1 overflow-hidden border-b border-slate-700 bg-white px-2 py-2" style={{ height: `${titleCells.identity}%` }}>
+                    <strong className="min-w-0 w-full [overflow-wrap:anywhere] [text-wrap:balance] text-center leading-tight" style={{ fontSize: ptToPx(typography.title.sizePoints) }}>{prepared.settings.mapName}</strong>
+                    {prepared.settings.subtitle ? <span className="min-w-0 w-full [overflow-wrap:anywhere] text-center leading-tight text-slate-600" style={{ fontSize: ptToPx(typography.subtitle.sizePoints) }}>{prepared.settings.subtitle}</span> : null}
+                    <span className="mt-1 min-w-0 w-full [overflow-wrap:anywhere] text-center font-bold leading-tight text-slate-500" style={{ fontSize: ptToPx(typography.footer.sizePoints) }}>{documentFooter}</span>
+                  </div>
+                  <dl className="grid min-h-0 shrink-0 bg-white" style={{ height: `${titleCells.metadata}%`, gridTemplateRows: `repeat(${metadataCells.length}, minmax(0, 1fr))` }}>
+                    {metadataCells.map((cell, cellIndex) => (
+                      <div
+                        key={cell.label}
+                        className={`grid min-h-0 place-items-center overflow-hidden px-1 py-0.5 text-center leading-tight ${cellIndex > 0 ? "border-t border-slate-700" : ""}`}
+                        style={{ gridTemplateRows: `repeat(${1 + cell.values.length}, minmax(0, 1fr))`, gridTemplateColumns: "100%" }}
+                      >
+                        <dt className="min-w-0 w-full [overflow-wrap:anywhere] font-black uppercase tracking-[.06em] text-slate-500" style={{ fontSize: ptToPx(typography.label.sizePoints) }}>{cell.label}</dt>
+                        {cell.values.map((value, index) => (
+                          <dd
+                            key={`${cell.label}-${index}`}
+                            className={`min-w-0 w-full [overflow-wrap:anywhere] ${value.kind === "footer" ? "font-bold text-slate-600" : "font-bold text-slate-900"}`}
+                            style={{ fontSize: ptToPx(value.kind === "scale" ? typography.scale.sizePoints : value.kind === "footer" ? typography.footer.sizePoints : typography.value.sizePoints) }}
+                          >
+                            {value.text}
+                          </dd>
+                        ))}
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              ) : (
+                <>
+                  <div className="flex min-h-0 shrink-0 flex-col items-center justify-center gap-1 overflow-hidden border-r border-slate-700 bg-white px-2 py-2" style={{ width: `${titleCells.identity}%` }}>
+                    <strong className="min-w-0 w-full [overflow-wrap:anywhere] [text-wrap:balance] text-center leading-tight" style={{ fontSize: ptToPx(typography.title.sizePoints) }}>{prepared.settings.mapName}</strong>
+                    {prepared.settings.subtitle ? <span className="min-w-0 w-full [overflow-wrap:anywhere] text-center leading-tight text-slate-600" style={{ fontSize: ptToPx(typography.subtitle.sizePoints) }}>{prepared.settings.subtitle}</span> : null}
+                    <span className="mt-auto min-w-0 w-full [overflow-wrap:anywhere] text-center font-bold leading-tight text-slate-500" style={{ fontSize: ptToPx(typography.footer.sizePoints) }}>{documentFooter}</span>
+                  </div>
+                  <dl className="grid min-h-0 shrink-0 bg-white" style={{ width: `${titleCells.metadata}%`, gridTemplateColumns: `repeat(${metadataCells.length}, minmax(0, 1fr))` }}>
+                    {metadataCells.map((cell, cellIndex) => (
+                      <div
+                        key={cell.label}
+                        className={`grid min-w-0 place-items-center overflow-hidden px-1 py-1 text-center leading-tight ${cellIndex > 0 ? "border-l border-slate-700" : ""}`}
+                        style={{ gridTemplateRows: `repeat(${metadataMaxLines}, minmax(0, 1fr))`, gridTemplateColumns: "100%" }}
+                      >
+                        <dt className="min-w-0 w-full [overflow-wrap:anywhere] font-black uppercase tracking-[.06em] text-slate-500" style={{ fontSize: ptToPx(typography.label.sizePoints) }}>{cell.label}</dt>
+                        {cell.values.map((value, index) => (
+                          <dd
+                            key={`${cell.label}-${index}`}
+                            className={`min-w-0 w-full [overflow-wrap:anywhere] ${value.kind === "footer" ? "font-bold text-slate-600" : "font-bold text-slate-900"}`}
+                            style={{ fontSize: ptToPx(value.kind === "scale" ? typography.scale.sizePoints : value.kind === "footer" ? typography.footer.sizePoints : typography.value.sizePoints) }}
+                          >
+                            {value.text}
+                          </dd>
+                        ))}
+                      </div>
+                    ))}
+                  </dl>
+                </>
+              )}
+              <div className={`${layout.titleBlockPlacement === "right" ? "shrink-0 border-t" : "border-l"} grid place-items-center border-slate-700 p-2 [&>span]:hidden`} style={layout.titleBlockPlacement === "right" ? { height: `${titleCells.branding}%` } : { width: `${titleCells.branding}%` }}>
+                <div className="grid min-h-0 w-full place-items-center overflow-hidden">
+                  <img className="min-h-0 max-h-full max-w-full object-contain" src={stormwaterLogoUrl} alt="Charlotte-Mecklenburg Storm Water Services" />
+                </div>
+                <span className="mt-1 text-center text-[clamp(5px,.55vw,7px)] font-bold uppercase tracking-[.08em] text-slate-500">Planning use · Page 1 of 1</span>
+              </div>
+            </div>
+            {pdfPreviewUrl ? (
+              <object
+                className="absolute inset-0 z-10 h-full w-full border-0 bg-white"
+                data={`${pdfPreviewUrl}#toolbar=0&navpanes=0&scrollbar=0&view=Fit`}
+                type="application/pdf"
+                title="Generated map PDF preview"
+              >
+                <div className="grid h-full place-items-center bg-white p-8 text-center text-sm font-semibold text-slate-600">
+                  This computer cannot display the generated PDF inline. Export the PDF to review it in your default viewer.
+                </div>
+              </object>
+            ) : null}
+          </div>
+        </div>
+        <footer className="flex flex-wrap items-center gap-3 border-t border-[var(--panel-border)] px-5 py-4">
+          <span className="mr-auto text-[12px] font-semibold text-[var(--panel-muted)]">
+            {pageSize.shortLabel} · {prepared.settings.orientation === "landscape" ? "Landscape" : "Portrait"} · {prepared.settings.qualityDpi} DPI · Scale 1:{prepared.scaleInfo.scaleDenominator.toLocaleString("en-US")}
+          </span>
+          <button className="h-9 border border-[var(--control-border)] px-4 text-[12px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]" type="button" onClick={onBack}>
+            Back to extent
+          </button>
+          <button className="h-9 border border-[var(--control-border)] px-4 text-[12px] font-black text-[var(--accent)] hover:bg-[var(--row-hover)]" type="button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="flex h-9 items-center gap-2 bg-[var(--accent)] px-4 text-[12px] font-black text-white hover:brightness-105" type="button" onClick={onExport}>
+            <Download className="h-4 w-4" /> Export PDF
+          </button>
+        </footer>
+      </section>
     </div>
   );
 }
@@ -5170,6 +6008,134 @@ function MapControlButton({
   );
 }
 
+function MeasurePanel({
+  canFinish,
+  complete,
+  mode,
+  open,
+  pointCount,
+  resultLabel,
+  onClear,
+  onClose,
+  onFinish,
+  onModeChange,
+  onUndo,
+}: {
+  canFinish: boolean;
+  complete: boolean;
+  mode: MeasureMode;
+  open: boolean;
+  pointCount: number;
+  resultLabel: string;
+  onClear: () => void;
+  onClose: () => void;
+  onFinish: () => void;
+  onModeChange: (mode: MeasureMode) => void;
+  onUndo: () => void;
+}) {
+  if (!open) return null;
+  const instruction = complete
+    ? "Measurement complete. Click the map to start a new measurement."
+    : pointCount === 0
+      ? mode === "distance"
+        ? "Click along a route. Double-click or press Enter to finish."
+        : "Click around the boundary. Double-click or press Enter to finish."
+      : `${pointCount} ${pointCount === 1 ? "point" : "points"} placed · Backspace removes the last point.`;
+
+  return (
+    <section
+      className="absolute left-20 top-3 z-30 w-[320px] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[color-mix(in_srgb,var(--panel-bg)_96%,transparent)] text-[var(--panel-text)] shadow-[0_16px_42px_rgba(0,0,0,.28)] backdrop-blur-md"
+      aria-label="Measure distance or area"
+    >
+      <header className="flex h-12 items-center justify-between border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-3">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-sm bg-[var(--panel-active-bg)] text-[var(--accent)]">
+            <Ruler className="h-[18px] w-[18px]" />
+          </span>
+          <div className="min-w-0">
+            <strong className="block text-[13px] font-bold leading-tight">Measure</strong>
+            <span className="block text-[10px] text-[var(--panel-muted)]">US customary units</span>
+          </div>
+        </div>
+        <button
+          className="grid h-8 w-8 place-items-center rounded-sm text-[var(--panel-muted)] hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
+          type="button"
+          onClick={onClose}
+          title="Close measurement tool"
+          aria-label="Close measurement tool"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </header>
+      <div className="grid grid-cols-2 border-b border-[var(--panel-border)] p-2">
+        <button
+          className={`flex h-9 items-center justify-center gap-2 border text-[12px] font-bold transition-colors ${
+            mode === "distance"
+              ? "border-[var(--accent)] bg-[var(--panel-active-bg)] text-[var(--accent)]"
+              : "border-[var(--panel-border)] bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+          }`}
+          type="button"
+          aria-pressed={mode === "distance"}
+          onClick={() => onModeChange("distance")}
+        >
+          <Route className="h-4 w-4" /> Distance
+        </button>
+        <button
+          className={`flex h-9 items-center justify-center gap-2 border border-l-0 text-[12px] font-bold transition-colors ${
+            mode === "area"
+              ? "border-[var(--accent)] bg-[var(--panel-active-bg)] text-[var(--accent)]"
+              : "border-[var(--panel-border)] bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+          }`}
+          type="button"
+          aria-pressed={mode === "area"}
+          onClick={() => onModeChange("area")}
+        >
+          <ChartArea className="h-4 w-4" /> Area
+        </button>
+      </div>
+      <div className="px-3 pb-3 pt-2.5">
+        <div className="border-l-4 border-[var(--accent)] bg-[var(--panel-active-bg)] px-3 py-2.5">
+          <span className="block text-[10px] font-bold uppercase tracking-[.08em] text-[var(--panel-muted)]">
+            {mode === "distance" ? "Total distance" : "Total area"}
+          </span>
+          <strong className="mt-0.5 block text-[22px] font-semibold leading-tight text-[var(--panel-text)]" aria-live="polite">
+            {resultLabel}
+          </strong>
+        </div>
+        <p className="min-h-9 px-0.5 pt-2 text-[11px] leading-4 text-[var(--panel-muted)]">{instruction}</p>
+        <div className="mt-2 grid grid-cols-[40px_1fr_1fr] gap-2">
+          <button
+            className="grid h-9 place-items-center border border-[var(--panel-border)] bg-[var(--input-bg)] text-[var(--panel-text)] hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+            disabled={pointCount === 0}
+            onClick={onUndo}
+            title="Undo last point"
+            aria-label="Undo last point"
+          >
+            <Undo2 className="h-4 w-4" />
+          </button>
+          <button
+            className="h-9 border border-[var(--panel-border)] bg-[var(--input-bg)] text-[12px] font-bold text-[var(--panel-text)] hover:border-[var(--accent)] disabled:cursor-not-allowed disabled:opacity-40"
+            type="button"
+            disabled={pointCount === 0}
+            onClick={onClear}
+          >
+            Clear
+          </button>
+          <button
+            className="flex h-9 items-center justify-center gap-1.5 bg-[var(--accent)] text-[12px] font-bold text-white hover:brightness-105 disabled:cursor-not-allowed disabled:bg-[var(--panel-disabled)] disabled:text-[var(--panel-muted)]"
+            type="button"
+            disabled={!canFinish || complete}
+            onClick={onFinish}
+          >
+            <Check className="h-4 w-4" /> Finish
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function MapToolStrip({
   assetExtractActive,
   failureConsequenceActive,
@@ -5182,6 +6148,7 @@ function MapToolStrip({
   map3dActive,
   map3dTransitioning,
   mapViewMenuOpen,
+  measureActive,
   mode,
   selectedDrawId,
   onClearDrawFeatures,
@@ -5194,6 +6161,7 @@ function MapToolStrip({
   onMapPdfExportToggle,
   onMap3dToggle,
   onMapViewMenuToggle,
+  onMeasureToggle,
   onModeChange,
 }: {
   assetExtractActive: boolean;
@@ -5207,6 +6175,7 @@ function MapToolStrip({
   map3dActive: boolean;
   map3dTransitioning: boolean;
   mapViewMenuOpen: boolean;
+  measureActive: boolean;
   mode: MapViewMode;
   selectedDrawId: string | null;
   onClearDrawFeatures: () => void;
@@ -5219,6 +6188,7 @@ function MapToolStrip({
   onMapPdfExportToggle: () => void;
   onMap3dToggle: () => void;
   onMapViewMenuToggle: () => void;
+  onMeasureToggle: () => void;
   onModeChange: (mode: MapViewMode) => void;
 }) {
   const options: Array<{ id: MapViewMode; label: string }> = [
@@ -5248,6 +6218,9 @@ function MapToolStrip({
         <MapToolButton active={terrainProfileActive} label="Terrain profile" onClick={onTerrainProfileToggle}>
           <ChartArea className="h-[18px] w-[18px]" />
         </MapToolButton>
+        <MapToolButton active={measureActive} label="Measure distance or area" onClick={onMeasureToggle}>
+          <Ruler className="h-[18px] w-[18px]" />
+        </MapToolButton>
         <MapToolButton
           active={mapPdfExportActive || mapPdfExporting}
           disabled={mapPdfExporting}
@@ -5260,7 +6233,7 @@ function MapToolStrip({
           }
           onClick={onMapPdfExportToggle}
         >
-          <Download className="h-[18px] w-[18px]" />
+          <MapIcon className="h-[18px] w-[18px]" />
         </MapToolButton>
       </div>
       {mapViewMenuOpen ? (
@@ -6920,6 +7893,23 @@ function updateDrawDataOnMaps(
   });
 }
 
+function updateMeasurementGraphicsOnMaps(
+  maps: Array<MapLibreMap | null>,
+  mode: MeasureMode,
+  points: LngLatPair[],
+  hoverPoint: LngLatPair | null,
+  complete: boolean,
+): void {
+  const data = measurementFeatureCollection(mode, points, hoverPoint, complete);
+  maps.forEach((map) => {
+    if (!map?.isStyleLoaded()) return;
+    ensureMeasurementLayers(map);
+    (map.getSource(MEASURE_SOURCE_ID) as GeoJSONSource | undefined)?.setData(
+      data as unknown as Parameters<GeoJSONSource["setData"]>[0],
+    );
+  });
+}
+
 function updateAssetExtractPreviewOnMaps(
   maps: Array<MapLibreMap | null>,
   preview: AssetExtractPreview | null,
@@ -7739,6 +8729,94 @@ function ensureDrawLayers(map: MapLibreMap): void {
   }
 }
 
+function ensureMeasurementLayers(map: MapLibreMap): void {
+  if (!map.getSource(MEASURE_SOURCE_ID)) {
+    map.addSource(MEASURE_SOURCE_ID, {
+      type: "geojson",
+      data: emptyDrawFeatureCollection(),
+    });
+  }
+  if (!map.getLayer(MEASURE_FILL_LAYER_ID)) {
+    map.addLayer({
+      id: MEASURE_FILL_LAYER_ID,
+      type: "fill",
+      source: MEASURE_SOURCE_ID,
+      filter: ["==", ["geometry-type"], "Polygon"],
+      paint: {
+        "fill-color": "#0b84d8",
+        "fill-opacity": 0.2,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(MEASURE_LINE_CASING_LAYER_ID)) {
+    map.addLayer({
+      id: MEASURE_LINE_CASING_LAYER_ID,
+      type: "line",
+      source: MEASURE_SOURCE_ID,
+      filter: ["!=", ["get", "role"], "label"],
+      paint: {
+        "line-color": "#ffffff",
+        "line-opacity": 0.95,
+        "line-width": 6,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(MEASURE_LINE_LAYER_ID)) {
+    map.addLayer({
+      id: MEASURE_LINE_LAYER_ID,
+      type: "line",
+      source: MEASURE_SOURCE_ID,
+      filter: ["!=", ["get", "role"], "label"],
+      paint: {
+        "line-color": "#096aa9",
+        "line-opacity": 1,
+        "line-width": 3,
+        "line-dasharray": [2, 1],
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(MEASURE_POINT_LAYER_ID)) {
+    map.addLayer({
+      id: MEASURE_POINT_LAYER_ID,
+      type: "circle",
+      source: MEASURE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "vertex"],
+      paint: {
+        "circle-color": "#ffffff",
+        "circle-radius": 5,
+        "circle-stroke-color": "#096aa9",
+        "circle-stroke-width": 3,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(MEASURE_LABEL_LAYER_ID)) {
+    map.addLayer({
+      id: MEASURE_LABEL_LAYER_ID,
+      type: "symbol",
+      source: MEASURE_SOURCE_ID,
+      filter: ["==", ["get", "role"], "label"],
+      layout: {
+        "text-field": ["get", "label"],
+        "text-size": 13,
+        "text-offset": [0, -1.35],
+        "text-anchor": "bottom",
+        "text-allow-overlap": true,
+      },
+      paint: {
+        "text-color": "#052f4a",
+        "text-halo-color": "#ffffff",
+        "text-halo-width": 2,
+        "text-halo-blur": 0.5,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+}
+
 function firstDrawFeatureId(features: MapGeoJSONFeature[]): string | null {
   for (const feature of features) {
     const id = feature.properties?.id;
@@ -7779,6 +8857,91 @@ function polygonDraftFeatures(points: LngLatPair[], includePolygon = false): Dra
       geometry: { type: "LineString", coordinates: cleanPoints },
     },
   ];
+}
+
+function measurementFeatureCollection(
+  mode: MeasureMode,
+  points: LngLatPair[],
+  hoverPoint: LngLatPair | null,
+  complete: boolean,
+): DrawFeatureCollection {
+  const coordinates = measurementCoordinates(points, hoverPoint, complete);
+  const features: DrawGeoJsonFeature[] = [];
+  if (mode === "area" && coordinates.length >= 3) {
+    features.push({
+      type: "Feature",
+      properties: { role: "measurement", mode },
+      geometry: polygonGeometry(coordinates),
+    });
+  } else if (coordinates.length >= 2) {
+    features.push({
+      type: "Feature",
+      properties: { role: "measurement", mode },
+      geometry: { type: "LineString", coordinates },
+    });
+  }
+  points.forEach((coordinate, index) => {
+    features.push({
+      type: "Feature",
+      properties: { role: "vertex", index: index + 1 },
+      geometry: { type: "Point", coordinates: coordinate },
+    });
+  });
+  const label = measurementResultLabel(mode, points, hoverPoint, complete);
+  const minimumPoints = mode === "distance" ? 2 : 3;
+  if (coordinates.length >= minimumPoints && coordinates.length) {
+    features.push({
+      type: "Feature",
+      properties: { role: "label", label },
+      geometry: { type: "Point", coordinates: coordinates[coordinates.length - 1] },
+    });
+  }
+  return drawFeatureCollection(features);
+}
+
+function measurementCoordinates(points: LngLatPair[], hoverPoint: LngLatPair | null, complete: boolean): LngLatPair[] {
+  return removeNearbyDuplicatePoints(complete || !hoverPoint ? points : [...points, hoverPoint]);
+}
+
+function measurementResultLabel(
+  mode: MeasureMode,
+  points: LngLatPair[],
+  hoverPoint: LngLatPair | null,
+  complete: boolean,
+): string {
+  const coordinates = measurementCoordinates(points, hoverPoint, complete);
+  if (mode === "distance") {
+    if (coordinates.length < 2) return points.length ? "Add another point" : "Click the map to begin";
+    const feet = turfLength(lineString(coordinates), { units: "feet" });
+    return formatDistanceUs(feet);
+  }
+  if (coordinates.length < 3) {
+    return points.length === 2 ? "Add one more point" : points.length ? "Continue the boundary" : "Click the map to begin";
+  }
+  const ring = [...coordinates, coordinates[0]];
+  const squareFeet = turfArea(turfPolygon([ring])) * 10.7639104167097;
+  return formatAreaUs(squareFeet);
+}
+
+function formatDistanceUs(feet: number): string {
+  if (!Number.isFinite(feet) || feet < 0) return "—";
+  if (feet < 1) return `${formatAdaptiveNumber(feet * 12, 1)} in`;
+  if (feet < 5280) return `${formatAdaptiveNumber(feet, feet < 100 ? 1 : 0)} ft`;
+  return `${formatAdaptiveNumber(feet / 5280, 2)} mi`;
+}
+
+function formatAreaUs(squareFeet: number): string {
+  if (!Number.isFinite(squareFeet) || squareFeet < 0) return "—";
+  if (squareFeet < 43560) return `${formatAdaptiveNumber(squareFeet, squareFeet < 100 ? 1 : 0)} sq ft`;
+  if (squareFeet < 27878400) return `${formatAdaptiveNumber(squareFeet / 43560, 2)} acres`;
+  return `${formatAdaptiveNumber(squareFeet / 27878400, 2)} sq mi`;
+}
+
+function formatAdaptiveNumber(value: number, maximumFractionDigits: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits,
+    minimumFractionDigits: 0,
+  }).format(value);
 }
 
 function removeNearbyDuplicatePoints(points: LngLatPair[]): LngLatPair[] {
@@ -7965,6 +9128,7 @@ function ensureBuildingExtrusionStyleLayer(style: MapStyle, enabled: boolean): v
   const styleLayers = style.layers as StyleLayer[];
   const existingLayer = styleLayers.find((layer) => layer.id === BUILDING_3D_LAYER_ID);
   if (existingLayer) {
+    (existingLayer as StyleLayer & { minzoom?: number }).minzoom = BUILDING_3D_MIN_ZOOM;
     existingLayer.layout = {
       ...(existingLayer.layout || {}),
       visibility: enabled ? "visible" : "none",
@@ -8000,7 +9164,7 @@ function ensureBuildingExtrusionStyleLayer(style: MapStyle, enabled: boolean): v
     metadata: {
       runtime_helper: true,
       tile_source_layer: BUILDING_3D_SOURCE_LAYER,
-      description: "One-level building footprints extruded to an average height of 3 meters at zoom 15 and above.",
+      description: "One-level building footprints extruded to an average height of 3 meters at zoom 16 and above.",
     },
   } as StyleLayer;
 
@@ -8834,16 +9998,311 @@ function collectCoordinates(value: unknown, out: Array<[number, number]>): void 
   value.forEach((item) => collectCoordinates(item, out));
 }
 
-function createInitialMapPdfSelectionFrame(overlayWidth: number, overlayHeight: number): MapPdfSelectionRect {
+function mapPdfPageSize(pageSizeId: MapPdfPageSizeId) {
+  return MAP_PDF_PAGE_SIZES.find((option) => option.id === pageSizeId) || MAP_PDF_PAGE_SIZES[0];
+}
+
+function mapPdfTemplate(templateId: string): MapPdfTemplateDefinition {
+  return MAP_PDF_TEMPLATES.find((template) => template.id === templateId) || MAP_PDF_TEMPLATES[0];
+}
+
+function mapPdfTemplateCellPercent(templateId: string, cellId: string, fallback: number): number {
+  const template = mapPdfTemplate(templateId);
+  return template.titleBlock.cells?.find((cell) => cell.id === cellId)?.sizePercent ?? fallback;
+}
+
+function mapPdfTemplateCellBackground(templateId: string, cellId: string, fallback = "#ffffff"): string {
+  const template = mapPdfTemplate(templateId);
+  return template.titleBlock.cells?.find((cell) => cell.id === cellId)?.background ?? fallback;
+}
+
+const TITLE_BLOCK_CELL_PADDING = 6;
+const NORTH_ARROW_BASE_SIZE = 46;
+const BRANDING_BASE_SIZE = 40;
+
+function authorNameLines(author: string): string[] {
+  const trimmed = (author || "").trim();
+  if (!trimmed) {
+    return ["-"];
+  }
+  const parts = trimmed.split(/\s+/);
+  return parts.length < 2 ? [trimmed] : [parts[0], parts.slice(1).join(" ")];
+}
+
+function pdfTextLineHeight(sizePoints: number): number {
+  return sizePoints * 1.3;
+}
+
+function mapPdfPageScale(pageWidth: number, pageHeight: number): number {
+  const referenceArea = 612 * 792;
+  return clampNumber(Math.sqrt((pageWidth * pageHeight) / referenceArea), 0.85, 1.5);
+}
+
+function scaledPdfTextStyle<T extends { sizePoints: number }>(style: T, scale: number): T {
+  return { ...style, sizePoints: style.sizePoints * scale };
+}
+
+function mapPdfMetadataCells(
+  author: string,
+  generatedAt: Date,
+  scaleDenominator: number,
+): MapPdfMetadataCell[] {
+  return [
+    {
+      label: "AUTHOR",
+      values: authorNameLines(author).map((text) => ({ text, kind: "value" as const })),
+    },
+    {
+      label: "GENERATED",
+      values: [{ text: generatedAt.toLocaleDateString(), kind: "value" }],
+    },
+    {
+      label: "MAP SCALE",
+      values: [{ text: `1:${scaleDenominator.toLocaleString("en-US")}`, kind: "scale" }],
+    },
+  ];
+}
+
+function mapPdfMetadataCellContentHeight(
+  cell: MapPdfMetadataCell,
+  template: MapPdfTemplateDefinition,
+  scale: number,
+): number {
+  const labelHeight = pdfTextLineHeight(template.typography.label.sizePoints * scale);
+  const valuesHeight = cell.values.reduce((total, value) => {
+    const style = value.kind === "scale"
+      ? template.typography.scale
+      : value.kind === "footer"
+        ? template.typography.footer
+        : template.typography.value;
+    return total + pdfTextLineHeight(style.sizePoints * scale);
+  }, 0);
+  return labelHeight + valuesHeight + TITLE_BLOCK_CELL_PADDING * 2;
+}
+
+function mapPdfIdentityContentHeight(
+  template: MapPdfTemplateDefinition,
+  settings: MapPdfExportSettings,
+  scale: number,
+  crossAxisSize: number,
+): number {
+  const titleSize = template.typography.title.sizePoints * scale;
+  const subtitleSize = template.typography.subtitle.sizePoints * scale;
+  const footerSize = template.typography.footer.sizePoints * scale;
+  const maxTitleCharacters = Math.max(12, Math.floor((crossAxisSize - 20) / (titleSize * 0.62)));
+  const titleLineCount = Math.min(2, wrapPdfText(settings.mapName || "Storm Water Asset Risk Map", maxTitleCharacters).length);
+  const subtitleLineCount = settings.subtitle
+    ? Math.min(2, wrapPdfText(settings.subtitle, Math.max(16, maxTitleCharacters + 6)).length)
+    : 0;
+  const titleHeight = titleLineCount * pdfTextLineHeight(titleSize);
+  const subtitleHeight = subtitleLineCount ? subtitleLineCount * pdfTextLineHeight(subtitleSize) + 3 : 0;
+  const footerHeight = pdfTextLineHeight(footerSize) + 6;
+  return titleHeight + subtitleHeight + footerHeight + TITLE_BLOCK_CELL_PADDING * 2;
+}
+
+// The landscape sidebar keeps title-block text upright (not rotated) like
+// the portrait band does, just stacked in a narrower column instead of a
+// wide row, so its width needs to comfortably fit a single line of the
+// longest label/value/title text rather than fit multiple rotated columns.
+function mapPdfTitleStripContentWidth(
+  template: MapPdfTemplateDefinition,
+  settings: MapPdfExportSettings,
+  scale: number,
+): number {
+  const titleSize = template.typography.title.sizePoints * scale;
+  const labelSize = template.typography.label.sizePoints * scale;
+  const valueSize = template.typography.value.sizePoints * scale;
+  const scaleSize = template.typography.scale.sizePoints * scale;
+  const targetTitleCharacters = 13;
+  const titleWidth = targetTitleCharacters * titleSize * 0.62 + TITLE_BLOCK_CELL_PADDING * 2;
+  const metadataCells = mapPdfMetadataCells(settings.author, new Date(), 1);
+  const metadataWidth = Math.max(
+    ...metadataCells.flatMap((cell) => [
+      approximatePdfTextWidth(cell.label, labelSize),
+      ...cell.values.map((value) => approximatePdfTextWidth(value.text, value.kind === "scale" ? scaleSize : valueSize)),
+    ]),
+  ) + TITLE_BLOCK_CELL_PADDING * 2;
+  const iconWidth = Math.max(NORTH_ARROW_BASE_SIZE, BRANDING_BASE_SIZE) * scale;
+  return Math.max(titleWidth, metadataWidth, iconWidth);
+}
+
+function mapPdfTitleBlockContentMetrics(
+  template: MapPdfTemplateDefinition,
+  settings: MapPdfExportSettings,
+  blockWidth: number,
+  scale: number,
+): { northArrow: number; identity: number; metadata: number; branding: number; total: number } {
+  const metadataCells = mapPdfMetadataCells(settings.author, new Date(), 1);
+  const metadata = metadataCells.reduce(
+    (sum, cell) => sum + mapPdfMetadataCellContentHeight(cell, template, scale),
+    0,
+  );
+  const identity = mapPdfIdentityContentHeight(template, settings, scale, blockWidth) * 1.7;
+  const northArrow = NORTH_ARROW_BASE_SIZE * scale;
+  const branding = BRANDING_BASE_SIZE * scale
+    + pdfTextLineHeight(template.typography.footer.sizePoints * scale * 0.7)
+    + TITLE_BLOCK_CELL_PADDING;
+  return { northArrow, identity, metadata, branding, total: northArrow + identity + metadata + branding };
+}
+
+function mapPdfTitleBandContentHeight(
+  template: MapPdfTemplateDefinition,
+  settings: MapPdfExportSettings,
+  blockWidth: number,
+  scale: number,
+): number {
+  const northArrowPercent = mapPdfTemplateCellPercent(template.id, "north-arrow", 10);
+  const identityPercent = mapPdfTemplateCellPercent(template.id, "identity", 28);
+  const metadataPercent = mapPdfTemplateCellPercent(template.id, "metadata", 44);
+  const brandingPercent = mapPdfTemplateCellPercent(template.id, "branding", 18);
+  const totalPercent = Math.max(1, northArrowPercent + identityPercent + metadataPercent + brandingPercent);
+  const identityWidth = blockWidth * (identityPercent / totalPercent);
+  const metadataCells = mapPdfMetadataCells(settings.author, new Date(), 1);
+  const metadataRowHeights = metadataCells.map((cell) => mapPdfMetadataCellContentHeight(cell, template, scale));
+  const identityHeight = mapPdfIdentityContentHeight(template, settings, scale, identityWidth);
+  const northArrowHeight = NORTH_ARROW_BASE_SIZE * scale;
+  const brandingHeight = BRANDING_BASE_SIZE * scale
+    + pdfTextLineHeight(template.typography.footer.sizePoints * scale * 0.7)
+    + TITLE_BLOCK_CELL_PADDING;
+  return Math.max(identityHeight, ...metadataRowHeights, northArrowHeight, brandingHeight) + TITLE_BLOCK_CELL_PADDING;
+}
+
+function mapPdfTitleBlockCells(
+  templateId: string,
+  placement: MapPdfLayout["titleBlockPlacement"],
+  settings: MapPdfExportSettings,
+  crossAxisSize: number,
+  scale: number,
+): MapPdfTitleBlockCells {
+  if (placement === "bottom") {
+    const northArrow = mapPdfTemplateCellPercent(templateId, "north-arrow", 10);
+    const identity = mapPdfTemplateCellPercent(templateId, "identity", 28);
+    const metadata = mapPdfTemplateCellPercent(templateId, "metadata", 44);
+    const branding = mapPdfTemplateCellPercent(templateId, "branding", 18);
+    const total = Math.max(1, northArrow + identity + metadata + branding);
+    return {
+      northArrow: (northArrow / total) * 100,
+      identity: (identity / total) * 100,
+      metadata: (metadata / total) * 100,
+      branding: (branding / total) * 100,
+    };
+  }
+  const metrics = mapPdfTitleBlockContentMetrics(mapPdfTemplate(templateId), settings, crossAxisSize, scale);
+  const total = Math.max(1, metrics.total);
+  return {
+    northArrow: (metrics.northArrow / total) * 100,
+    identity: (metrics.identity / total) * 100,
+    metadata: (metrics.metadata / total) * 100,
+    branding: (metrics.branding / total) * 100,
+  };
+}
+
+function mapPdfDocumentFooter(templateId: string, mapBearing: number): string {
+  const usage = mapPdfTemplate(templateId).metadata.usageLabel
+    .replace(/\s+use$/i, "")
+    .toUpperCase();
+  return `${usage} | PAGE 1/1 | ROT ${Math.round(normalizeBearingDegrees(mapBearing))}`;
+}
+
+function mapPdfTitleBlockPlacement(orientation: MapPdfOrientation): "right" | "bottom" {
+  return orientation === "landscape" ? "right" : "bottom";
+}
+
+function getMapPdfLayout(settings: MapPdfExportSettings): MapPdfLayout {
+  const template = mapPdfTemplate(settings.templateId);
+  const pageSize = mapPdfPageSize(settings.pageSize);
+  const widthInches = settings.orientation === "landscape"
+    ? Math.max(pageSize.widthInches, pageSize.heightInches)
+    : Math.min(pageSize.widthInches, pageSize.heightInches);
+  const heightInches = settings.orientation === "landscape"
+    ? Math.min(pageSize.widthInches, pageSize.heightInches)
+    : Math.max(pageSize.widthInches, pageSize.heightInches);
+  const pageWidth = widthInches * 72;
+  const pageHeight = heightInches * 72;
+  const scale = mapPdfPageScale(pageWidth, pageHeight);
+  const margin = clampNumber((template.page.marginInches || 0.125) * 72, 7, 18);
+  const titleBlockGap = clampNumber(margin * 0.5, 4, 7);
+  const titleBlockPlacement = mapPdfTitleBlockPlacement(settings.orientation);
+
+  if (titleBlockPlacement === "bottom") {
+    const blockWidth = pageWidth - margin * 2;
+    const titleBlockHeight = clampNumber(
+      mapPdfTitleBandContentHeight(template, settings, blockWidth, scale) * 0.8,
+      36,
+      pageHeight * 0.26,
+    );
+    return {
+      pageWidth,
+      pageHeight,
+      margin,
+      titleBlockGap,
+      titleBlockPlacement: "bottom",
+      titleBlockX: margin,
+      titleBlockY: margin,
+      titleBlockWidth: blockWidth,
+      titleBlockHeight,
+      mapFrameX: margin,
+      mapFrameY: margin + titleBlockHeight + titleBlockGap,
+      mapFrameWidth: blockWidth,
+      mapFrameHeight: pageHeight - margin * 2 - titleBlockHeight - titleBlockGap,
+    };
+  }
+
+  const contentWidth = mapPdfTitleStripContentWidth(template, settings, scale);
+  const titleBlockWidth = clampNumber(
+    Math.max(contentWidth, pageWidth * (template.titleBlock.sizePercent / 100)),
+    86,
+    pageWidth * 0.28,
+  );
+  const availableHeight = pageHeight - margin * 2;
+  return {
+    pageWidth,
+    pageHeight,
+    margin,
+    titleBlockGap,
+    titleBlockPlacement: "right",
+    titleBlockX: pageWidth - margin - titleBlockWidth,
+    titleBlockY: margin,
+    titleBlockWidth,
+    titleBlockHeight: availableHeight,
+    mapFrameX: margin,
+    mapFrameY: margin,
+    mapFrameWidth: pageWidth - margin * 2 - titleBlockGap - titleBlockWidth,
+    mapFrameHeight: availableHeight,
+  };
+}
+
+function getMapPdfRenderSize(
+  layout: MapPdfLayout,
+  qualityDpi: MapPdfQualityDpi,
+): { width: number; height: number; pixelRatio: number } {
+  const cssDpi = 96;
+  const width = Math.max(1, Math.round((layout.mapFrameWidth / 72) * cssDpi));
+  const height = Math.max(1, Math.round((layout.mapFrameHeight / 72) * cssDpi));
+  const maximumDimension = 4_096;
+  const requestedPixelRatio = qualityDpi / cssDpi;
+  const pixelRatio = Math.min(requestedPixelRatio, maximumDimension / Math.max(width, height));
+  return {
+    width,
+    height,
+    pixelRatio: Math.max(1, pixelRatio),
+  };
+}
+
+function createInitialMapPdfSelectionFrame(
+  overlayWidth: number,
+  overlayHeight: number,
+  aspectRatio: number,
+): MapPdfSelectionRect {
   const edgePadding = Math.min(48, Math.max(16, Math.min(overlayWidth, overlayHeight) * 0.08));
   const maxWidth = Math.max(1, overlayWidth - edgePadding * 2);
   const maxHeight = Math.max(1, overlayHeight - edgePadding * 2);
   const width = clampNumber(
-    Math.min(maxWidth * 0.72, maxHeight * 0.72 * MAP_PDF_FRAME_ASPECT_RATIO),
+    Math.min(maxWidth * 0.78, maxHeight * 0.78 * aspectRatio),
     Math.min(maxWidth, 120),
     maxWidth,
   );
-  const height = width / MAP_PDF_FRAME_ASPECT_RATIO;
+  const height = width / aspectRatio;
 
   return {
     left: (overlayWidth - width) / 2,
@@ -8852,46 +10311,6 @@ function createInitialMapPdfSelectionFrame(overlayWidth: number, overlayHeight: 
     height,
     overlayWidth,
     overlayHeight,
-  };
-}
-
-function updateMapPdfSelectionFrameForDrag(
-  frame: MapPdfSelectionRect,
-  mode: MapPdfSelectionDragMode,
-  deltaX: number,
-  deltaY: number,
-): MapPdfSelectionRect {
-  if (mode === "move") {
-    return {
-      ...frame,
-      left: clampNumber(frame.left + deltaX, 0, Math.max(0, frame.overlayWidth - frame.width)),
-      top: clampNumber(frame.top + deltaY, 0, Math.max(0, frame.overlayHeight - frame.height)),
-    };
-  }
-
-  const right = frame.left + frame.width;
-  const bottom = frame.top + frame.height;
-  const resizingFromLeft = mode === "resize-nw" || mode === "resize-sw";
-  const resizingFromTop = mode === "resize-nw" || mode === "resize-ne";
-  const widthFromHorizontalDrag = resizingFromLeft ? frame.width - deltaX : frame.width + deltaX;
-  const heightFromVerticalDrag = resizingFromTop ? frame.height - deltaY : frame.height + deltaY;
-  const widthFromVerticalDrag = heightFromVerticalDrag * MAP_PDF_FRAME_ASPECT_RATIO;
-  const preferredWidth = Math.abs(deltaX) >= Math.abs(deltaY)
-    ? widthFromHorizontalDrag
-    : widthFromVerticalDrag;
-  const maxWidthFromX = resizingFromLeft ? right : frame.overlayWidth - frame.left;
-  const maxWidthFromY = resizingFromTop ? bottom * MAP_PDF_FRAME_ASPECT_RATIO : (frame.overlayHeight - frame.top) * MAP_PDF_FRAME_ASPECT_RATIO;
-  const maxWidth = Math.max(1, Math.min(maxWidthFromX, maxWidthFromY));
-  const minWidth = Math.min(maxWidth, 120);
-  const width = clampNumber(preferredWidth, minWidth, maxWidth);
-  const height = width / MAP_PDF_FRAME_ASPECT_RATIO;
-
-  return {
-    ...frame,
-    left: resizingFromLeft ? right - width : frame.left,
-    top: resizingFromTop ? bottom - height : frame.top,
-    width,
-    height,
   };
 }
 
@@ -8905,13 +10324,16 @@ async function createExportMap(
   sourceMap: MapLibreMap,
   style: MapStyle,
   selection: MapPdfSelectionRect,
+  renderWidth: number,
+  renderHeight: number,
+  pixelRatio: number,
 ): Promise<MapLibreMap> {
   const container = document.createElement("div");
   container.style.position = "fixed";
   container.style.left = "-100000px";
   container.style.top = "0";
-  container.style.width = `${Math.max(1, Math.round(selection.width))}px`;
-  container.style.height = `${Math.max(1, Math.round(selection.height))}px`;
+  container.style.width = `${Math.max(1, Math.round(renderWidth))}px`;
+  container.style.height = `${Math.max(1, Math.round(renderHeight))}px`;
   container.style.pointerEvents = "none";
   document.body.appendChild(container);
   const center = sourceMap.unproject([
@@ -8922,7 +10344,7 @@ async function createExportMap(
     container,
     style,
     center,
-    zoom: sourceMap.getZoom(),
+    zoom: sourceMap.getZoom() + Math.log2(Math.max(1, renderWidth) / Math.max(1, selection.width)),
     bearing: sourceMap.getBearing(),
     pitch: sourceMap.getPitch(),
     attributionControl: false,
@@ -8936,6 +10358,7 @@ async function createExportMap(
       powerPreference: "high-performance",
       preserveDrawingBuffer: true,
     },
+    pixelRatio,
   } as MapOptions);
   try {
     await new Promise<void>((resolve, reject) => {
@@ -9018,12 +10441,12 @@ async function mapCanvasToJpegImage(canvas: HTMLCanvasElement, selection: MapPdf
   };
 }
 
-async function imageUrlToJpegImage(url: string, targetWidth: number): Promise<MapPdfImage> {
+async function imageUrlToJpegImage(url: string, targetWidth: number, label: string): Promise<MapPdfImage> {
   const image = await new Promise<HTMLImageElement>((resolve, reject) => {
     const nextImage = new Image();
     nextImage.decoding = "async";
     nextImage.onload = () => resolve(nextImage);
-    nextImage.onerror = () => reject(new Error("The north arrow image could not be loaded for the PDF."));
+    nextImage.onerror = () => reject(new Error(`The ${label} image could not be loaded for the PDF.`));
     nextImage.src = url;
   });
   const sourceWidth = image.naturalWidth || targetWidth;
@@ -9034,7 +10457,7 @@ async function imageUrlToJpegImage(url: string, targetWidth: number): Promise<Ma
   exportCanvas.height = targetHeight;
   const context = exportCanvas.getContext("2d");
   if (!context) {
-    throw new Error("The browser could not prepare the north arrow image for export.");
+    throw new Error(`The browser could not prepare the ${label} image for export.`);
   }
   context.fillStyle = "#ffffff";
   context.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
@@ -9045,7 +10468,7 @@ async function imageUrlToJpegImage(url: string, targetWidth: number): Promise<Ma
       if (nextBlob) {
         resolve(nextBlob);
       } else {
-        reject(new Error("The browser could not encode the north arrow image."));
+        reject(new Error(`The browser could not encode the ${label} image.`));
       }
     }, "image/jpeg", 0.94);
   });
@@ -9057,7 +10480,11 @@ async function imageUrlToJpegImage(url: string, targetWidth: number): Promise<Ma
   };
 }
 
-function getMapPdfScaleInfo(map: MapLibreMap, selection: MapPdfSelectionRect): MapPdfScaleInfo {
+function getMapScaleDenominator(
+  map: MapLibreMap,
+  selection: MapPdfSelectionRect,
+  settings: MapPdfExportSettings,
+): number {
   const centerY = selection.top + selection.height / 2;
   const westPoint = map.unproject([selection.left, centerY]);
   const eastPoint = map.unproject([selection.left + selection.width, centerY]);
@@ -9065,10 +10492,34 @@ function getMapPdfScaleInfo(map: MapLibreMap, selection: MapPdfSelectionRect): M
     1,
     distanceFeetBetween(westPoint.lng, westPoint.lat, eastPoint.lng, eastPoint.lat),
   );
+  const layout = getMapPdfLayout(settings);
+  const mapFrameWidthInches = Math.max(0.1, layout.mapFrameWidth / 72);
+  return Math.max(1, (groundWidthFeet * 12) / mapFrameWidthInches);
+}
+
+function snapMapScaleToHundred(value: number): number {
+  const safeValue = Number.isFinite(value) && value > 0 ? value : 5_000;
+  return Math.max(100, Math.round(safeValue / 100) * 100);
+}
+
+function getMapPdfScaleInfo(
+  map: MapLibreMap,
+  selection: MapPdfSelectionRect,
+  settings: MapPdfExportSettings,
+): MapPdfScaleInfo {
+  const centerY = selection.top + selection.height / 2;
+  const westPoint = map.unproject([selection.left, centerY]);
+  const eastPoint = map.unproject([selection.left + selection.width, centerY]);
+  const groundWidthFeet = Math.max(
+    1,
+    distanceFeetBetween(westPoint.lng, westPoint.lat, eastPoint.lng, eastPoint.lat),
+  );
+  const scaleDenominator = snapMapScaleToHundred(getMapScaleDenominator(map, selection, settings));
   const scaleBarFeet = niceScaleBarFeet(groundWidthFeet * 0.22);
 
   return {
     groundWidthFeet,
+    scaleDenominator,
     scaleBarFeet,
     scaleBarLabel: formatScaleDistance(scaleBarFeet),
     scaleBarWidthRatio: clampNumber(scaleBarFeet / groundWidthFeet, 0.04, 0.45),
@@ -9078,43 +10529,45 @@ function getMapPdfScaleInfo(map: MapLibreMap, selection: MapPdfSelectionRect): M
 function createMapPdfBlob({
   image,
   northArrowImage,
-  details,
+  departmentLogoImage,
+  settings,
   generatedAt,
   mapBearing,
   scaleInfo,
 }: {
   image: MapPdfImage;
   northArrowImage: MapPdfImage;
-  details: MapPdfExportDetails;
+  departmentLogoImage: MapPdfImage;
+  settings: MapPdfExportSettings;
   generatedAt: Date;
   mapBearing: number;
   scaleInfo: MapPdfScaleInfo;
 }) {
   type PdfObject = Array<string | Uint8Array>;
 
-  const pageWidth = 792;
-  const pageHeight = 612;
-  const margin = 14;
-  const titleBlockWidth = 96;
-  const titleBlockGap = 8;
-  const mapFrameX = margin;
-  const mapFrameY = margin;
-  const mapFrameWidth = pageWidth - margin * 2 - titleBlockGap - titleBlockWidth;
-  const mapFrameHeight = pageHeight - margin * 2;
-  const imageScale = Math.min(mapFrameWidth / image.width, mapFrameHeight / image.height);
+  const layout = getMapPdfLayout(settings);
+  const template = mapPdfTemplate(settings.templateId);
+  const pageScale = mapPdfPageScale(layout.pageWidth, layout.pageHeight);
+  const titleCells = mapPdfTitleBlockCells(settings.templateId, layout.titleBlockPlacement, settings, layout.titleBlockWidth, pageScale);
+  const { pageWidth, pageHeight, mapFrameX, mapFrameY, mapFrameWidth, mapFrameHeight } = layout;
+  const imageScale = Math.min(layout.mapFrameWidth / image.width, layout.mapFrameHeight / image.height);
   const imageWidth = image.width * imageScale;
   const imageHeight = image.height * imageScale;
   const imageX = mapFrameX + (mapFrameWidth - imageWidth) / 2;
   const imageY = mapFrameY + (mapFrameHeight - imageHeight) / 2;
-  const rightBlockX = mapFrameX + mapFrameWidth + titleBlockGap;
-  const rightBlockY = mapFrameY;
-  const rightBlockTop = mapFrameY + mapFrameHeight;
-  const northArrowBoxHeight = 108;
-  const detailsBoxY = rightBlockY;
-  const detailsBoxHeight = mapFrameHeight - northArrowBoxHeight;
-  const scaleDenominator = Math.max(1, Math.round((scaleInfo.groundWidthFeet * 12) / Math.max(1, imageWidth / 72)));
-  const scaleText = `Scale 1:${scaleDenominator.toLocaleString("en-US")}`;
-  const generatedText = `Generated ${formatPdfTimestamp(generatedAt)}`;
+  const scaleText = `Scale 1:${scaleInfo.scaleDenominator.toLocaleString("en-US")}`;
+  const titleTypography = scaledPdfTextStyle(template.typography.title, pageScale);
+  const subtitleTypography = scaledPdfTextStyle(template.typography.subtitle, pageScale);
+  const labelTypography = scaledPdfTextStyle(template.typography.label, pageScale);
+  const valueTypography = scaledPdfTextStyle(template.typography.value, pageScale);
+  const scaleTypography = scaledPdfTextStyle(template.typography.scale, pageScale);
+  const footerTypography = scaledPdfTextStyle(template.typography.footer, pageScale);
+  const metadataCells = mapPdfMetadataCells(
+    settings.author,
+    generatedAt,
+    scaleInfo.scaleDenominator,
+  );
+  const documentFooter = mapPdfDocumentFooter(settings.templateId, mapBearing);
   const encoder = new TextEncoder();
   const objects: PdfObject[] = [
     ["<< /Type /Catalog /Pages 2 0 R >>"],
@@ -9134,6 +10587,12 @@ function createMapPdfBlob({
     northArrowImage.data,
     "\nendstream",
   ]);
+  const departmentLogoObjectId = objects.length + 1;
+  objects.push([
+    `<< /Type /XObject /Subtype /Image /Width ${departmentLogoImage.width} /Height ${departmentLogoImage.height} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${departmentLogoImage.data.length} >>\nstream\n`,
+    departmentLogoImage.data,
+    "\nendstream",
+  ]);
 
   const contentParts: string[] = [];
   const addText = (
@@ -9143,9 +10602,18 @@ function createMapPdfBlob({
     size: number,
     font: "F1" | "F2" = "F1",
     align: "left" | "center" = "left",
+    rotationDegrees = 0,
+    color = "0 0 0 rg",
   ) => {
-    const textX = align === "center" ? x - approximatePdfTextWidth(value, size) / 2 : x;
-    contentParts.push(`0 0 0 rg BT /${font} ${pdfNumber(size)} Tf ${pdfNumber(textX)} ${pdfNumber(y)} Td (${pdfEscape(value)}) Tj ET`);
+    const angle = (rotationDegrees * Math.PI) / 180;
+    const cos = Math.cos(angle);
+    const sin = Math.sin(angle);
+    const offset = align === "center" ? -approximatePdfTextWidth(value, size) / 2 : 0;
+    const textX = x + offset * cos;
+    const textY = y + offset * sin;
+    contentParts.push(
+      `${color} BT /${font} ${pdfNumber(size)} Tf ${pdfNumber(cos)} ${pdfNumber(sin)} ${pdfNumber(-sin)} ${pdfNumber(cos)} ${pdfNumber(textX)} ${pdfNumber(textY)} Tm (${pdfEscape(value)}) Tj ET`,
+    );
   };
   const strokeRect = (x: number, y: number, width: number, height: number, stroke = "0 0 0 RG", lineWidth = 0.7) => {
     contentParts.push(`${stroke} ${pdfNumber(lineWidth)} w ${pdfNumber(x)} ${pdfNumber(y)} ${pdfNumber(width)} ${pdfNumber(height)} re S`);
@@ -9153,7 +10621,31 @@ function createMapPdfBlob({
   const fillRect = (x: number, y: number, width: number, height: number, fill = "1 1 1 rg") => {
     contentParts.push(`${fill} ${pdfNumber(x)} ${pdfNumber(y)} ${pdfNumber(width)} ${pdfNumber(height)} re f`);
   };
-
+  const drawImageContained = (
+    name: string,
+    source: MapPdfImage,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    rotationDegrees = 0,
+  ) => {
+    const normalizedRotation = Math.abs(Math.round(rotationDegrees)) % 180;
+    const rotatedQuarterTurn = normalizedRotation === 90;
+    const fitWidth = rotatedQuarterTurn ? source.height : source.width;
+    const fitHeight = rotatedQuarterTurn ? source.width : source.height;
+    const scale = Math.min(width / fitWidth, height / fitHeight);
+    const renderedWidth = source.width * scale;
+    const renderedHeight = source.height * scale;
+    contentParts.push(pdfImageCommand(
+      name,
+      x + (width - renderedWidth) / 2,
+      y + (height - renderedHeight) / 2,
+      renderedWidth,
+      renderedHeight,
+      rotationDegrees,
+    ));
+  };
   fillRect(0, 0, pageWidth, pageHeight, "1 1 1 rg");
   fillRect(mapFrameX, mapFrameY, mapFrameWidth, mapFrameHeight, "0.98 0.98 0.98 rg");
   contentParts.push(pdfImageCommand("ImMap", imageX, imageY, imageWidth, imageHeight));
@@ -9179,52 +10671,296 @@ function createMapPdfBlob({
   addText(scaleInfo.scaleBarLabel, scaleBarX + scaleBarWidth, scaleBarY - 6, 5, "F1", "center");
   addText(scaleText, scaleBarX + scaleBarWidth / 2, scaleBarY + 12, 6, "F2", "center");
 
-  strokeRect(rightBlockX, rightBlockY, titleBlockWidth, mapFrameHeight, "0 0 0 RG", 1);
-  strokeRect(rightBlockX, rightBlockTop - northArrowBoxHeight, titleBlockWidth, northArrowBoxHeight, "0 0 0 RG", 1);
-  const northArrowPadding = 8;
-  const northArrowMaxWidth = titleBlockWidth - northArrowPadding * 2;
-  const northArrowMaxHeight = northArrowBoxHeight - northArrowPadding * 2;
-  const northArrowScale = Math.min(northArrowMaxWidth / northArrowImage.width, northArrowMaxHeight / northArrowImage.height);
-  const northArrowWidth = northArrowImage.width * northArrowScale;
-  const northArrowHeight = northArrowImage.height * northArrowScale;
-  const northArrowX = rightBlockX + titleBlockWidth / 2 - northArrowWidth / 2;
-  const northArrowY = rightBlockTop - northArrowBoxHeight + northArrowBoxHeight / 2 - northArrowHeight / 2;
-  contentParts.push(pdfImageCommand("ImNorth", northArrowX, northArrowY, northArrowWidth, northArrowHeight, -mapBearing));
+  const blockX = layout.titleBlockX;
+  const blockY = layout.titleBlockY;
+  const blockWidth = layout.titleBlockWidth;
+  const blockHeight = layout.titleBlockHeight;
+  const titleBlockStroke = pdfRgbColor(template.titleBlock.borderColor, "RG");
+  const titleBlockLineWidth = clampNumber(template.titleBlock.borderWidthPoints * pageScale * 1.6, 1.2, 3);
+  const identityFill = pdfRgbColor(mapPdfTemplateCellBackground(settings.templateId, "identity"));
+  const northArrowFill = pdfRgbColor(mapPdfTemplateCellBackground(settings.templateId, "north-arrow"));
+  const metadataFill = pdfRgbColor(mapPdfTemplateCellBackground(settings.templateId, "metadata"));
+  const brandingFill = pdfRgbColor(mapPdfTemplateCellBackground(settings.templateId, "branding"));
+  fillRect(blockX, blockY, blockWidth, blockHeight, pdfRgbColor(template.titleBlock.background));
+  strokeRect(blockX, blockY, blockWidth, blockHeight, titleBlockStroke, titleBlockLineWidth);
 
-  strokeRect(rightBlockX, detailsBoxY, titleBlockWidth, detailsBoxHeight, "0 0 0 RG", 1);
-  let detailY = rightBlockTop - northArrowBoxHeight - 20;
-  wrapPdfText(details.mapName || "Storm Water Asset Risk Map", 17).forEach((line, index) => {
-    addText(line, rightBlockX + titleBlockWidth / 2, detailY - index * 11, 8.5, "F2", "center");
-  });
-  detailY -= Math.max(2, wrapPdfText(details.mapName || "Storm Water Asset Risk Map", 17).length) * 11 + 8;
-  addText("Author", rightBlockX + 8, detailY, 6.5, "F2");
-  detailY -= 10;
-  wrapPdfText(details.author || "-", 18).slice(0, 3).forEach((line) => {
-    addText(line, rightBlockX + 8, detailY, 7, "F1");
-    detailY -= 9;
-  });
-  detailY -= 6;
-  addText("Map Scale", rightBlockX + 8, detailY, 6.5, "F2");
-  detailY -= 10;
-  addText(scaleText, rightBlockX + 8, detailY, 7.5, "F1");
-  detailY -= 10;
-  addText(`Scale Bar: ${scaleInfo.scaleBarLabel}`, rightBlockX + 8, detailY, 7, "F1");
-  detailY -= 16;
-  addText("Generated", rightBlockX + 8, detailY, 6.5, "F2");
-  detailY -= 10;
-  wrapPdfText(generatedText, 19).slice(0, 3).forEach((line) => {
-    addText(line, rightBlockX + 8, detailY, 6.5, "F1");
-    detailY -= 8;
-  });
-  detailY -= 8;
-  addText(`Rotation ${Math.round(normalizeBearingDegrees(mapBearing))} deg`, rightBlockX + 8, detailY, 6.5, "F1");
+  if (layout.titleBlockPlacement === "right") {
+    const northArrowBoxHeight = blockHeight * (titleCells.northArrow / 100);
+    const logoBoxHeight = blockHeight * (titleCells.branding / 100);
+    const northArrowY = blockY + blockHeight - northArrowBoxHeight;
+    const metadataHeight = blockHeight * (titleCells.metadata / 100);
+    const metadataY = blockY + logoBoxHeight;
+    const titleBoxY = metadataY + metadataHeight;
+    const titleBoxHeight = Math.max(1, northArrowY - titleBoxY);
+    fillRect(blockX, northArrowY, blockWidth, northArrowBoxHeight, northArrowFill);
+    fillRect(blockX, blockY, blockWidth, logoBoxHeight, brandingFill);
+    fillRect(blockX, metadataY, blockWidth, metadataHeight, metadataFill);
+    strokeRect(blockX, northArrowY, blockWidth, northArrowBoxHeight, titleBlockStroke, titleBlockLineWidth);
+    strokeRect(blockX, blockY, blockWidth, logoBoxHeight, titleBlockStroke, titleBlockLineWidth);
+    drawImageContained("ImNorth", northArrowImage, blockX + 8, northArrowY + 8, blockWidth - 16, northArrowBoxHeight - 16, -mapBearing);
+    drawImageContained(
+      "ImLogo",
+      departmentLogoImage,
+      blockX + 7,
+      blockY + 7,
+      blockWidth - 14,
+      logoBoxHeight - 14,
+    );
+
+    fillRect(blockX, titleBoxY, blockWidth, titleBoxHeight, identityFill);
+    strokeRect(blockX, titleBoxY, blockWidth, titleBoxHeight, titleBlockStroke, titleBlockLineWidth);
+    const identityCenterX = blockX + blockWidth / 2;
+    const identityPaddingX = clampNumber(blockWidth * 0.08, 8, 15);
+    const rightTitleValue = settings.mapName || "Storm Water Asset Risk Map";
+    const rightTitleMaxCharacters = Math.max(10, Math.floor((blockWidth - identityPaddingX * 2) / (titleTypography.sizePoints * 0.62)));
+    const rightTitleLines = wrapPdfTextBalanced(rightTitleValue, rightTitleMaxCharacters, 3);
+    const rightSubtitleMaxCharacters = Math.max(12, Math.floor((blockWidth - identityPaddingX * 2) / (subtitleTypography.sizePoints * 0.54)));
+    const rightSubtitleLines = settings.subtitle ? wrapPdfText(settings.subtitle, rightSubtitleMaxCharacters).slice(0, 2) : [];
+    const rightTitleLineHeight = titleTypography.sizePoints + 2;
+    const rightSubtitleLineHeight = subtitleTypography.sizePoints + 1.5;
+    const rightIdentityAvailableWidth = (blockWidth - identityPaddingX * 2) * 0.9;
+    const rightFooterMinSize = 7;
+    const rightFooterFitsOneLine = approximatePdfTextWidth(documentFooter, rightFooterMinSize) <= rightIdentityAvailableWidth;
+    const rightFooterMaxCharacters = Math.max(14, Math.floor(rightIdentityAvailableWidth / (rightFooterMinSize * 0.5)));
+    const rightFooterLines = rightFooterFitsOneLine
+      ? [documentFooter]
+      : wrapPdfText(documentFooter, rightFooterMaxCharacters).slice(0, 2);
+    const rightFooterLineHeight = footerTypography.sizePoints + 2;
+    const rightIdentityGroupHeight = rightTitleLines.length * rightTitleLineHeight
+      + (rightSubtitleLines.length ? 4 + rightSubtitleLines.length * rightSubtitleLineHeight : 0)
+      + 8 + rightFooterLines.length * rightFooterLineHeight;
+    let rightIdentityY = titleBoxY + titleBoxHeight / 2 + rightIdentityGroupHeight / 2 - titleTypography.sizePoints;
+    rightTitleLines.forEach((line) => {
+      addText(
+        line,
+        identityCenterX,
+        rightIdentityY,
+        fittedPdfTextSize(line, rightIdentityAvailableWidth, titleTypography.sizePoints, 8),
+        pdfFontForWeight(titleTypography.weight),
+        "center",
+        0,
+        pdfRgbColor(titleTypography.color),
+      );
+      rightIdentityY -= rightTitleLineHeight;
+    });
+    if (rightSubtitleLines.length) {
+      rightIdentityY -= 2;
+      rightSubtitleLines.forEach((line) => {
+        addText(
+          line,
+          identityCenterX,
+          rightIdentityY,
+          fittedPdfTextSize(line, rightIdentityAvailableWidth, subtitleTypography.sizePoints, 7),
+          pdfFontForWeight(subtitleTypography.weight),
+          "center",
+          0,
+          pdfRgbColor(subtitleTypography.color),
+        );
+        rightIdentityY -= rightSubtitleLineHeight;
+      });
+    }
+    rightIdentityY -= 6;
+    rightFooterLines.forEach((line) => {
+      addText(
+        line,
+        identityCenterX,
+        rightIdentityY,
+        fittedPdfTextSize(line, rightIdentityAvailableWidth, footerTypography.sizePoints, 7),
+        pdfFontForWeight(footerTypography.weight),
+        "center",
+        0,
+        pdfRgbColor(footerTypography.color),
+      );
+      rightIdentityY -= rightFooterLineHeight;
+    });
+
+    const metadataRowNaturalHeights = metadataCells.map((cell) => mapPdfMetadataCellContentHeight(cell, template, pageScale));
+    const metadataRowNaturalTotal = Math.max(1, metadataRowNaturalHeights.reduce((sum, height) => sum + height, 0));
+    const metadataRowHeights = metadataRowNaturalHeights.map((height) => metadataHeight * (height / metadataRowNaturalTotal));
+    strokeRect(blockX, metadataY, blockWidth, metadataHeight, titleBlockStroke, titleBlockLineWidth);
+    let metadataRowTop = metadataY + metadataHeight;
+    metadataCells.forEach((cell, cellIndex) => {
+      const metadataCellHeight = metadataRowHeights[cellIndex];
+      const cellBottom = metadataRowTop - metadataCellHeight;
+      if (cellIndex > 0) {
+        contentParts.push(`${titleBlockStroke} ${pdfNumber(titleBlockLineWidth)} w ${pdfNumber(blockX)} ${pdfNumber(metadataRowTop)} m ${pdfNumber(blockX + blockWidth)} ${pdfNumber(metadataRowTop)} l S`);
+      }
+      metadataRowTop = cellBottom;
+      const valueLines = cell.values.map((value) => {
+        const style = value.kind === "scale"
+          ? scaleTypography
+          : value.kind === "footer"
+            ? footerTypography
+            : valueTypography;
+        return {
+          text: value.text,
+          size: style.sizePoints,
+          font: pdfFontForWeight(style.weight),
+          color: pdfRgbColor(style.color),
+        };
+      });
+      const lines = [
+        {
+          text: cell.label,
+          size: labelTypography.sizePoints,
+          font: pdfFontForWeight(labelTypography.weight),
+          color: pdfRgbColor(labelTypography.color),
+        },
+        ...valueLines,
+      ];
+      const lineCenters = lines.map((_, lineIndex) => 1 - (lineIndex + 0.5) / lines.length);
+      lines.forEach((line, lineIndex) => {
+        addText(
+          line.text,
+          identityCenterX,
+          cellBottom + metadataCellHeight * lineCenters[lineIndex],
+          fittedPdfTextSize(line.text, (blockWidth - 10) * 0.9, line.size, 8),
+          line.font,
+          "center",
+          0,
+          line.color,
+        );
+      });
+    });
+  } else {
+    const northArrowBoxWidth = blockWidth * (titleCells.northArrow / 100);
+    const identityBoxWidth = blockWidth * (titleCells.identity / 100);
+    const metadataBoxWidth = blockWidth * (titleCells.metadata / 100);
+    const brandingBoxWidth = blockWidth - northArrowBoxWidth - identityBoxWidth - metadataBoxWidth;
+    const identityX = blockX + northArrowBoxWidth;
+    const metadataX = identityX + identityBoxWidth;
+    const brandingX = metadataX + metadataBoxWidth;
+
+    fillRect(blockX, blockY, northArrowBoxWidth, blockHeight, northArrowFill);
+    fillRect(identityX, blockY, identityBoxWidth, blockHeight, identityFill);
+    fillRect(metadataX, blockY, metadataBoxWidth, blockHeight, metadataFill);
+    fillRect(brandingX, blockY, brandingBoxWidth, blockHeight, brandingFill);
+    const horizontalCells: Array<[number, number]> = [
+      [blockX, northArrowBoxWidth],
+      [identityX, identityBoxWidth],
+      [metadataX, metadataBoxWidth],
+      [brandingX, brandingBoxWidth],
+    ];
+    horizontalCells.forEach(([cellX, cellWidth]) => {
+      strokeRect(cellX, blockY, cellWidth, blockHeight, titleBlockStroke, titleBlockLineWidth);
+    });
+
+    const northArrowPadding = clampNumber(Math.min(northArrowBoxWidth, blockHeight) * 0.14, 7, 14);
+    drawImageContained(
+      "ImNorth",
+      northArrowImage,
+      blockX + northArrowPadding,
+      blockY + northArrowPadding,
+      northArrowBoxWidth - northArrowPadding * 2,
+      blockHeight - northArrowPadding * 2,
+      -mapBearing,
+    );
+
+    const titleValue = settings.mapName || "Storm Water Asset Risk Map";
+    const identityPaddingX = clampNumber(identityBoxWidth * 0.05, 8, 15);
+    const identityCenterX = identityX + identityBoxWidth / 2;
+    const titleMaxCharacters = Math.max(18, Math.floor((identityBoxWidth - identityPaddingX * 2) / (titleTypography.sizePoints * 0.62)));
+    const titleLines = wrapPdfTextBalanced(titleValue, titleMaxCharacters, 2);
+    const subtitleMaxCharacters = Math.max(22, Math.floor((identityBoxWidth - identityPaddingX * 2) / (subtitleTypography.sizePoints * 0.54)));
+    const subtitleLines = settings.subtitle ? wrapPdfText(settings.subtitle, subtitleMaxCharacters).slice(0, 2) : [];
+    const titleLineHeight = titleTypography.sizePoints + 2;
+    const subtitleLineHeight = subtitleTypography.sizePoints + 1.5;
+    const identityContentHeight = titleLines.length * titleLineHeight + (subtitleLines.length ? 3 + subtitleLines.length * subtitleLineHeight : 0);
+    const footerAvailableWidth = (identityBoxWidth - identityPaddingX * 2) * 0.9;
+    const footerMinSize = 8;
+    const footerFitsOneLine = approximatePdfTextWidth(documentFooter, footerMinSize) <= footerAvailableWidth;
+    const footerMaxCharacters = Math.max(14, Math.floor(footerAvailableWidth / (footerMinSize * 0.5)));
+    const footerLines = footerFitsOneLine ? [documentFooter] : wrapPdfText(documentFooter, footerMaxCharacters).slice(0, 2);
+    const footerLineHeight = footerTypography.sizePoints + 2;
+    const identityFooterBandHeight = footerLines.length * footerLineHeight + 8;
+    const identityMainHeight = Math.max(1, blockHeight - identityFooterBandHeight);
+    let identityY = blockY + identityFooterBandHeight + identityMainHeight / 2 + identityContentHeight / 2 - titleTypography.sizePoints;
+    titleLines.forEach((line) => {
+      addText(line, identityCenterX, identityY, titleTypography.sizePoints, pdfFontForWeight(titleTypography.weight), "center", 0, pdfRgbColor(titleTypography.color));
+      identityY -= titleLineHeight;
+    });
+    if (subtitleLines.length) {
+      identityY -= 1;
+      subtitleLines.forEach((line) => {
+        addText(line, identityCenterX, identityY, subtitleTypography.sizePoints, pdfFontForWeight(subtitleTypography.weight), "center", 0, pdfRgbColor(subtitleTypography.color));
+        identityY -= subtitleLineHeight;
+      });
+    }
+    let footerY = blockY + 6 + (footerLines.length - 1) * footerLineHeight;
+    footerLines.forEach((line) => {
+      addText(
+        line,
+        identityCenterX,
+        footerY,
+        fittedPdfTextSize(line, footerAvailableWidth, footerTypography.sizePoints, 8),
+        pdfFontForWeight(footerTypography.weight),
+        "center",
+        0,
+        pdfRgbColor(footerTypography.color),
+      );
+      footerY -= footerLineHeight;
+    });
+    const metadataCellWidth = metadataBoxWidth / metadataCells.length;
+    const metadataMaxLines = Math.max(...metadataCells.map((cell) => 1 + cell.values.length));
+    const metadataLineCenters = Array.from({ length: metadataMaxLines }, (_, lineIndex) => 1 - (lineIndex + 0.5) / metadataMaxLines);
+    metadataCells.forEach((cell, index) => {
+      const cellX = metadataX + metadataCellWidth * index;
+      if (index > 0) {
+        contentParts.push(`${titleBlockStroke} ${pdfNumber(titleBlockLineWidth)} w ${pdfNumber(cellX)} ${pdfNumber(blockY)} m ${pdfNumber(cellX)} ${pdfNumber(blockY + blockHeight)} l S`);
+      }
+      const valueLines = cell.values.map((value) => {
+        const style = value.kind === "scale"
+          ? scaleTypography
+          : value.kind === "footer"
+            ? footerTypography
+            : valueTypography;
+        return {
+          text: value.text,
+          size: style.sizePoints,
+          font: pdfFontForWeight(style.weight),
+          color: pdfRgbColor(style.color),
+        };
+      });
+      const lines = [
+        {
+          text: cell.label,
+          size: labelTypography.sizePoints,
+          font: pdfFontForWeight(labelTypography.weight),
+          color: pdfRgbColor(labelTypography.color),
+        },
+        ...valueLines,
+      ];
+      lines.forEach((line, lineIndex) => {
+        addText(
+          line.text,
+          cellX + metadataCellWidth / 2,
+          blockY + blockHeight * metadataLineCenters[lineIndex],
+          fittedPdfTextSize(line.text, (metadataCellWidth - 10) * 0.9, line.size, 10),
+          line.font,
+          "center",
+          0,
+          line.color,
+        );
+      });
+    });
+
+    const logoPadding = clampNumber(Math.min(brandingBoxWidth, blockHeight) * 0.08, 6, 11);
+    drawImageContained(
+      "ImLogo",
+      departmentLogoImage,
+      brandingX + logoPadding,
+      blockY + logoPadding,
+      brandingBoxWidth - logoPadding * 2,
+      blockHeight - logoPadding * 2,
+    );
+  }
 
   const content = contentParts.join("\n");
   const contentObjectId = objects.length + 1;
   objects.push([`<< /Length ${encoder.encode(content).length} >>\nstream\n${content}\nendstream`]);
   const pageObjectId = objects.length + 1;
   objects.push([
-    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << /ImMap ${imageObjectId} 0 R /ImNorth ${northArrowObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Resources << /Font << /F1 3 0 R /F2 4 0 R >> /XObject << /ImMap ${imageObjectId} 0 R /ImNorth ${northArrowObjectId} 0 R /ImLogo ${departmentLogoObjectId} 0 R >> >> /Contents ${contentObjectId} 0 R >>`,
   ]);
   objects[1] = [`<< /Type /Pages /Kids [${pageObjectId} 0 R] /Count 1 >>`];
 
@@ -9341,13 +11077,87 @@ function wrapPdfText(value: string, maxCharacters: number): string[] {
   return lines;
 }
 
+// Wraps to the same number of lines as a normal greedy wrap, but balances
+// the word distribution across those lines (rather than always packing the
+// first line to the max) so short titles don't end up with a long first
+// line and a single orphan word on the last line.
+function wrapPdfTextBalanced(value: string, maxCharacters: number, maxLines: number): string[] {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  if (!words.length) {
+    return ["-"];
+  }
+  if (words.length === 1) {
+    return [words[0]];
+  }
+  const greedy = wrapPdfText(value, maxCharacters);
+  const targetLines = Math.min(maxLines, greedy.length);
+  if (targetLines <= 1 || words.length > 14) {
+    return greedy;
+  }
+  const joinRange = (start: number, end: number) => words.slice(start, end).join(" ");
+  let best: { splits: number[]; maxLen: number } | null = null;
+  const trySplits = (splits: number[], startIndex: number) => {
+    if (splits.length === targetLines - 1) {
+      const bounds = [0, ...splits, words.length];
+      let maxLen = 0;
+      for (let i = 0; i < bounds.length - 1; i += 1) {
+        const len = joinRange(bounds[i], bounds[i + 1]).length;
+        if (len > maxCharacters) {
+          return;
+        }
+        maxLen = Math.max(maxLen, len);
+      }
+      if (!best || maxLen < best.maxLen) {
+        best = { splits: [...splits], maxLen };
+      }
+      return;
+    }
+    for (let i = startIndex; i < words.length; i += 1) {
+      trySplits([...splits, i], i + 1);
+    }
+  };
+  trySplits([], 1);
+  if (!best) {
+    return greedy.slice(0, maxLines);
+  }
+  const bestSplits = (best as { splits: number[]; maxLen: number }).splits;
+  const bounds = [0, ...bestSplits, words.length];
+  const lines: string[] = [];
+  for (let i = 0; i < bounds.length - 1; i += 1) {
+    lines.push(joinRange(bounds[i], bounds[i + 1]));
+  }
+  return lines;
+}
+
 function approximatePdfTextWidth(value: string, size: number): number {
-  return value.length * size * 0.48;
+  return value.length * size * 0.62;
 }
 
 function fileSafeMapName(value: string): string {
   const safeName = value.trim().replace(/[^a-z0-9]+/gi, "_").replace(/^_+|_+$/g, "");
   return safeName || "Storm_Water_Asset_Risk_Map";
+}
+
+function portalUserDisplayNameFromUrl(): string {
+  const search = new URLSearchParams(window.location.search);
+  const fullName = [search.get("portal_first_name"), search.get("portal_last_name")]
+    .map((value) => value?.trim() || "")
+    .filter(Boolean)
+    .join(" ");
+  return fullName || "Signed-in user";
+}
+
+function defaultMapPdfExportSettings(): MapPdfExportSettings {
+  const template = mapPdfTemplate("operations-field-map");
+  return {
+    templateId: template.id,
+    mapName: template.defaults.title,
+    subtitle: template.defaults.subtitle,
+    author: portalUserDisplayNameFromUrl(),
+    pageSize: template.page.size,
+    orientation: template.page.orientation,
+    qualityDpi: template.page.qualityDpi,
+  };
 }
 
 function downloadBlob(blob: Blob, fileName: string): void {
@@ -9366,12 +11176,31 @@ function dateStamp(date: Date): string {
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
 }
 
-function formatPdfTimestamp(date: Date): string {
-  return formatDateTime(date);
-}
-
 function pdfNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
+}
+
+function pdfFontForWeight(weight: number): "F1" | "F2" {
+  return weight >= 600 ? "F2" : "F1";
+}
+
+function pdfRgbColor(value: string, operator: "rg" | "RG" = "rg"): string {
+  const match = /^#([0-9a-f]{6})$/i.exec(value.trim());
+  if (!match) {
+    return operator === "RG" ? "0 0 0 RG" : "0 0 0 rg";
+  }
+  const packed = Number.parseInt(match[1], 16);
+  const channels = [(packed >> 16) & 255, (packed >> 8) & 255, packed & 255]
+    .map((channel) => (channel / 255).toFixed(3).replace(/0+$/, "").replace(/\.$/, ""));
+  return `${channels.join(" ")} ${operator}`;
+}
+
+function fittedPdfTextSize(value: string, maxWidth: number, preferredSize: number, minimumSize = 4.5): number {
+  const estimatedWidth = approximatePdfTextWidth(value, preferredSize);
+  if (estimatedWidth <= maxWidth || estimatedWidth <= 0) {
+    return preferredSize;
+  }
+  return clampNumber(preferredSize * (maxWidth / estimatedWidth), minimumSize, preferredSize);
 }
 
 function pdfEscape(value: string): string {

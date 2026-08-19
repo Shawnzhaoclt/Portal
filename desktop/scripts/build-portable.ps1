@@ -2,7 +2,6 @@
 param(
     [string]$OutputDirectory,
     [string]$PythonExecutable,
-    [string]$SystemDatabase,
     [string]$Version
 )
 
@@ -48,13 +47,6 @@ if ($OutputDirectory) {
     }
 }
 $OutputDirectory = $defaultOutputDirectory
-if (-not $SystemDatabase) {
-    $SystemDatabase = Join-Path $projectRoot "portal-manager\dist\Portal-Manager\config\system.db"
-}
-$SystemDatabase = [System.IO.Path]::GetFullPath($SystemDatabase)
-if (-not (Test-Path -LiteralPath $SystemDatabase -PathType Leaf)) {
-    throw "The authoritative Portal Manager system database was not found at $SystemDatabase."
-}
 $OutputDirectory = [System.IO.Path]::GetFullPath($OutputDirectory)
 $outputPrefix = $OutputDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 $existingSettingsPath = Join-Path $OutputDirectory "config\portal.settings.json"
@@ -156,7 +148,7 @@ if (-not (Get-Command $PythonExecutable -ErrorAction SilentlyContinue)) {
     throw "Python was not found. It is required only on the build workstation."
 }
 
-& $PythonExecutable -c "import dotenv, duckdb, geopandas, openpyxl, pandas, pyodbc, pyogrio, pyproj, rasterio, shapely, sqlalchemy"
+& $PythonExecutable -c "import dotenv, duckdb, geopandas, openpyxl, pandas, pyodbc, pyogrio, pyproj, rasterio, shapely, sqlalchemy; from sqlcipher3 import dbapi2 as sqlcipher; c=sqlcipher.connect(':memory:'); assert c.execute('PRAGMA cipher_version').fetchone()[0]"
 if ($LASTEXITCODE -ne 0) {
     throw "The selected Python environment is missing Portal runtime dependencies: $PythonExecutable"
 }
@@ -218,7 +210,7 @@ try {
     try {
         $env:PORTAL_SYSTEM_DB = $systemSeed
         & $PythonExecutable -c "from portal.app.management.seed import initialize_management_database; initialize_management_database()"
-        if ($LASTEXITCODE -ne 0) { throw "Desktop system database initialization failed." }
+        if ($LASTEXITCODE -ne 0) { throw "Desktop catalog seed initialization failed." }
     }
     finally {
         if ($null -eq $previousSystemDatabase) {
@@ -250,10 +242,10 @@ New-Item -ItemType Directory -Force -Path $pythonDist, $pythonBuild | Out-Null
     --collect-submodules shapely `
     --collect-all pytz `
     --collect-all pyogrio `
+    --hidden-import sqlcipher3.dbapi2 `
     --add-data "$pythonPrefix\Library\share\gdal;Library\share\gdal" `
     --add-data "$projectRoot\python\portal\app\config;portal\app\config" `
     --add-data "$projectRoot\python\portal\app\resources\maps\stm_risk_map\assets;portal\app\resources\maps\stm_risk_map\assets" `
-    --add-data "$systemSeed;portal\data" `
     --add-data "$projectRoot\python\portal\environment.yml;portal" `
     --add-data "$uiRoot\src\resources;portal\resource_metadata" `
     (Join-Path $pythonIpcRoot "portal_worker.py")
@@ -356,9 +348,10 @@ if ($null -ne $existingSettings) {
     Copy-Item -LiteralPath $settingsTemplatePath -Destination $settingsOutput -Force
 }
 Copy-Item -LiteralPath $projectConfigSourcePath -Destination (Join-Path $configOutput "project.toml") -Force
+# Never place a plaintext system catalog in the Desktop package. Portal encrypts
+# the verified system.catalog source with SQLCipher during local cache activation.
 $packagedSystemDatabase = Join-Path $configOutput "system.db"
-Copy-Item -LiteralPath $SystemDatabase -Destination $packagedSystemDatabase -Force
-Set-ItemProperty -LiteralPath $packagedSystemDatabase -Name IsReadOnly -Value $true
+Remove-Item -LiteralPath $packagedSystemDatabase -Force -ErrorAction SilentlyContinue
 
 $version = $Version
 Set-Content -LiteralPath (Join-Path $OutputDirectory "VERSION") -Value $version -Encoding ascii
@@ -368,7 +361,9 @@ Storm Water Asset Intelligence Portal Desktop $version
 Run Portal.exe from this local folder. No local service or installer is required.
 Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. At startup,
 the application checks the shared publication manifest and activates verified read-only
-system catalog, DuckDB, PMTiles, and terrain files in its local versioned source cache.
+DuckDB, PMTiles, and terrain files in its local versioned source cache. The system catalog
+is converted to SQLCipher with a per-user key protected by Windows DPAPI; no plaintext
+system database is included in this package.
 The frequently refreshed portal.serving SQLite snapshot is the only direct-network
 source and is resolved through its atomic G-drive manifest. All other resources read
 active local versions. The map project catalog is

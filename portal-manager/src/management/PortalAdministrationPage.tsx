@@ -18,7 +18,7 @@ export default function PortalAdministrationPage({ onBack }: PortalAdministratio
       showSystemCatalogPublication
       onPublishSystemCatalog={async () => {
         const confirmed = await appConfirm(
-          "Publish the current authoritative system catalog as a read-only Portal data version?",
+          "Publish the current authoritative system catalog as Portal data? Desktop clients will encrypt it with SQLCipher during local activation.",
           { title: "Publish system catalog", kind: "warning", confirmLabel: "Publish catalog" },
         );
         if (!confirmed) return;
@@ -27,8 +27,8 @@ export default function PortalAdministrationPage({ onBack }: PortalAdministratio
         }>("publish_system_catalog_data");
         const publicationId = result.publication?.central_publication_id;
         return publicationId
-          ? `Read-only system catalog published in data manifest ${publicationId}.`
-          : "Read-only system catalog published.";
+          ? `System catalog published in data manifest ${publicationId}. Desktop clients will activate encrypted copies.`
+          : "System catalog published. Desktop clients will activate encrypted copies.";
       }}
     />
   );

@@ -67,6 +67,7 @@ class Resource(Base):
         CheckConstraint("resource_id GLOB '[A-Z][A-Z][A-Z][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9][A-Z0-9]'", name="ck_resources_resource_id_format"),
         CheckConstraint("is_public IN (0, 1)", name="ck_resources_is_public"),
         CheckConstraint("is_active IN (0, 1)", name="ck_resources_is_active"),
+        CheckConstraint("is_released IN (0, 1)", name="ck_resources_is_released"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
@@ -80,6 +81,9 @@ class Resource(Base):
     icon: Mapped[str | None] = mapped_column(String)
     is_public: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, index=True)
+    is_released: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0", index=True)
+    released_at: Mapped[str | None] = mapped_column(String)
+    released_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("SYS_USERS.id", ondelete="SET NULL"))
     created_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp())
     updated_at: Mapped[str] = mapped_column(String, nullable=False, server_default=func.current_timestamp(), onupdate=func.current_timestamp())
 

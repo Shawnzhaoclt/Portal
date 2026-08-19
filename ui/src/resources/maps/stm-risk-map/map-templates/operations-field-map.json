@@ -1,0 +1,64 @@
+{
+  "$schema": "./map-template.schema.json",
+  "schemaVersion": 1,
+  "id": "operations-field-map",
+  "name": "Operations Field Map",
+  "description": "Compact Letter landscape map optimized for crews, inspections, and day-to-day operational use.",
+  "category": "operations",
+  "page": {
+    "size": "letter",
+    "orientation": "landscape",
+    "qualityDpi": 300,
+    "marginInches": 0.125
+  },
+  "mapFrame": {
+    "borderWidthPoints": 0.75,
+    "background": "#ffffff",
+    "showScaleBar": true,
+    "scaleBarPosition": "bottom-left",
+    "showLegend": true,
+    "legendPosition": "bottom-right"
+  },
+  "titleBlock": {
+    "placement": "right",
+    "sizePercent": 11.5,
+    "background": "#ffffff",
+    "borderColor": "#334155",
+    "borderWidthPoints": 0.75,
+    "cells": [
+      { "id": "north-arrow", "sizePercent": 8, "background": "#ffffff" },
+      { "id": "identity", "sizePercent": 34, "background": "#ffffff" },
+      { "id": "metadata", "sizePercent": 40, "background": "#ffffff" },
+      { "id": "branding", "sizePercent": 18, "background": "#ffffff" }
+    ]
+  },
+  "typography": {
+    "family": "Arial",
+    "title": { "sizePoints": 16, "weight": 700, "color": "#0f172a", "orientation": "vertical" },
+    "subtitle": { "sizePoints": 10, "weight": 500, "color": "#64748b", "orientation": "vertical" },
+    "label": { "sizePoints": 10, "weight": 700, "color": "#64748b", "uppercase": true, "letterSpacingEm": 0.07 },
+    "value": { "sizePoints": 12, "weight": 600, "color": "#0f172a" },
+    "scale": { "sizePoints": 12, "weight": 700, "color": "#0f172a" },
+    "footer": { "sizePoints": 10, "weight": 700, "color": "#64748b", "uppercase": true, "letterSpacingEm": 0.07 }
+  },
+  "northArrow": {
+    "style": "vintage-monochrome",
+    "detail": "low",
+    "labels": "north-only",
+    "rotateWithMap": true
+  },
+  "metadata": {
+    "rows": ["preparedBy", "generatedAt", "mapScaleAndRotation"],
+    "showPageNumber": true,
+    "usageLabel": "Field use"
+  },
+  "branding": {
+    "logo": "charlotte-mecklenburg-storm-water-services",
+    "logoTreatment": "full-color"
+  },
+  "defaults": {
+    "title": "Storm Water Field Map",
+    "subtitle": "",
+    "scaleSnap": 100
+  }
+}

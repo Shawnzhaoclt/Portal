@@ -738,11 +738,60 @@
 
 .management-resource-filters {
   display: grid;
-  grid-template-columns: minmax(260px, 2fr) repeat(4, minmax(150px, 1fr));
+  grid-template-columns: minmax(240px, 2fr) repeat(6, minmax(130px, 1fr));
   gap: 8px;
   border-bottom: 1px solid #d6dee8;
   padding: 12px 16px;
   background: #ffffff;
+}
+
+.management-release-publication-notice {
+  border-bottom: 1px solid #e2c56f;
+  border-left: 4px solid #c78700;
+  padding: 10px 16px;
+  background: #fff8df;
+  color: #6f4900;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.management-release-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.management-release-badge.released {
+  border-color: #9bc9ad;
+  background: #eaf7ef;
+  color: #17643a;
+}
+
+.management-release-badge.unreleased {
+  border-color: #dfbd69;
+  background: #fff7dc;
+  color: #805500;
+}
+
+.management-resource-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.management-page button.management-danger-button {
+  border-color: #e5a29b;
+  color: #a61b12;
+  background: #fffafa;
 }
 
 .management-table-caption {

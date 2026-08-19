@@ -6,7 +6,10 @@ import re
 import sqlite3
 from typing import Any
 
-from portal.runtime.transport import APIRouter, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 
 from portal.app.core.data_sources import critical_team_data_source, portal_env
 from portal.app.core.records import clean_record
@@ -16,10 +19,14 @@ from portal.app.dashboards.critical_team.router import (
     critical_team_uses_serving_tables,
     fetch_all,
 )
-from portal.app.management.database import SYSTEM_TABLES, management_database_path
+from portal.app.management.database import SYSTEM_TABLES, get_db, management_database_path
+from portal.app.management.models import Resource, Team, User
+from portal.app.management.router import get_current_user
+from portal.app.management.services import effective_resource_permission, team_descendant_ids
 
 
 router = APIRouter(prefix="/api/planning", tags=["planning"])
+PENDING_AIF_RESOURCE_ID = "TABT946I"
 
 PENDING_AIF_SORT_EXPRESSIONS = {
     "inspection_id": "inspection_id",
@@ -64,10 +71,6 @@ AIF_OVERVIEW_ACTIVITY_COLORS = {
     "inspections": "#4e79a7",
     "project_started": "#f28e2b",
 }
-
-PENDING_AIF_SQL_CATEGORY_COLUMNS = [
-    column for column in PENDING_AIF_CATEGORY_COLUMNS if column != "team"
-]
 
 PENDING_AIF_OUTPUT_COLUMNS = [
     "inspection_id",
@@ -191,6 +194,42 @@ def enrich_pending_aif_team(record: dict[str, Any], lookup: dict[str, str]) -> d
         if team_name:
             break
     return {**record, "team": team_name}
+
+
+def pending_aif_authorized_team_names(db: Session, user: User) -> set[str] | None:
+    """Return the record-level team scope, or ``None`` when the user may see every row."""
+    resource = db.scalar(select(Resource).where(Resource.resource_id == PENDING_AIF_RESOURCE_ID))
+    if resource is None or resource.is_active != 1:
+        raise HTTPException(status_code=503, detail="Planning Team QA/AC Tables is not registered in the Portal catalog.")
+
+    effective = effective_resource_permission(db, user, resource)
+    permission_types = set((effective or {}).get("permission_types") or [])
+    if permission_types.intersection({"manage", "admin"}):
+        return None
+    if "view" not in permission_types:
+        raise HTTPException(status_code=403, detail="Planning Team QA/AC Tables requires View or Manage permission.")
+    if user.team_id is None:
+        return set()
+
+    team_ids = team_descendant_ids(db, [user.team_id])
+    if not team_ids:
+        return set()
+    names = db.scalars(
+        select(Team.name).where(
+            Team.id.in_(team_ids),
+            Team.is_active == 1,
+        )
+    ).all()
+    return {str(name).strip() for name in names if str(name or "").strip()}
+
+
+def scope_pending_aif_records(
+    records: list[dict[str, Any]],
+    authorized_team_names: set[str] | None,
+) -> list[dict[str, Any]]:
+    if authorized_team_names is None:
+        return records
+    return [record for record in records if record.get("team") in authorized_team_names]
 
 
 def record_matches_pending_aif_search(record: dict[str, Any], search: str | None) -> bool:
@@ -624,43 +663,34 @@ def aif_overview(
 
 
 @router.get("/pending-aif/filter-options")
-def pending_aif_filter_options() -> dict[str, Any]:
+def pending_aif_filter_options(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    authorized_team_names = pending_aif_authorized_team_names(db, current_user)
     with critical_team_connection() as con:
         cursor = con.cursor()
-        options: dict[str, list[Any]] = {}
-        for column in PENDING_AIF_SQL_CATEGORY_COLUMNS:
-            names, rows = fetch_all(
-                cursor,
-                f"""
-                {pending_aif_source_cte()}
-                SELECT DISTINCT {sql_identifier(column)} AS value
-                FROM pending_aif_forms
-                WHERE NULLIF(LTRIM(RTRIM(CAST({sql_identifier(column)} AS varchar(4000)))), '') IS NOT NULL
-                ORDER BY value
-                """,
-            )
-            options[column] = [clean_record(dict(zip(names, row)))["value"] for row in rows]
-
         names, rows = fetch_all(
             cursor,
             f"""
             {pending_aif_source_cte()}
             SELECT
-                inspection_by,
-                submit_to
+                {", ".join(sql_identifier(column) for column in PENDING_AIF_OUTPUT_COLUMNS)}
             FROM pending_aif_forms
             """,
         )
     team_lookup = pending_aif_person_team_lookup()
-    team_values = {
-        enriched["team"]
-        for enriched in (
+    records = scope_pending_aif_records(
+        [
             enrich_pending_aif_team(clean_record(dict(zip(names, row))), team_lookup)
             for row in rows
-        )
-        if enriched.get("team")
-    }
-    options["team"] = sorted(team_values, key=lambda value: str(value).casefold())
+        ],
+        authorized_team_names,
+    )
+    options: dict[str, list[Any]] = {}
+    for column in PENDING_AIF_CATEGORY_COLUMNS:
+        values = {record.get(column) for record in records if record.get(column) not in (None, "")}
+        options[column] = sorted(values, key=lambda value: str(value).casefold())
     return options
 
 
@@ -691,7 +721,10 @@ def pending_aif_rows(
     sort_dir: str = Query(default="asc", pattern="^(asc|desc)$"),
     limit: int = Query(default=100, ge=1, le=5000),
     offset: int = Query(default=0, ge=0),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    authorized_team_names = pending_aif_authorized_team_names(db, current_user)
     clauses: list[str] = []
     params: list[Any] = []
 
@@ -739,6 +772,7 @@ def pending_aif_rows(
         enrich_pending_aif_team(clean_record(dict(zip(names, row))), team_lookup)
         for row in rows
     ]
+    records = scope_pending_aif_records(records, authorized_team_names)
     records = [record for record in records if record_matches_pending_aif_search(record, search)]
     selected_teams = {value for value in team_filter or [] if value}
     if selected_teams:

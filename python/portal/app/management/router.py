@@ -215,6 +215,20 @@ def _resource_string_id_or_400(
     return resource_string_id
 
 
+def _admin_visible_resource_or_404(db: Session, current_user: User, resource_id: int) -> Resource:
+    resource = get_resource_or_404(db, resource_id)
+    if resource.is_released != 1 and not is_system_admin_session(current_user):
+        raise HTTPException(status_code=404, detail="Resource was not found.")
+    return resource
+
+
+def _admin_visible_resource_by_public_id_or_404(db: Session, current_user: User, resource_id: str) -> Resource:
+    resource = get_resource_by_public_id_or_404(db, resource_id)
+    if resource.is_released != 1 and not is_system_admin_session(current_user):
+        raise HTTPException(status_code=404, detail="Resource was not found.")
+    return resource
+
+
 def _request_data(payload) -> dict:
     if hasattr(payload, "model_dump"):
         return payload.model_dump(exclude_unset=True)
@@ -294,13 +308,13 @@ def _serialize_featured_resources(current_user: User, db: Session) -> dict:
     }
 
 
-def _serialize_team_featured_resources(team: Team, db: Session) -> dict:
+def _serialize_team_featured_resources(team: Team, db: Session, current_user: User) -> dict:
     rows = db.scalars(
         select(TeamFeaturedResource)
         .where(TeamFeaturedResource.team_id == team.id)
         .order_by(TeamFeaturedResource.category, TeamFeaturedResource.sort_order, TeamFeaturedResource.id)
     ).all()
-    featured, configured_categories = _serialize_featured_rows(rows, db)
+    featured, configured_categories = _serialize_featured_rows(rows, db, current_user)
     return {
         "team": serialize_team(db, team),
         "resources": featured["all"],
@@ -650,14 +664,25 @@ def update_my_featured_resources(
 
 @router.get("/api/admin/summary")
 def admin_summary(
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    resource_count_stmt = select(func.count()).select_from(Resource)
+    permission_count_stmt = select(func.count()).select_from(ResourcePermission)
+    if not is_system_admin_session(current_user):
+        resource_count_stmt = resource_count_stmt.where(Resource.is_released == 1)
+        permission_count_stmt = permission_count_stmt.where(
+            ResourcePermission.resource_id.in_(select(Resource.resource_id).where(Resource.is_released == 1))
+        )
     return {
         "users": db.scalar(select(func.count()).select_from(User).where(User.deleted_at.is_(None))) or 0,
         "teams": db.scalar(select(func.count()).select_from(Team)) or 0,
-        "resources": db.scalar(select(func.count()).select_from(Resource)) or 0,
-        "permissions": db.scalar(select(func.count()).select_from(ResourcePermission)) or 0,
+        "resources": db.scalar(resource_count_stmt) or 0,
+        "released_resources": db.scalar(select(func.count()).select_from(Resource).where(Resource.is_released == 1)) or 0,
+        "unreleased_resources": (
+            db.scalar(select(func.count()).select_from(Resource).where(Resource.is_released == 0)) or 0
+        ) if is_system_admin_session(current_user) else 0,
+        "permissions": db.scalar(permission_count_stmt) or 0,
     }
 
 
@@ -908,11 +933,11 @@ def update_team(
 @router.get("/api/admin/teams/{team_id}/featured-resources")
 def get_team_featured_resources(
     team_id: int,
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
     team = get_team_or_404(db, team_id)
-    return _serialize_team_featured_resources(team, db)
+    return _serialize_team_featured_resources(team, db, current_user)
 
 
 @router.put("/api/admin/teams/{team_id}/featured-resources")
@@ -925,7 +950,10 @@ def update_team_featured_resources(
     team = get_team_or_404(db, team_id)
     selections = _featured_request_by_category(payload)
     resource_ids = sorted({resource_id for category_ids in selections.values() for resource_id in category_ids})
-    resources_by_id = {resource_id: get_resource_or_404(db, resource_id) for resource_id in resource_ids}
+    resources_by_id = {
+        resource_id: _admin_visible_resource_or_404(db, current_user, resource_id)
+        for resource_id in resource_ids
+    }
     for resource in resources_by_id.values():
         if resource.is_active != 1:
             raise HTTPException(status_code=400, detail=f"Resource {resource.id} is inactive.")
@@ -945,7 +973,7 @@ def update_team_featured_resources(
             )
     write_audit_log(db, current_user, "update_team_featured_resources", "team", team.id, {"featured": selections})
     _commit(db)
-    return _serialize_team_featured_resources(team, db)
+    return _serialize_team_featured_resources(team, db, current_user)
 
 
 @router.delete("/api/admin/teams/{team_id}")
@@ -964,19 +992,23 @@ def delete_team(
 
 @router.get("/api/admin/resources")
 def list_resources(
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    resources = db.scalars(select(Resource).order_by(Resource.resource_type, Resource.name)).all()
+    stmt = select(Resource)
+    if not is_system_admin_session(current_user):
+        stmt = stmt.where(Resource.is_released == 1)
+    resources = db.scalars(stmt.order_by(Resource.resource_type, Resource.name)).all()
     return {"resources": [serialize_resource(resource) for resource in resources]}
 
 
 @router.get("/api/admin/resources/discovery")
 def discover_resources(
     request: Request,
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    require_system_admin(current_user)
     return discover_resource_candidates(db, list(request.app.routes), request.app.openapi().get("paths", {}))
 
 
@@ -986,6 +1018,7 @@ def create_resource(
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    require_system_admin(current_user)
     resource = Resource(
         resource_id=_resource_string_id_or_400(db, payload.resource_id, payload.resource_type),
         resource_key=payload.resource_key.strip(),
@@ -997,6 +1030,7 @@ def create_resource(
         icon=payload.icon,
         is_public=bool_int(payload.is_public),
         is_active=bool_int(payload.is_active),
+        is_released=0,
     )
     db.add(resource)
     _commit(db)
@@ -1012,6 +1046,7 @@ def apply_resource_discovery(
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
+    require_system_admin(current_user)
     openapi_paths = request.app.openapi().get("paths", {})
     discovery = discover_resource_candidates(db, list(request.app.routes), openapi_paths)
     candidates = {item["resource_key"]: item for item in discovery["resources"]}
@@ -1045,6 +1080,7 @@ def apply_resource_discovery(
                 icon=candidate.get("icon"),
                 is_public=0,
                 is_active=1,
+                is_released=0,
             )
             db.add(resource)
             applied.append({"resource_key": candidate["resource_key"], "action": action})
@@ -1092,7 +1128,7 @@ def update_resource(
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    resource = get_resource_or_404(db, resource_id)
+    resource = _admin_visible_resource_or_404(db, current_user, resource_id)
     updates = _request_data(payload)
     if "resource_id" in updates or "resource_type" in updates:
         resource_type = updates.get("resource_type", resource.resource_type)
@@ -1102,6 +1138,38 @@ def update_resource(
             value = bool_int(value)
         setattr(resource, field, value)
     write_audit_log(db, current_user, "update_resource", "resource", resource.id, updates)
+    _commit(db)
+    return {"resource": serialize_resource(resource)}
+
+
+@router.post("/api/admin/resources/{resource_id}/release")
+def release_resource(
+    resource_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_system_admin(current_user)
+    resource = get_resource_or_404(db, resource_id)
+    resource.is_released = 1
+    resource.released_at = utc_now_text()
+    resource.released_by_user_id = current_user.id
+    write_audit_log(db, current_user, "release_resource", "resource", resource.id, {"resource_key": resource.resource_key})
+    _commit(db)
+    return {"resource": serialize_resource(resource)}
+
+
+@router.post("/api/admin/resources/{resource_id}/withdraw-release")
+def withdraw_resource_release(
+    resource_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict:
+    require_system_admin(current_user)
+    resource = get_resource_or_404(db, resource_id)
+    resource.is_released = 0
+    resource.released_at = None
+    resource.released_by_user_id = None
+    write_audit_log(db, current_user, "withdraw_resource_release", "resource", resource.id, {"resource_key": resource.resource_key})
     _commit(db)
     return {"resource": serialize_resource(resource)}
 
@@ -1137,7 +1205,7 @@ def _subject_permission_filter(subject_type: str, subject_id: int):
 
 
 def _effective_team_permission(db: Session, team: Team, resource: Resource) -> dict | None:
-    if resource.is_active != 1:
+    if resource.is_active != 1 or resource.is_released != 1:
         return None
 
     permission_mask = PERMISSION_TYPES["view"] if resource.is_public else 0
@@ -1177,13 +1245,15 @@ def permission_matrix(
     resource_type: str = Query(default=""),
     category: str = Query(default=""),
     include_inactive: bool = Query(default=False),
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
     subject = _permission_subject_or_404(db, subject_type, subject_id)
 
     stmt = select(Resource)
     stmt = stmt.where(Resource.is_public == 0)
+    if not is_system_admin_session(current_user):
+        stmt = stmt.where(Resource.is_released == 1)
     if not include_inactive:
         stmt = stmt.where(Resource.is_active == 1)
     if resource_type.strip():
@@ -1255,7 +1325,7 @@ def update_permission_matrix(
     for assignment in payload.assignments:
         if assignment.permission_level is not None and not is_valid_permission_mask(assignment.permission_level):
             raise HTTPException(status_code=400, detail="Invalid permission type selection.")
-        get_resource_by_public_id_or_404(db, assignment.resource_id)
+        _admin_visible_resource_by_public_id_or_404(db, current_user, assignment.resource_id)
 
     existing_permissions = {}
     if resource_ids:
@@ -1322,10 +1392,10 @@ def update_permission_matrix(
 @router.get("/api/admin/resources/{resource_id}/permissions")
 def get_resource_permissions(
     resource_id: int,
-    _current_user: User = Depends(get_current_admin_user),
+    current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    resource = get_resource_or_404(db, resource_id)
+    resource = _admin_visible_resource_or_404(db, current_user, resource_id)
     permissions = db.scalars(
         select(ResourcePermission).where(ResourcePermission.resource_id == resource.resource_id).order_by(ResourcePermission.team_id, ResourcePermission.user_id)
     ).all()
@@ -1358,7 +1428,7 @@ def replace_resource_permissions(
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ) -> dict:
-    resource = get_resource_or_404(db, resource_id)
+    resource = _admin_visible_resource_or_404(db, current_user, resource_id)
     seen: set[tuple[str, int]] = set()
     for assignment in payload.permissions:
         _validate_permission_assignment(db, assignment)

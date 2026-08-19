@@ -250,6 +250,10 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
     if resource.is_active != 1:
         return None
 
+    active_role = selected_user_role(user)
+    if resource.is_released != 1 and active_role != ROLE_SYSTEM_ADMIN:
+        return None
+
     permission_mask = 0
     sources: list[str] = []
 
@@ -257,9 +261,9 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
         permission_mask |= PERMISSION_TYPES["view"]
         sources.append("public")
 
-    active_role = selected_user_role(user)
     if active_role == ROLE_SYSTEM_ADMIN:
-        return permission_result(ALL_PERMISSION_MASK, ["system_admin"])
+        source = "system_admin_unreleased_preview" if resource.is_released != 1 else "system_admin"
+        return permission_result(ALL_PERMISSION_MASK, [source])
 
     if active_role == ROLE_ADMIN:
         return permission_result(ALL_PERMISSION_MASK, ["portal_admin"])
@@ -356,6 +360,9 @@ def serialize_resource(resource: Resource, effective: dict[str, Any] | None = No
         "help_url": metadata.get("help_url"),
         "is_public": bool(resource.is_public),
         "is_active": bool(resource.is_active),
+        "is_released": bool(resource.is_released),
+        "released_at": resource.released_at,
+        "released_by_user_id": resource.released_by_user_id,
         "created_at": resource.created_at,
         "updated_at": resource.updated_at,
         "effective_permission": effective,
@@ -396,6 +403,7 @@ def _discovered_resource(
         "icon": icon,
         "is_public": False,
         "is_active": True,
+        "is_released": False,
         "source": source,
     }
 

@@ -23,6 +23,7 @@ import {
 import { toast } from 'sonner'
 
 import { openExternalUrl } from '../../../desktop/runtime'
+import { activatePortalHome, openPortalResource } from '../../../lib/portalNavigation'
 import {
   exportAssetHistory,
   loadExportFields,
@@ -221,11 +222,11 @@ function openRecordUrl(event: MouseEvent<HTMLAnchorElement>, url: string, record
 }
 
 function backToPortal() {
-  if (window.parent !== window) {
-    window.parent.postMessage({ type: 'portal:activate-home' }, window.location.origin)
+  if (new URLSearchParams(window.location.search).get('returnTo') === 'map') {
+    openPortalResource('/map_stm_risk', { preserveExisting: true })
     return
   }
-  window.location.assign('/')
+  activatePortalHome()
 }
 
 function isCityworksRecord(record: AssetHistoryRecord): record is HistoryRecord {
@@ -522,7 +523,7 @@ export default function StormWaterAssetHistory() {
             </details>
           ) : null}
           <div className="header-actions">
-            <button type="button" onClick={() => window.location.assign(`/map_stm_risk?assetId=${encodeURIComponent(assetId)}&assetType=${assetType}`)}><LocateFixed size={17} /> Locate on map</button>
+            <button type="button" onClick={() => openPortalResource(`/map_stm_risk?assetId=${encodeURIComponent(assetId)}&assetType=${assetType}`)}><LocateFixed size={17} /> Locate on map</button>
             <button type="button" onClick={copyAssetId}><Clipboard size={17} /> Copy ID</button>
             <button type="button" onClick={() => { refreshSummary(); refreshRecords() }}><RefreshCw size={17} /> Refresh</button>
           </div>

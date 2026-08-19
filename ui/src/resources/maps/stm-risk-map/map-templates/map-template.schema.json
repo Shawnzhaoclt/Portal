@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://stormwater.charlottenc.gov/schemas/map-template.schema.json",
+  "title": "Storm Water Portal map export template",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "description", "category", "page", "mapFrame", "titleBlock", "typography", "northArrow", "metadata", "branding", "defaults"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "description": { "type": "string", "minLength": 1, "maxLength": 240 },
+    "category": { "enum": ["engineering", "operations", "briefing"] },
+    "page": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["size", "orientation", "qualityDpi", "marginInches"],
+      "properties": {
+        "size": { "enum": ["letter", "legal", "tabloid", "ansi-c"] },
+        "orientation": { "enum": ["landscape", "portrait"] },
+        "qualityDpi": { "enum": [150, 300] },
+        "marginInches": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "mapFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["borderWidthPoints", "background", "showScaleBar", "scaleBarPosition", "showLegend", "legendPosition"],
+      "properties": {
+        "borderWidthPoints": { "type": "number", "minimum": 0, "maximum": 4 },
+        "background": { "$ref": "#/$defs/color" },
+        "showScaleBar": { "type": "boolean" },
+        "scaleBarPosition": { "enum": ["bottom-left", "bottom-right"] },
+        "showLegend": { "type": "boolean" },
+        "legendPosition": { "enum": ["bottom-left", "bottom-right"] }
+      }
+    },
+    "titleBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["placement", "sizePercent", "background", "borderColor", "borderWidthPoints", "cells"],
+      "properties": {
+        "placement": { "enum": ["right", "bottom"] },
+        "sizePercent": { "type": "number", "minimum": 5, "maximum": 30 },
+        "background": { "$ref": "#/$defs/color" },
+        "borderColor": { "$ref": "#/$defs/color" },
+        "borderWidthPoints": { "type": "number", "minimum": 0, "maximum": 4 },
+        "cells": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "sizePercent", "background"],
+            "properties": {
+              "id": { "enum": ["north-arrow", "identity", "metadata", "branding"] },
+              "sizePercent": { "type": "number", "exclusiveMinimum": 0, "maximum": 100 },
+              "background": { "$ref": "#/$defs/color" }
+            }
+          }
+        }
+      }
+    },
+    "typography": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["family", "title", "subtitle", "label", "value", "scale", "footer"],
+      "properties": {
+        "family": { "enum": ["Arial"] },
+        "title": { "$ref": "#/$defs/textStyleWithOrientation" },
+        "subtitle": { "$ref": "#/$defs/textStyleWithOrientation" },
+        "label": { "$ref": "#/$defs/labeledTextStyle" },
+        "value": { "$ref": "#/$defs/textStyle" },
+        "scale": { "$ref": "#/$defs/textStyle" },
+        "footer": { "$ref": "#/$defs/labeledTextStyle" }
+      }
+    },
+    "northArrow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["style", "detail", "labels", "rotateWithMap"],
+      "properties": {
+        "style": { "enum": ["vintage-monochrome"] },
+        "detail": { "enum": ["low", "medium"] },
+        "labels": { "enum": ["north-only"] },
+        "rotateWithMap": { "const": true }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rows", "showPageNumber", "usageLabel"],
+      "properties": {
+        "rows": {
+          "type": "array",
+          "items": { "enum": ["preparedBy", "generatedAt", "mapScaleAndRotation"] },
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true
+        },
+        "showPageNumber": { "type": "boolean" },
+        "usageLabel": { "type": "string", "minLength": 1, "maxLength": 40 }
+      }
+    },
+    "branding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logo", "logoTreatment"],
+      "properties": {
+        "logo": { "const": "charlotte-mecklenburg-storm-water-services" },
+        "logoTreatment": { "enum": ["full-color", "monochrome"] }
+      }
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "subtitle", "scaleSnap"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "subtitle": { "type": "string", "maxLength": 140 },
+        "scaleSnap": { "const": 100 }
+      }
+    }
+  },
+  "$defs": {
+    "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+    "textStyle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizePoints", "weight", "color"],
+      "properties": {
+        "sizePoints": { "type": "number", "minimum": 4, "maximum": 24 },
+        "weight": { "enum": [400, 500, 600, 700] },
+        "color": { "$ref": "#/$defs/color" }
+      }
+    },
+    "textStyleWithOrientation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizePoints", "weight", "color", "orientation"],
+      "properties": {
+        "sizePoints": { "type": "number", "minimum": 4, "maximum": 24 },
+        "weight": { "enum": [400, 500, 600, 700] },
+        "color": { "$ref": "#/$defs/color" },
+        "orientation": { "enum": ["horizontal", "vertical"] }
+      }
+    },
+    "labeledTextStyle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sizePoints", "weight", "color", "uppercase", "letterSpacingEm"],
+      "properties": {
+        "sizePoints": { "type": "number", "minimum": 4, "maximum": 24 },
+        "weight": { "enum": [400, 500, 600, 700] },
+        "color": { "$ref": "#/$defs/color" },
+        "uppercase": { "type": "boolean" },
+        "letterSpacingEm": { "type": "number", "minimum": 0, "maximum": 0.2 }
+      }
+    }
+  }
+}

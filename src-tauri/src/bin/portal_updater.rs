@@ -13,8 +13,11 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-const ACTIVATION_RETRY_ATTEMPTS: usize = 80;
-const ACTIVATION_RETRY_DELAY: Duration = Duration::from_millis(250);
+// Windows Defender, Explorer, and the terminated Python worker can briefly
+// retain a handle under the installed app directory after Portal exits. Give
+// those handles enough time to close before treating activation as failed.
+const ACTIVATION_RETRY_ATTEMPTS: usize = 120;
+const ACTIVATION_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +30,10 @@ struct ReleaseManifest {
     installation_payload: Option<ReleasePayload>,
     #[serde(default)]
     preserve_paths: Vec<String>,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    allowed_machines: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -54,11 +61,20 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let arguments = parse_arguments();
-    let release_root = required_path(&arguments, "release-root")?;
-    let install_root = arguments
-        .get("install-root")
-        .map(PathBuf::from)
-        .unwrap_or(default_install_root()?);
+    let launch_directory = env::current_dir()
+        .map_err(|error| format!("Could not determine the updater launch directory: {error}"))?;
+    let release_root = absolute_path_from(
+        &launch_directory,
+        &required_path(&arguments, "release-root")?,
+    );
+    let install_root = absolute_path_from(
+        &launch_directory,
+        &arguments
+            .get("install-root")
+            .map(PathBuf::from)
+            .unwrap_or(default_install_root()?),
+    );
+    relocate_updater_working_directory()?;
     let restart = arguments.contains_key("restart");
 
     if let Some(value) = arguments.get("wait-pid") {
@@ -73,21 +89,35 @@ fn run() -> Result<(), String> {
         .map(String::as_str)
         .unwrap_or("portal-release.json");
     let manifest = read_manifest(&release_root, manifest_name)?;
+    let requested_channel = normalize_channel(
+        arguments
+            .get("channel")
+            .map(String::as_str)
+            .unwrap_or("production"),
+    )?;
+    validate_release_target(&manifest, &requested_channel, &machine_name())?;
     let bootstrap = arguments.contains_key("bootstrap");
     append_update_log(
         &install_root,
         "INFO",
         &format!(
-            "Starting Portal {} update in {} mode.",
+            "Starting Portal {} update in {} mode on the {} channel.",
             manifest.version,
             if bootstrap {
                 "bootstrap"
             } else {
                 manifest.update_mode.as_str()
-            }
+            },
+            requested_channel,
         ),
     );
-    install_release(&release_root, &install_root, &manifest, bootstrap)?;
+    install_release(
+        &release_root,
+        &install_root,
+        &manifest,
+        bootstrap,
+        &requested_channel,
+    )?;
     append_update_log(
         &install_root,
         "INFO",
@@ -98,11 +128,32 @@ fn run() -> Result<(), String> {
         create_desktop_shortcut(&install_root)?;
     }
     if restart {
-        Command::new(installed_application_root(&install_root).join("Portal.exe"))
+        let application_root = installed_application_root(&install_root);
+        Command::new(application_root.join("Portal.exe"))
+            .current_dir(&application_root)
             .spawn()
             .map_err(|error| format!("Could not restart Portal: {error}"))?;
     }
     Ok(())
+}
+
+fn absolute_path_from(base: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base.join(path)
+    }
+}
+
+fn relocate_updater_working_directory() -> Result<(), String> {
+    let working_directory = env::temp_dir().join("StormWaterPortal-Updater");
+    fs::create_dir_all(&working_directory)
+        .map_err(|error| format!("Could not prepare the Portal updater workspace: {error}"))?;
+    env::set_current_dir(&working_directory).map_err(|error| {
+        format!(
+            "Could not move the Portal updater outside the installed application folder: {error}"
+        )
+    })
 }
 
 fn installed_application_root(install_root: &Path) -> PathBuf {
@@ -191,8 +242,23 @@ fn read_manifest(release_root: &Path, manifest_name: &str) -> Result<ReleaseMani
     let manifest: ReleaseManifest =
         serde_json::from_str(contents.trim_start_matches('\u{feff}'))
             .map_err(|error| format!("Release manifest is not valid JSON: {error}"))?;
-    if manifest.schema_version != 1 || manifest.version.trim().is_empty() {
+    if !matches!(manifest.schema_version, 1 | 2) || manifest.version.trim().is_empty() {
         return Err("Release manifest has an unsupported schema or empty version.".to_string());
+    }
+    if manifest.schema_version == 1
+        && (manifest.channel.is_some() || !manifest.allowed_machines.is_empty())
+    {
+        return Err("Release manifest schema 1 cannot define channel targeting.".to_string());
+    }
+    if manifest.schema_version == 2 {
+        let channel = manifest
+            .channel
+            .as_deref()
+            .ok_or_else(|| "Release manifest schema 2 must define channel.".to_string())?;
+        normalize_channel(channel)?;
+        if channel == "test" && manifest.allowed_machines.is_empty() {
+            return Err("A test release must target at least one computer.".to_string());
+        }
     }
     if !matches!(
         manifest.update_mode.as_str(),
@@ -208,6 +274,43 @@ fn read_manifest(release_root: &Path, manifest_name: &str) -> Result<ReleaseMani
         return Err("Release manifest preservePaths may contain only data.".to_string());
     }
     Ok(manifest)
+}
+
+fn normalize_channel(value: &str) -> Result<String, String> {
+    let channel = value.trim().to_ascii_lowercase();
+    if matches!(channel.as_str(), "production" | "test") {
+        Ok(channel)
+    } else {
+        Err("Portal update channel must be production or test.".to_string())
+    }
+}
+
+fn machine_name() -> String {
+    env::var("COMPUTERNAME").unwrap_or_default()
+}
+
+fn validate_release_target(
+    manifest: &ReleaseManifest,
+    requested_channel: &str,
+    current_machine: &str,
+) -> Result<(), String> {
+    let manifest_channel = manifest.channel.as_deref().unwrap_or("production");
+    if manifest_channel != requested_channel {
+        return Err(format!(
+            "The requested {requested_channel} channel contains a {manifest_channel} release manifest."
+        ));
+    }
+    if requested_channel == "test"
+        && !manifest
+            .allowed_machines
+            .iter()
+            .any(|allowed| allowed.trim().eq_ignore_ascii_case(current_machine.trim()))
+    {
+        return Err(format!(
+            "This computer ({current_machine}) is not authorized for the Portal test channel."
+        ));
+    }
+    Ok(())
 }
 
 fn validate_payload(payload: &ReleasePayload, field: &str) -> Result<(), String> {
@@ -235,6 +338,7 @@ fn install_release(
     install_root: &Path,
     manifest: &ReleaseManifest,
     bootstrap: bool,
+    channel: &str,
 ) -> Result<(), String> {
     // User-owned state never lives under the replaceable application folder.
     // Create it if needed, but never copy, clear, or replace its contents.
@@ -291,7 +395,8 @@ fn install_release(
     // the distribution contract and must not shadow the user-owned data directory.
     remove_packaged_application_data(install_root)?;
     ensure_user_data_directory(install_root)?;
-    write_update_state(install_root, manifest, applied_mode)?;
+    write_update_state(install_root, manifest, applied_mode, channel)?;
+    write_update_channel(install_root, channel)?;
     if applied_mode == "system-db" {
         mark_read_only(&install_root.join("config").join("system.db"));
     }
@@ -337,11 +442,6 @@ fn install_full_release(
             merge_portal_settings(&settings, &packaged_settings)?;
         }
     }
-    let packaged_system_database = staged_config.join("system.db");
-    if packaged_system_database.is_file() {
-        replace_file(&packaged_system_database, &config_root.join("system.db"))?;
-        mark_read_only(&config_root.join("system.db"));
-    }
     copy_remaining_packaged_config(&staged_config, &config_root)?;
     if staged_config.exists() {
         fs::remove_dir_all(&staged_config)
@@ -366,6 +466,10 @@ fn install_full_release(
                 "restore the previous Portal application",
             );
         }
+        // A failed activation must not leave extracted release folders in the
+        // installation parent. The release archive remains available for a
+        // later retry, while these folders are only temporary staging data.
+        let _ = fs::remove_dir_all(&staging);
         return Err(error);
     }
     let _ = fs::remove_dir_all(&backup);
@@ -590,6 +694,7 @@ fn write_update_state(
     install_root: &Path,
     manifest: &ReleaseManifest,
     applied_mode: &str,
+    channel: &str,
 ) -> Result<(), String> {
     let directory = install_root.join("config");
     fs::create_dir_all(&directory)
@@ -599,6 +704,7 @@ fn write_update_state(
     let contents = serde_json::json!({
         "version": manifest.version,
         "updateMode": applied_mode,
+        "channel": channel,
     });
     fs::write(
         &temporary,
@@ -613,6 +719,30 @@ fn write_update_state(
     }
     fs::rename(&temporary, &destination)
         .map_err(|error| format!("Could not activate Portal update state: {error}"))
+}
+
+fn write_update_channel(install_root: &Path, channel: &str) -> Result<(), String> {
+    let directory = install_root.join("data").join("settings");
+    fs::create_dir_all(&directory)
+        .map_err(|error| format!("Could not create Portal update settings directory: {error}"))?;
+    let destination = directory.join("update-channel.json");
+    let temporary = directory.join(".update-channel.next");
+    let contents = serde_json::json!({
+        "schemaVersion": 1,
+        "channel": normalize_channel(channel)?,
+    });
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(&contents)
+            .map_err(|error| format!("Could not serialize Portal update channel: {error}"))?,
+    )
+    .map_err(|error| format!("Could not save Portal update channel: {error}"))?;
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("Could not replace Portal update channel: {error}"))?;
+    }
+    fs::rename(&temporary, &destination)
+        .map_err(|error| format!("Could not activate Portal update channel: {error}"))
 }
 
 fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
@@ -636,8 +766,9 @@ fn extract_zip(archive_path: &Path, destination: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        copy_remaining_packaged_config, ensure_update_target_is_not_user_data,
-        merge_managed_settings, retry_io_operation,
+        absolute_path_from, copy_remaining_packaged_config, ensure_update_target_is_not_user_data,
+        merge_managed_settings, normalize_channel, retry_io_operation, validate_release_layout,
+        validate_release_target, write_update_channel, ReleaseManifest, ReleasePayload,
     };
     use std::{
         env, fs, io, process,
@@ -661,6 +792,63 @@ mod tests {
         })
         .expect("retry succeeds");
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn targeted_test_release_accepts_only_allowlisted_computers() {
+        let manifest = ReleaseManifest {
+            schema_version: 2,
+            version: "1.2.3".to_string(),
+            update_mode: "full".to_string(),
+            payload: ReleasePayload {
+                file: "Portal-Desktop-1.2.3.zip".to_string(),
+                sha256: "0".repeat(64),
+                size: 1,
+            },
+            installation_payload: None,
+            preserve_paths: vec!["data".to_string()],
+            channel: Some("test".to_string()),
+            allowed_machines: vec!["PORTAL-TEST-01".to_string()],
+        };
+        assert!(validate_release_target(&manifest, "test", "portal-test-01").is_ok());
+        assert!(validate_release_target(&manifest, "test", "OTHER-PC").is_err());
+        assert!(validate_release_target(&manifest, "production", "PORTAL-TEST-01").is_err());
+    }
+
+    #[test]
+    fn updater_persists_channel_under_user_data() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("portal-channel-test-{}-{unique}", process::id()));
+        write_update_channel(&root, "test").expect("write channel");
+        let value: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("data/settings/update-channel.json")).expect("channel file"),
+        )
+        .expect("channel JSON");
+        assert_eq!(
+            value.get("channel").and_then(serde_json::Value::as_str),
+            Some("test")
+        );
+        assert_eq!(
+            normalize_channel(" Production ").as_deref(),
+            Ok("production")
+        );
+        fs::remove_dir_all(root).expect("remove test root");
+    }
+
+    #[test]
+    fn updater_paths_are_resolved_before_the_working_directory_changes() {
+        let base = std::path::Path::new("C:/PortalRelease");
+        assert_eq!(
+            absolute_path_from(base, std::path::Path::new("payload")),
+            base.join("payload")
+        );
+        assert_eq!(
+            absolute_path_from(base, std::path::Path::new("D:/PortalInstall")),
+            std::path::PathBuf::from("D:/PortalInstall")
+        );
     }
 
     #[test]
@@ -758,13 +946,53 @@ mod tests {
         )
         .is_err());
     }
+
+    #[test]
+    fn full_release_layout_does_not_require_a_plaintext_system_database() {
+        let token = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("portal-updater-layout-{token}-{}", process::id()));
+        fs::create_dir_all(root.join("runtime").join("portal-python")).expect("python runtime");
+        fs::create_dir_all(root.join("runtime").join("duckdb").join("extensions"))
+            .expect("duckdb extensions");
+        fs::write(root.join("Portal.exe"), b"portal").expect("portal executable");
+        fs::write(root.join("VERSION"), b"0.1.1\n").expect("version");
+        fs::write(
+            root.join("runtime")
+                .join("portal-python")
+                .join("portal-python.exe"),
+            b"python",
+        )
+        .expect("python worker");
+        fs::write(root.join("runtime").join("PortalUpdater.exe"), b"updater").expect("updater");
+        fs::write(
+            root.join("runtime")
+                .join("duckdb")
+                .join("extensions")
+                .join("spatial.duckdb_extension"),
+            b"spatial",
+        )
+        .expect("spatial extension");
+
+        assert!(!root.join("config").join("system.db").exists());
+        validate_release_layout(&root, "0.1.1")
+            .expect("encrypted catalog releases must not package plaintext system.db");
+        fs::remove_dir_all(root).expect("cleanup");
+    }
 }
 
 fn validate_release_layout(root: &Path, expected_version: &str) -> Result<(), String> {
+    if root.join("config").join("system.db").exists() {
+        return Err(
+            "Release contains plaintext config/system.db; the Desktop catalog must be activated as SQLCipher."
+                .to_string(),
+        );
+    }
     for path in [
         root.join("Portal.exe"),
         root.join("VERSION"),
-        root.join("config").join("system.db"),
         root.join("runtime")
             .join("portal-python")
             .join("portal-python.exe"),
@@ -826,19 +1054,21 @@ fn wait_for_process(process_id: u32) -> Result<(), String> {
 }
 
 fn create_desktop_shortcut(install_root: &Path) -> Result<(), String> {
-    let desktop = env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .map(|root| root.join("Desktop"))
-        .ok_or_else(|| "USERPROFILE is not available for this Windows user.".to_string())?;
-    fs::create_dir_all(&desktop)
-        .map_err(|error| format!("Could not access the Desktop folder: {error}"))?;
-    let shortcut = desktop.join("Storm Water Portal.lnk");
     let application_root = installed_application_root(install_root);
     let target = application_root.join("Portal.exe");
+    if !target.is_file() {
+        return Err(format!(
+            "The installed Portal executable was not found at {}.",
+            target.display()
+        ));
+    }
+
+    // Resolve the Windows known Desktop folder instead of assuming that it is
+    // %USERPROFILE%\\Desktop. Enterprise folder redirection and OneDrive can
+    // place the real Desktop somewhere else.
     let quote = |value: &str| value.replace('\'', "''");
     let command = format!(
-        "$shell=New-Object -ComObject WScript.Shell; $shortcut=$shell.CreateShortcut('{}'); $shortcut.TargetPath='{}'; $shortcut.WorkingDirectory='{}'; $shortcut.IconLocation='{},0'; $shortcut.Save()",
-        quote(&shortcut.display().to_string()),
+        "$desktop=[Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop); if ([string]::IsNullOrWhiteSpace($desktop)) {{ throw 'Windows did not return a Desktop folder.' }}; New-Item -ItemType Directory -Force -Path $desktop | Out-Null; $shortcutPath=Join-Path $desktop 'Storm Water Portal.lnk'; $shell=New-Object -ComObject WScript.Shell; $shortcut=$shell.CreateShortcut($shortcutPath); $shortcut.TargetPath='{}'; $shortcut.WorkingDirectory='{}'; $shortcut.IconLocation='{},0'; $shortcut.Description='Storm Water Asset Intelligence Portal'; $shortcut.Save()",
         quote(&target.display().to_string()),
         quote(&application_root.display().to_string()),
         quote(&target.display().to_string()),

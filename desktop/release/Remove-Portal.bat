@@ -67,9 +67,9 @@ if exist "%PORTAL_ROOT%\" (
   )
 )
 
-if defined USERPROFILE (
-  del /F /Q "%USERPROFILE%\Desktop\Storm Water Portal.lnk" >nul 2>&1
-)
+rem Resolve the Windows known Desktop folder so redirected/OneDrive desktops
+rem are cleaned up consistently with the installer-created shortcut.
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$desktop=[Environment]::GetFolderPath([Environment+SpecialFolder]::Desktop); if (-not [string]::IsNullOrWhiteSpace($desktop)) { Remove-Item -LiteralPath (Join-Path $desktop 'Storm Water Portal.lnk') -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 
 echo.
 echo Storm Water Asset Intelligence Portal and all local Portal data

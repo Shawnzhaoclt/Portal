@@ -20,5 +20,6 @@
   "sourceBackupHeartbeatTime": "20:00",
   "sourceBackupWorkflowTaskName": "StormWater Portal Source Backup Workflow",
   "sourceBackupHeartbeatTaskName": "StormWater Portal Machine Heartbeat",
+  "releaseTestMachines": [],
   "refreshSeconds": 5
 }

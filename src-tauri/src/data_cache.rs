@@ -6,6 +6,7 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
@@ -17,6 +18,8 @@ use tauri::{AppHandle, Emitter};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::ffi::OsStrExt;
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Storage::FileSystem::{
     GetDiskFreeSpaceExW, MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -42,6 +45,7 @@ struct CacheConfig {
     minimum_startup_free_bytes: u64,
     disk_safety_reserve_bytes: u64,
     staging_recovery_hours: u64,
+    catalog_key: super::catalog_crypto::CatalogKey,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -152,6 +156,14 @@ struct LocalSource {
     local_modified_at_nanos: u128,
     #[serde(default)]
     observed_remote_version: String,
+    #[serde(default)]
+    local_size_bytes: u64,
+    #[serde(default)]
+    local_sha256: String,
+    #[serde(default)]
+    storage_format: String,
+    #[serde(default)]
+    encryption_key_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -362,6 +374,7 @@ fn load_config() -> Result<CacheConfig, String> {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect::<HashSet<_>>();
+    let catalog_key = super::catalog_crypto::load_or_create(&data_root)?;
     Ok(CacheConfig {
         enabled,
         remote_manifest: expand_setting_path(remote_raw, &shared_root, &data_root)?,
@@ -393,6 +406,7 @@ fn load_config() -> Result<CacheConfig, String> {
             .and_then(|value| value.get("stagingRecoveryHours"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(72),
+        catalog_key,
     })
 }
 
@@ -460,9 +474,29 @@ fn local_source_is_usable(config: &CacheConfig, source: &LocalSource) -> bool {
     if !path.starts_with(&config.local_root) {
         return false;
     }
+    let expected_local_size = if source.local_size_bytes > 0 {
+        source.local_size_bytes
+    } else {
+        source.size_bytes
+    };
+    let catalog_protection_valid = source.id != "system.catalog"
+        || (source.storage_format == "sqlcipher"
+            && source.encryption_key_id == config.catalog_key.id()
+            && source.local_sha256.len() == 64
+            && File::open(path)
+                .and_then(|mut file| {
+                    let mut header = [0_u8; 16];
+                    file.read_exact(&mut header)?;
+                    Ok(header != *b"SQLite format 3\0")
+                })
+                .unwrap_or(false)
+            && sha256_file(path)
+                .map(|digest| digest == source.local_sha256)
+                .unwrap_or(false));
     fs::metadata(path)
-        .map(|metadata| metadata.is_file() && metadata.len() == source.size_bytes)
+        .map(|metadata| metadata.is_file() && metadata.len() == expected_local_size)
         .unwrap_or(false)
+        && catalog_protection_valid
         && source.validation_state == "verified"
         && source.local_modified_at_nanos != 0
         && modified_at_nanos(path) == source.local_modified_at_nanos
@@ -482,6 +516,13 @@ fn classify_source(
     }
     if local.version == remote.version && local.sha256 == remote.sha256 {
         return QueueKind::Current;
+    }
+    // Required startup data is part of the application's control plane. In
+    // particular, authorization and resource-release decisions come from the
+    // system catalog, so Desktop must not open against an older usable copy
+    // while a verified replacement waits in the background queue.
+    if remote.required_at_startup {
+        return QueueKind::Blocking;
     }
     let grace_seconds = grace_days.saturating_mul(24 * 60 * 60);
     let remote_release_age = now_epoch().saturating_sub(remote.published_at_epoch);
@@ -784,13 +825,153 @@ fn ensure_group_disk_space(config: &CacheConfig, group: &ActivationGroup) -> Res
     Ok(())
 }
 
+#[derive(Debug)]
+struct PreparedArtifact {
+    path: PathBuf,
+    size_bytes: u64,
+    sha256: String,
+    storage_format: String,
+    encryption_key_id: String,
+}
+
+fn encrypt_system_catalog(
+    source: &Path,
+    destination: &Path,
+    key: &super::catalog_crypto::CatalogKey,
+) -> Result<(), String> {
+    let worker = super::python_worker_path()?;
+    let request = serde_json::json!({
+        "source": source.display().to_string(),
+        "destination": destination.display().to_string(),
+    });
+    let mut command = Command::new(&worker);
+    command
+        .args([
+            "--job",
+            "secure_catalog",
+            "--request-json",
+            &request.to_string(),
+        ])
+        .env("PORTAL_SYSTEM_DB_KEY", key.hex())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    command.creation_flags(super::CREATE_NO_WINDOW);
+    let output = command.output().map_err(|error| {
+        format!(
+            "Could not start SQLCipher catalog protection using {}: {error}",
+            worker.display()
+        )
+    })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            "The SQLCipher catalog protection process failed.".to_string()
+        } else {
+            detail
+        });
+    }
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).map_err(|error| {
+        format!("SQLCipher catalog protection returned invalid output: {error}")
+    })?;
+    if response.get("status").and_then(serde_json::Value::as_str) != Some("succeeded") {
+        return Err("SQLCipher did not confirm catalog protection.".to_string());
+    }
+    Ok(())
+}
+
+fn protect_system_catalog(
+    app: &AppHandle,
+    config: &CacheConfig,
+    source: &RemoteSource,
+    remote_path: &Path,
+    final_path: &Path,
+    totals: &mut CopyTotals,
+    background: bool,
+) -> Result<PreparedArtifact, String> {
+    validate_file_header(remote_path, "sqlite")?;
+    if sha256_file(remote_path)? != source.sha256.to_ascii_lowercase() {
+        return Err("The published system catalog failed checksum verification.".to_string());
+    }
+    let encrypted = final_path.with_file_name(format!(
+        ".system.db.{}.{}.sqlcipher",
+        std::process::id(),
+        now_epoch()
+    ));
+    let _ = fs::remove_file(&encrypted);
+    emit_progress(
+        app,
+        &DataCacheProgress {
+            phase: "protecting".to_string(),
+            message: "Encrypting the system catalog for this Windows user".to_string(),
+            source_id: source.id.clone(),
+            display_name: source.display_name.clone(),
+            current_file_bytes: 0,
+            current_file_size: source.size_bytes,
+            completed_bytes: totals.copied_bytes,
+            total_bytes: totals.total_bytes,
+            completed_sources: totals.completed_sources,
+            total_sources: totals.total_sources,
+            bytes_per_second: 0,
+            eta_seconds: None,
+            background,
+        },
+    );
+    let result = (|| {
+        encrypt_system_catalog(remote_path, &encrypted, &config.catalog_key)?;
+        if sha256_file(remote_path)? != source.sha256.to_ascii_lowercase() {
+            return Err("The published system catalog changed during encryption.".to_string());
+        }
+        let mut header = [0_u8; 16];
+        File::open(&encrypted)
+            .and_then(|mut file| file.read_exact(&mut header))
+            .map_err(|error| format!("Could not verify the encrypted system catalog: {error}"))?;
+        if &header == b"SQLite format 3\0" {
+            return Err("The Desktop system catalog was not encrypted by SQLCipher.".to_string());
+        }
+        if final_path.exists() {
+            let mut permissions = fs::metadata(final_path)
+                .map_err(|error| error.to_string())?
+                .permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(final_path, permissions).map_err(|error| error.to_string())?;
+        }
+        replace_file(&encrypted, final_path)?;
+        let mut permissions = fs::metadata(final_path)
+            .map_err(|error| error.to_string())?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(final_path, permissions).map_err(|error| {
+            format!("Could not make {} read-only: {error}", final_path.display())
+        })?;
+        let size_bytes = fs::metadata(final_path)
+            .map_err(|error| error.to_string())?
+            .len();
+        Ok(PreparedArtifact {
+            path: final_path.to_path_buf(),
+            size_bytes,
+            sha256: sha256_file(final_path)?,
+            storage_format: "sqlcipher".to_string(),
+            encryption_key_id: config.catalog_key.id(),
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&encrypted);
+    } else {
+        totals.copied_bytes = totals.copied_bytes.saturating_add(source.size_bytes);
+        totals.completed_sources += 1;
+    }
+    result
+}
+
 fn copy_and_verify_source(
     app: &AppHandle,
     config: &CacheConfig,
     source: &RemoteSource,
     totals: &mut CopyTotals,
     background: bool,
-) -> Result<PathBuf, String> {
+) -> Result<PreparedArtifact, String> {
     let remote_path = remote_source_path(config, source)?;
     let metadata = fs::metadata(&remote_path)
         .map_err(|error| format!("Could not read {}: {error}", remote_path.display()))?;
@@ -810,6 +991,19 @@ fn copy_and_verify_source(
             .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
     }
 
+    if source.id == "system.catalog" {
+        let _ = fs::remove_file(&staging_path);
+        return protect_system_catalog(
+            app,
+            config,
+            source,
+            &remote_path,
+            &final_path,
+            totals,
+            background,
+        );
+    }
+
     if fs::metadata(&final_path)
         .map(|metadata| metadata.is_file() && metadata.len() == source.size_bytes)
         .unwrap_or(false)
@@ -818,7 +1012,13 @@ fn copy_and_verify_source(
     {
         totals.copied_bytes = totals.copied_bytes.saturating_add(source.size_bytes);
         totals.completed_sources += 1;
-        return Ok(final_path);
+        return Ok(PreparedArtifact {
+            path: final_path.clone(),
+            size_bytes: source.size_bytes,
+            sha256: source.sha256.to_ascii_lowercase(),
+            storage_format: source.format.to_ascii_lowercase(),
+            encryption_key_id: String::new(),
+        });
     }
 
     if !config.resume_partial_downloads {
@@ -934,7 +1134,13 @@ fn copy_and_verify_source(
         })?;
     }
     totals.completed_sources += 1;
-    Ok(final_path)
+    Ok(PreparedArtifact {
+        path: final_path,
+        size_bytes: source.size_bytes,
+        sha256: source.sha256.to_ascii_lowercase(),
+        storage_format: source.format.to_ascii_lowercase(),
+        encryption_key_id: String::new(),
+    })
 }
 
 struct CopyTotals {
@@ -945,12 +1151,12 @@ struct CopyTotals {
     started: Instant,
 }
 
-fn local_source(remote: &RemoteSource, path: &Path) -> LocalSource {
+fn local_source(remote: &RemoteSource, artifact: &PreparedArtifact) -> LocalSource {
     LocalSource {
         id: remote.id.clone(),
         display_name: remote.display_name.clone(),
         version: remote.version.clone(),
-        local_path: path.display().to_string(),
+        local_path: artifact.path.display().to_string(),
         source: remote.source.clone(),
         format: remote.format.clone(),
         published_at_utc: remote.published_at_utc.clone(),
@@ -967,8 +1173,12 @@ fn local_source(remote: &RemoteSource, path: &Path) -> LocalSource {
         update_class: remote.update_class.clone(),
         required_at_startup: remote.required_at_startup,
         validated_at_epoch: now_epoch(),
-        local_modified_at_nanos: modified_at_nanos(path),
+        local_modified_at_nanos: modified_at_nanos(&artifact.path),
         observed_remote_version: remote.version.clone(),
+        local_size_bytes: artifact.size_bytes,
+        local_sha256: artifact.sha256.clone(),
+        storage_format: artifact.storage_format.clone(),
+        encryption_key_id: artifact.encryption_key_id.clone(),
     }
 }
 
@@ -983,19 +1193,19 @@ fn activate_group(
 ) -> Result<(), String> {
     let mut prepared = Vec::new();
     for source in &group.sources {
-        let path = copy_and_verify_source(app, config, source, totals, background)?;
-        prepared.push((source, path));
+        let artifact = copy_and_verify_source(app, config, source, totals, background)?;
+        prepared.push((source, artifact));
     }
-    for (source, path) in prepared {
+    for (source, artifact) in prepared {
         local
             .sources
-            .insert(source.id.clone(), local_source(source, &path));
+            .insert(source.id.clone(), local_source(source, &artifact));
     }
     local.remote_publication_id = remote.publication_id.clone();
     local.last_checked_at_epoch = now_epoch();
     local.offline = false;
+    refresh_environment(config, local)?;
     write_json_atomic(&local_manifest_path(config), local)?;
-    refresh_environment(config, local);
     emit_progress(
         app,
         &DataCacheProgress {
@@ -1092,7 +1302,126 @@ fn cleanup_abandoned_staging(config: &CacheConfig) {
     }
 }
 
-fn refresh_environment(config: &CacheConfig, local: &LocalManifest) {
+fn synchronize_desktop_system_database(source: &LocalSource) -> Result<(), String> {
+    let source_path = Path::new(&source.local_path);
+    let target_path = super::installation_root()?.join("config").join("system.db");
+    synchronize_system_database_copy(
+        source_path,
+        &target_path,
+        source.local_size_bytes,
+        &source.local_sha256,
+    )
+}
+
+fn synchronize_system_database_copy(
+    source_path: &Path,
+    target_path: &Path,
+    expected_size: u64,
+    expected_hash: &str,
+) -> Result<(), String> {
+    if source_path == target_path {
+        let mut permissions = fs::metadata(&target_path)
+            .map_err(|error| format!("Could not read {}: {error}", target_path.display()))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target_path, permissions).map_err(|error| {
+            format!(
+                "Could not make {} read-only: {error}",
+                target_path.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    let expected_hash = expected_hash.to_ascii_lowercase();
+    if sha256_file(source_path)? != expected_hash {
+        return Err(format!(
+            "The verified system catalog changed before it could be copied: {}",
+            source_path.display()
+        ));
+    }
+    if fs::metadata(&target_path)
+        .map(|metadata| metadata.is_file() && metadata.len() == expected_size)
+        .unwrap_or(false)
+        && sha256_file(&target_path)? == expected_hash
+    {
+        let mut permissions = fs::metadata(&target_path)
+            .map_err(|error| format!("Could not read {}: {error}", target_path.display()))?
+            .permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&target_path, permissions).map_err(|error| {
+            format!(
+                "Could not make {} read-only: {error}",
+                target_path.display()
+            )
+        })?;
+        return Ok(());
+    }
+
+    if let Some(parent) = target_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    }
+    if target_path.exists() {
+        let mut permissions = fs::metadata(&target_path)
+            .map_err(|error| format!("Could not read {}: {error}", target_path.display()))?
+            .permissions();
+        permissions.set_readonly(false);
+        fs::set_permissions(&target_path, permissions).map_err(|error| {
+            format!(
+                "Could not make {} writable for refresh: {error}",
+                target_path.display()
+            )
+        })?;
+    }
+
+    let temporary = target_path.with_file_name(format!(
+        ".system.db.{}.{}.tmp",
+        std::process::id(),
+        now_epoch()
+    ));
+    let _ = fs::remove_file(&temporary);
+    let result = (|| {
+        fs::copy(source_path, &temporary).map_err(|error| {
+            format!(
+                "Could not copy {} to {}: {error}",
+                source_path.display(),
+                temporary.display()
+            )
+        })?;
+        let temporary_metadata = fs::metadata(&temporary).map_err(|error| error.to_string())?;
+        if !temporary_metadata.is_file() || temporary_metadata.len() != expected_size {
+            return Err(format!(
+                "The Desktop system catalog copy has an unexpected size: {}",
+                temporary.display()
+            ));
+        }
+        if sha256_file(&temporary)? != expected_hash {
+            return Err(
+                "The Desktop system catalog copy failed checksum verification.".to_string(),
+            );
+        }
+        let mut permissions = temporary_metadata.permissions();
+        permissions.set_readonly(true);
+        fs::set_permissions(&temporary, permissions).map_err(|error| {
+            format!("Could not make {} read-only: {error}", temporary.display())
+        })?;
+        replace_file(&temporary, &target_path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        if target_path.is_file() {
+            if let Ok(metadata) = fs::metadata(target_path) {
+                let mut permissions = metadata.permissions();
+                permissions.set_readonly(true);
+                let _ = fs::set_permissions(target_path, permissions);
+            }
+        }
+    }
+    result
+}
+
+fn refresh_environment(config: &CacheConfig, local: &LocalManifest) -> Result<(), String> {
     let manifest = local_manifest_path(config);
     env::set_var("PORTAL_SOURCE_CACHE_MANIFEST", &manifest);
     if let Some(system) = local
@@ -1100,8 +1429,12 @@ fn refresh_environment(config: &CacheConfig, local: &LocalManifest) {
         .get("system.catalog")
         .filter(|source| local_source_is_usable(config, source))
     {
+        synchronize_desktop_system_database(system)?;
         env::set_var("PORTAL_SYSTEM_DB", &system.local_path);
+        env::set_var("PORTAL_SYSTEM_DB_ENCRYPTED", "1");
+        env::set_var("PORTAL_SYSTEM_DB_KEY", config.catalog_key.hex());
     }
+    Ok(())
 }
 
 fn synchronize_groups(
@@ -1160,7 +1493,7 @@ pub fn startup(app: AppHandle) -> Result<DataCacheStartupResult, String> {
         write_json_atomic(&local_manifest_path(&config), &local)?;
     }
     cleanup_abandoned_staging(&config);
-    refresh_environment(&config, &local);
+    refresh_environment(&config, &local)?;
     if !config.enabled {
         return Ok(DataCacheStartupResult {
             enabled: false,
@@ -1189,7 +1522,7 @@ pub fn startup(app: AppHandle) -> Result<DataCacheStartupResult, String> {
             local.last_error = error.clone();
             local.last_checked_at_epoch = now_epoch();
             let _ = write_json_atomic(&local_manifest_path(&config), &local);
-            refresh_environment(&config, &local);
+            refresh_environment(&config, &local)?;
             return Ok(DataCacheStartupResult {
                 enabled: true,
                 offline: true,
@@ -1228,7 +1561,7 @@ pub fn startup(app: AppHandle) -> Result<DataCacheStartupResult, String> {
     local.offline = false;
     local.last_error.clear();
     write_json_atomic(&local_manifest_path(&config), &local)?;
-    refresh_environment(&config, &local);
+    refresh_environment(&config, &local)?;
 
     if !background.is_empty() {
         BACKGROUND_UPDATE_ACTIVE.store(true, Ordering::Release);
@@ -1431,9 +1764,10 @@ pub fn resolve_file_name_version(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_groups, classify_source, modified_at_nanos, now_epoch, safe_component,
-        validate_file_header, validate_startup_disk_space, CacheConfig, LocalManifest, LocalSource,
-        QueueKind, RemoteManifest, RemoteSource, DEFAULT_MINIMUM_STARTUP_FREE_BYTES,
+        build_groups, classify_source, modified_at_nanos, now_epoch, safe_component, sha256_file,
+        synchronize_system_database_copy, validate_file_header, validate_startup_disk_space,
+        CacheConfig, LocalManifest, LocalSource, QueueKind, RemoteManifest, RemoteSource,
+        DEFAULT_MINIMUM_STARTUP_FREE_BYTES,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -1452,6 +1786,7 @@ mod tests {
             minimum_startup_free_bytes: DEFAULT_MINIMUM_STARTUP_FREE_BYTES,
             disk_safety_reserve_bytes: 0,
             staging_recovery_hours: 72,
+            catalog_key: super::super::catalog_crypto::CatalogKey::for_test(7),
         }
     }
 
@@ -1532,7 +1867,7 @@ mod tests {
     }
 
     #[test]
-    fn source_within_grace_is_background() {
+    fn source_within_grace_is_background_unless_required_at_startup() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("time")
@@ -1564,10 +1899,20 @@ mod tests {
             validated_at_epoch: 100,
             local_modified_at_nanos: modified_at_nanos(&path),
             observed_remote_version: "new".to_string(),
+            local_size_bytes: 4,
+            local_sha256: "b".repeat(64),
+            storage_format: "duckdb".to_string(),
+            encryption_key_id: String::new(),
         };
         assert_eq!(
             classify_source(&config(&root), &remote(now_epoch()), Some(&local), 7),
             QueueKind::Background
+        );
+        let mut required = remote(now_epoch());
+        required.required_at_startup = true;
+        assert_eq!(
+            classify_source(&config(&root), &required, Some(&local), 7),
+            QueueKind::Blocking
         );
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -1605,6 +1950,10 @@ mod tests {
             validated_at_epoch: 100,
             local_modified_at_nanos: modified_at_nanos(&path),
             observed_remote_version: "new".to_string(),
+            local_size_bytes: 4,
+            local_sha256: "b".repeat(64),
+            storage_format: "duckdb".to_string(),
+            encryption_key_id: String::new(),
         };
         let old_release = now_epoch().saturating_sub(8 * 24 * 60 * 60);
         assert_eq!(
@@ -1629,5 +1978,37 @@ mod tests {
     #[test]
     fn logical_ids_are_safe_path_components() {
         assert_eq!(safe_component("map.core/storm"), "map.core_storm");
+    }
+
+    #[test]
+    fn verified_system_catalog_refreshes_config_copy_and_keeps_it_read_only() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let root = env::temp_dir().join(format!("portal-system-copy-{unique}-{}", process::id()));
+        let source = root.join("cache").join("system.db");
+        let target = root.join("config").join("system.db");
+        fs::create_dir_all(source.parent().expect("source parent")).expect("source root");
+        fs::create_dir_all(target.parent().expect("target parent")).expect("target root");
+        fs::write(&source, b"new system catalog").expect("source");
+        fs::write(&target, b"old system catalog").expect("target");
+        let expected_hash = sha256_file(&source).expect("source hash");
+        synchronize_system_database_copy(
+            &source,
+            &target,
+            fs::metadata(&source).expect("source metadata").len(),
+            &expected_hash,
+        )
+        .expect("refresh config copy");
+        assert_eq!(
+            fs::read(&target).expect("read target"),
+            b"new system catalog"
+        );
+        assert!(fs::metadata(&target)
+            .expect("target metadata")
+            .permissions()
+            .readonly());
+        fs::remove_dir_all(root).expect("cleanup");
     }
 }

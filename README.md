@@ -18,7 +18,7 @@ docs/           Architecture and resource design documents
 Portal keeps writable and workstation-specific data under `%LOCALAPPDATA%\Portal`:
 
 ```text
-config/          Application settings and the read-only system.db publication
+config/          Application settings and the encrypted system.db runtime mirror
 data/stormwater.db Writable resource data, including CCTV review reports
 exports/         User-generated documents and spreadsheets
 logs/            Application diagnostics
@@ -28,10 +28,13 @@ temp/            Disposable working files
 
 The authoritative source paths are declared in `config/portal.settings.json`. Large
 read-only DuckDB, PMTiles, map styles, sprites, and map configuration live under the
-configured shared data root and are never packaged with the application. The system
-database is read directly from portable `config/system.db`. `stormwater.db` is also
-not packaged: a verified active `protocol-v1` snapshot is downloaded to the user
-profile on first launch and becomes the only database writable at runtime.
+configured shared data root and are never packaged with the application. Desktop
+activates the verified versioned `system.catalog` cache, encrypts it with SQLCipher
+using a per-user key protected by Windows DPAPI, and atomically mirrors that encrypted
+artifact to portable `config/system.db`, which remains read-only. No plaintext system
+database is packaged. `stormwater.db` is also not
+packaged: a verified active `protocol-v1` snapshot is downloaded to the user profile
+on first launch and becomes the only database writable at runtime.
 
 ## Development
 

@@ -14,6 +14,7 @@ use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, Stat
 use tauri::Manager;
 
 mod business_sync;
+mod catalog_crypto;
 mod data_cache;
 
 #[cfg(target_os = "windows")]
@@ -222,6 +223,7 @@ struct DesktopContext {
     cache_root: String,
     log_root: String,
     python_worker_available: bool,
+    update_channel: String,
 }
 
 #[derive(Serialize)]
@@ -239,6 +241,7 @@ struct PortalUpdateCheck {
     current_version: String,
     release_version: Option<String>,
     message: String,
+    channel: String,
 }
 
 #[derive(Deserialize)]
@@ -248,6 +251,10 @@ struct PortalReleaseManifest {
     version: String,
     update_mode: String,
     payload: PortalReleasePayload,
+    #[serde(default)]
+    channel: Option<String>,
+    #[serde(default)]
+    allowed_machines: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -360,6 +367,7 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
     initialize_local_directories(&data_root)?;
     let application_root = installation_root()?;
     let system_database = system_database_path()?;
+    let catalog_key = catalog_crypto::load_or_create(&data_root)?;
     let config_file = portal_config_path()?;
     let business_database =
         business_sync::local_business_database_path(&config_file, &application_root, &data_root)?;
@@ -378,6 +386,8 @@ fn spawn_python_worker() -> Result<PythonWorker, String> {
         .env("PORTAL_WINDOWS_EMPLOYEE_ID", &windows_identity.employee_id)
         .env("PORTAL_WINDOWS_ACCOUNT", &windows_identity.account)
         .env("PORTAL_SYSTEM_DB", &system_database)
+        .env("PORTAL_SYSTEM_DB_ENCRYPTED", "1")
+        .env("PORTAL_SYSTEM_DB_KEY", catalog_key.hex())
         .env("PORTAL_SYSTEM_DB_WRITE_ENABLED", "0")
         .env("PORTAL_BUSINESS_DB", business_database)
         .env("PORTAL_MANAGEMENT_DB", &system_database)
@@ -999,6 +1009,7 @@ fn initialize_local_directories(root: &Path) -> Result<(), String> {
         root.join("data").join("exports"),
         root.join("data").join("inbox"),
         root.join("data").join("logs"),
+        root.join("data").join("settings"),
         root.join("data").join("outbox"),
         root.join("data").join("temp"),
     ] {
@@ -1282,6 +1293,73 @@ fn configured_update_release_root(settings: &serde_json::Value) -> Result<Option
     Ok(Some(PathBuf::from(expanded)))
 }
 
+fn normalize_update_channel(value: &str) -> Result<String, String> {
+    let channel = value.trim().to_ascii_lowercase();
+    if matches!(channel.as_str(), "production" | "test") {
+        Ok(channel)
+    } else {
+        Err("Portal update channel must be production or test.".to_string())
+    }
+}
+
+fn update_channel_settings_path() -> Result<PathBuf, String> {
+    Ok(local_data_root()?
+        .join("data")
+        .join("settings")
+        .join("update-channel.json"))
+}
+
+fn configured_update_channel() -> Result<String, String> {
+    let path = update_channel_settings_path()?;
+    let Ok(contents) = fs::read_to_string(&path) else {
+        return Ok("production".to_string());
+    };
+    let value: serde_json::Value = serde_json::from_str(contents.trim_start_matches('\u{feff}'))
+        .map_err(|error| {
+            format!(
+                "Portal update channel settings are invalid at {}: {error}",
+                path.display()
+            )
+        })?;
+    let channel = value
+        .get("channel")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("production");
+    normalize_update_channel(channel)
+}
+
+fn release_root_for_channel(base: &Path, channel: &str) -> PathBuf {
+    if channel == "test" {
+        base.join("test")
+    } else {
+        base.to_path_buf()
+    }
+}
+
+fn manifest_allows_machine(
+    manifest: &PortalReleaseManifest,
+    channel: &str,
+    machine_name: &str,
+) -> Result<(), String> {
+    let manifest_channel = manifest.channel.as_deref().unwrap_or("production");
+    if manifest_channel != channel {
+        return Err(format!(
+            "The {channel} release folder contains a {manifest_channel} manifest."
+        ));
+    }
+    if channel == "test"
+        && !manifest
+            .allowed_machines
+            .iter()
+            .any(|allowed| allowed.trim().eq_ignore_ascii_case(machine_name.trim()))
+    {
+        return Err(format!(
+            "This computer ({machine_name}) is not authorized for the Portal test channel."
+        ));
+    }
+    Ok(())
+}
+
 fn parse_portal_release_manifest(path: &Path) -> Result<PortalReleaseManifest, String> {
     let contents = fs::read_to_string(path).map_err(|error| {
         format!(
@@ -1292,10 +1370,25 @@ fn parse_portal_release_manifest(path: &Path) -> Result<PortalReleaseManifest, S
     let manifest: PortalReleaseManifest =
         serde_json::from_str(contents.trim_start_matches('\u{feff}'))
             .map_err(|error| format!("Portal release manifest is invalid: {error}"))?;
-    if manifest.schema_version != 1 || manifest.version.trim().is_empty() {
+    if !matches!(manifest.schema_version, 1 | 2) || manifest.version.trim().is_empty() {
         return Err(
             "Portal release manifest has an unsupported schema or empty version.".to_string(),
         );
+    }
+    if manifest.schema_version == 1
+        && (manifest.channel.is_some() || !manifest.allowed_machines.is_empty())
+    {
+        return Err("Portal release schema 1 cannot define channel targeting.".to_string());
+    }
+    if manifest.schema_version == 2 {
+        let channel = manifest
+            .channel
+            .as_deref()
+            .ok_or_else(|| "Portal release schema 2 must define channel.".to_string())?;
+        normalize_update_channel(channel)?;
+        if channel == "test" && manifest.allowed_machines.is_empty() {
+            return Err("A test release must target at least one computer.".to_string());
+        }
     }
     if !matches!(
         manifest.update_mode.as_str(),
@@ -1371,11 +1464,13 @@ fn installed_release_version() -> String {
     }
 }
 
-fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest)>, String> {
+fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest, String)>, String> {
     let settings = load_client_settings()?;
-    let Some(release_root) = configured_update_release_root(&settings)? else {
+    let Some(base_release_root) = configured_update_release_root(&settings)? else {
         return Ok(None);
     };
+    let channel = configured_update_channel()?;
+    let release_root = release_root_for_channel(&base_release_root, &channel);
     if !release_root.is_dir() {
         return Ok(None);
     }
@@ -1384,6 +1479,8 @@ fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest)>,
         return Ok(None);
     }
     let manifest = parse_portal_release_manifest(&manifest_path)?;
+    let machine_name = env::var("COMPUTERNAME").unwrap_or_default();
+    manifest_allows_machine(&manifest, &channel, &machine_name)?;
     let payload = release_root.join(&manifest.payload.file);
     if !payload.is_file() {
         return Err(format!(
@@ -1397,18 +1494,20 @@ fn available_portal_update() -> Result<Option<(PathBuf, PortalReleaseManifest)>,
     if size != manifest.payload.size {
         return Err("Portal release payload size does not match the release manifest.".to_string());
     }
-    Ok(Some((release_root, manifest)))
+    Ok(Some((release_root, manifest, channel)))
 }
 
 #[tauri::command]
 fn check_portal_update() -> Result<PortalUpdateCheck, String> {
     let current_version = installed_release_version();
-    let Some((_release_root, manifest)) = available_portal_update()? else {
+    let channel = configured_update_channel()?;
+    let Some((_release_root, manifest, channel)) = available_portal_update()? else {
         return Ok(PortalUpdateCheck {
             available: false,
             current_version,
             release_version: None,
             message: "No Portal update release is available.".to_string(),
+            channel,
         });
     };
     let available = release_is_newer(&manifest.version, &current_version);
@@ -1421,23 +1520,29 @@ fn check_portal_update() -> Result<PortalUpdateCheck, String> {
         } else {
             "Portal is already up to date.".to_string()
         },
+        channel,
     })
 }
 
 #[tauri::command]
 fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
-    let Some((release_root, manifest)) = available_portal_update()? else {
+    let Some((release_root, manifest, channel)) = available_portal_update()? else {
         return Err("No Portal update release is available.".to_string());
     };
     let current_version = installed_release_version();
     if !release_is_newer(&manifest.version, &current_version) {
         return Err("Portal is already up to date.".to_string());
     }
-    let updater = executable_root()?.join("runtime").join("PortalUpdater.exe");
+    let bundled_updater = executable_root()?.join("runtime").join("PortalUpdater.exe");
+    let published_updater = release_root.join("PortalUpdater.exe");
+    let updater = if published_updater.is_file() {
+        published_updater
+    } else {
+        bundled_updater
+    };
     if !updater.is_file() {
         return Err(
-            "The bundled Portal updater was not found under runtime\\PortalUpdater.exe."
-                .to_string(),
+            "PortalUpdater.exe was not found in the shared release or bundled runtime.".to_string(),
         );
     }
     let temporary_updater = env::temp_dir().join(format!(
@@ -1445,16 +1550,26 @@ fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
         std::process::id(),
         manifest.version
     ));
+    let updater_working_directory = env::temp_dir().join("StormWaterPortal-Updater");
+    fs::create_dir_all(&updater_working_directory)
+        .map_err(|error| format!("Could not prepare the Portal updater workspace: {error}"))?;
     fs::copy(&updater, &temporary_updater)
         .map_err(|error| format!("Could not prepare Portal updater: {error}"))?;
     let mut command = Command::new(&temporary_updater);
     command
+        // The updater must not inherit the installed app directory as its
+        // working directory. Windows keeps that directory handle open and then
+        // refuses to rename app during activation even though the updater EXE
+        // itself was copied to the temporary directory.
+        .current_dir(&updater_working_directory)
         .arg("--release-root")
         .arg(&release_root)
         .arg("--install-root")
         .arg(installation_root()?)
         .arg("--wait-pid")
         .arg(std::process::id().to_string())
+        .arg("--channel")
+        .arg(&channel)
         .arg("--restart");
     #[cfg(target_os = "windows")]
     command.creation_flags(CREATE_NO_WINDOW);
@@ -1611,6 +1726,7 @@ fn validated_file_export(candidate: &str, format: &str) -> Result<(String, &'sta
         "excel" => "xlsx",
         "geopackage" => "gpkg",
         "jpg" => "jpg",
+        "pdf" => "pdf",
         _ => return Err("The requested export format is not supported.".to_string()),
     };
     if candidate.is_empty() {
@@ -1665,6 +1781,10 @@ fn select_export_path(
         "jpg" => (
             "JPEG image (*.jpg)\0*.jpg\0All files (*.*)\0*.*\0\0",
             "Save terrain profile graph",
+        ),
+        "pdf" => (
+            "PDF document (*.pdf)\0*.pdf\0All files (*.*)\0*.*\0\0",
+            "Save map PDF",
         ),
         _ => (
             "GeoPackage (*.gpkg)\0*.gpkg\0All files (*.*)\0*.*\0\0",
@@ -2095,7 +2215,10 @@ fn system_database_path() -> Result<PathBuf, String> {
         return Ok(development);
     }
 
-    Err("The read-only Portal system database was not found at config\\system.db.".to_string())
+    Err(
+        "The encrypted Portal system catalog is unavailable. Retry startup to activate the latest catalog."
+            .to_string(),
+    )
 }
 
 #[tauri::command]
@@ -2175,6 +2298,7 @@ fn desktop_context() -> Result<DesktopContext, String> {
         cache_root: data_root.join("data").join("cache").display().to_string(),
         log_root: data_root.join("data").join("logs").display().to_string(),
         python_worker_available: python_worker_path().is_ok(),
+        update_channel: configured_update_channel()?,
     })
 }
 
@@ -2238,8 +2362,10 @@ pub fn run() {
 mod tests {
     use super::{
         atomically_save_export, configure_system_database_access, file_response_range,
-        is_scheduled_maintenance_hour, packaged_application_version, save_excel_export,
-        validated_excel_export_file_name, validated_file_export, INITIAL_MEDIA_CHUNK_BYTES,
+        is_scheduled_maintenance_hour, manifest_allows_machine, normalize_update_channel,
+        packaged_application_version, release_root_for_channel, save_excel_export,
+        validated_excel_export_file_name, validated_file_export, PortalReleaseManifest,
+        PortalReleasePayload, INITIAL_MEDIA_CHUNK_BYTES,
     };
     use std::{env, fs, process, time::SystemTime};
 
@@ -2254,11 +2380,40 @@ mod tests {
     }
 
     #[test]
+    fn update_channels_select_separate_release_roots() {
+        let root = std::path::Path::new(r"G:\PortalRelease");
+        assert_eq!(release_root_for_channel(root, "production"), root);
+        assert_eq!(release_root_for_channel(root, "test"), root.join("test"));
+        assert_eq!(normalize_update_channel(" TEST ").as_deref(), Ok("test"));
+        assert!(normalize_update_channel("preview").is_err());
+    }
+
+    #[test]
+    fn test_release_requires_the_current_machine() {
+        let manifest = PortalReleaseManifest {
+            schema_version: 2,
+            version: "1.2.3".to_string(),
+            update_mode: "full".to_string(),
+            payload: PortalReleasePayload {
+                file: "Portal-Desktop-1.2.3.zip".to_string(),
+                sha256: "0".repeat(64),
+                size: 1,
+            },
+            channel: Some("test".to_string()),
+            allowed_machines: vec!["PORTAL-TEST-01".to_string()],
+        };
+        assert!(manifest_allows_machine(&manifest, "test", "portal-test-01").is_ok());
+        assert!(manifest_allows_machine(&manifest, "test", "PRODUCTION-PC").is_err());
+    }
+
+    #[test]
     fn file_export_validation_requires_the_requested_extension() {
         assert!(validated_file_export("Asset Extract.xlsx", "excel").is_ok());
         assert!(validated_file_export("Asset Extract.gpkg", "geopackage").is_ok());
         assert!(validated_file_export("Terrain Profile.jpg", "jpg").is_ok());
+        assert!(validated_file_export("Storm Water Asset Risk Map.pdf", "pdf").is_ok());
         assert!(validated_file_export("Terrain Profile.png", "jpg").is_err());
+        assert!(validated_file_export("Storm Water Asset Risk Map.xlsx", "pdf").is_err());
         assert!(validated_file_export("Asset Extract.gpkg", "excel").is_err());
         assert!(validated_file_export("folder/Asset Extract.xlsx", "excel").is_err());
     }

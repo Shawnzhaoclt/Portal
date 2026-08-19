@@ -52,6 +52,9 @@ export type PortalResource = {
   help_url?: string | null
   is_public: boolean
   is_active: boolean
+  is_released: boolean
+  released_at: string | null
+  released_by_user_id: number | null
   created_at: string
   updated_at: string
   sort_order?: number
@@ -384,6 +387,8 @@ export type AdminSummary = {
   users: number
   teams: number
   resources: number
+  released_resources: number
+  unreleased_resources: number
   permissions: number
 }
 
@@ -664,6 +669,18 @@ export function updateResource(resourceId: number, payload: Partial<PortalResour
   return requestJson<{ resource: PortalResource }>(`/api/admin/resources/${resourceId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
+  })
+}
+
+export function releaseResource(resourceId: number) {
+  return requestJson<{ resource: PortalResource }>(`/api/admin/resources/${resourceId}/release`, {
+    method: 'POST',
+  })
+}
+
+export function withdrawResourceRelease(resourceId: number) {
+  return requestJson<{ resource: PortalResource }>(`/api/admin/resources/${resourceId}/withdraw-release`, {
+    method: 'POST',
   })
 }
 

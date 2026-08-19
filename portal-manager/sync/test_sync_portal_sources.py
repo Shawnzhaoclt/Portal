@@ -241,13 +241,22 @@ def test_planning_endpoints_read_serving_contract(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(planning, "critical_team_connection", serving_connection)
     monkeypatch.setattr(planning, "pending_aif_person_team_lookup", lambda: {})
     monkeypatch.setattr(planning, "pending_aif_link_templates", lambda: {})
+    monkeypatch.setattr(planning, "pending_aif_authorized_team_names", lambda _db, _user: None)
+    fake_db = object()
+    fake_user = object()
 
-    options = planning.pending_aif_filter_options()
+    options = planning.pending_aif_filter_options(db=fake_db, current_user=fake_user)
     assert options["inspection_status"] == ["PENDING"]
     assert options["critical_team_status"] == ["Ready For Review"]
 
     defaults = {}
     for name, parameter in inspect.signature(planning.pending_aif_rows).parameters.items():
+        if name == "db":
+            defaults[name] = fake_db
+            continue
+        if name == "current_user":
+            defaults[name] = fake_user
+            continue
         default = parameter.default
         defaults[name] = default.default if isinstance(default, Parameter) else default
     pending = planning.pending_aif_rows(**defaults)

@@ -14,7 +14,7 @@ import AifOverviewDashboard from './dashboards/planning/AifOverviewDashboard'
 import PlanningPendingAifQaTable from './dashboards/planning/PlanningPendingAifQaTable'
 import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
 import StormWaterAssetHistory from './resources/tables/storm-water-asset-history/StormWaterAssetHistory'
-import { clearManagementToken, fetchMe, storedManagementToken, storedManagementUser } from './management/api'
+import { clearManagementToken, fetchMe, fetchMyResources, storedManagementToken, storedManagementUser } from './management/api'
 import {
   ADMIN_MANAGEMENT_ROUTE,
   ACCOUNT_ROUTE,
@@ -33,6 +33,7 @@ import {
   WEEKLY_TIME_REPORTING_ROUTE,
   criticalAssetSheetIdFromPath,
   criticalTeamSheetIdFromPath,
+  criticalTeamSheetPath,
 } from './dashboardCatalog'
 import { applyAppTheme, getInitialTheme, type AppTheme } from './theme'
 import { isDesktopRuntime } from './desktop/runtime'
@@ -51,6 +52,26 @@ function getRouteTheme(): AppTheme | null {
   return null
 }
 
+function managedResourcePath(path: string) {
+  if (path === PROACTIVE_TEAM_CCTV_REVIEW_HELP_ROUTE) return PROACTIVE_TEAM_CCTV_REVIEW_ROUTE
+  const criticalTeamSheetId = criticalTeamSheetIdFromPath(path)
+  if (criticalTeamSheetId) return criticalTeamSheetPath(criticalTeamSheetId)
+  const managedPaths = new Set([
+    AIF_OVERVIEW_ROUTE,
+    CRITICAL_ASSET_TRACKING_ROUTE,
+    CREATE_AIF_FROM_ITPIPES_ROUTE,
+    DASHBOARD_LINKS_ROUTE,
+    GIS_FACILITY_ROUTE,
+    GIS_HISTORY_ROUTE,
+    PLANNING_PENDING_AIF_QA_ROUTE,
+    PROACTIVE_TEAM_CCTV_REVIEW_ROUTE,
+    STM_RISK_MAP_ROUTE,
+    STORM_WATER_ASSET_HISTORY_ROUTE,
+    WEEKLY_TIME_REPORTING_ROUTE,
+  ])
+  return managedPaths.has(path) || criticalAssetSheetIdFromPath(path) ? path : null
+}
+
 export default function AppRoutes() {
   const path = window.location.pathname
   const params = new URLSearchParams(window.location.search)
@@ -60,6 +81,11 @@ export default function AppRoutes() {
   const requiresAuth = !isLoginRoute
   const [theme, setTheme] = useState<AppTheme>(() => getRouteTheme() ?? getInitialTheme())
   const [authReady, setAuthReady] = useState(!requiresAuth)
+  const resourcePath = managedResourcePath(path)
+  const integratedParentPath = path === STORM_WATER_ASSET_HISTORY_ROUTE && params.get('returnTo') === 'map'
+    ? STM_RISK_MAP_ROUTE
+    : null
+  const [resourceAccessReady, setResourceAccessReady] = useState(!resourcePath)
 
   useEffect(() => {
     applyAppTheme(theme)
@@ -109,6 +135,31 @@ export default function AppRoutes() {
     }
   }, [desktopRuntime, path, requiresAuth])
 
+  useEffect(() => {
+    let cancelled = false
+    if (!resourcePath || !authReady) {
+      setResourceAccessReady(!resourcePath)
+      return
+    }
+    const token = storedManagementToken()
+    setResourceAccessReady(false)
+    fetchMyResources(token)
+      .then((response) => {
+        if (cancelled) return
+        const allowed = response.resources.some(
+          (resource) => resource.url === resourcePath || (integratedParentPath && resource.url === integratedParentPath),
+        )
+        if (allowed) setResourceAccessReady(true)
+        else window.location.replace('/')
+      })
+      .catch(() => {
+        if (!cancelled) window.location.replace('/')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [authReady, integratedParentPath, resourcePath])
+
   if (requiresAuth && !storedManagementToken()) {
     setPageMeta('Portal Sign In')
     window.location.replace(PORTAL_LOGIN_ROUTE)
@@ -116,6 +167,7 @@ export default function AppRoutes() {
   }
 
   if (requiresAuth && !authReady) return null
+  if (resourcePath && !resourceAccessReady) return null
 
   if (desktopRuntime && isLoginRoute) {
     window.location.replace('/')
@@ -154,7 +206,7 @@ export default function AppRoutes() {
   }
 
   if (path === PLANNING_PENDING_AIF_QA_ROUTE) {
-    setPageMeta('Planning Pending AIF QA/QC')
+    setPageMeta('Planning Team QA/AC Tables')
     return <PlanningPendingAifQaTable />
   }
 

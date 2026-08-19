@@ -25,6 +25,7 @@ export type DesktopContext = {
   cacheRoot: string
   logRoot: string
   pythonWorkerAvailable: boolean
+  updateChannel: 'production' | 'test'
 }
 
 export type PythonHealth = {
@@ -62,6 +63,7 @@ export type PortalUpdateCheck = {
   currentVersion: string
   releaseVersion: string | null
   message: string
+  channel: 'production' | 'test'
 }
 
 export type DataCacheProgress = {
@@ -200,7 +202,7 @@ export async function saveAndOpenExcelExport(fileName: string, bytes: Uint8Array
 export async function saveExportAs(
   fileName: string,
   bytes: Uint8Array,
-  format: 'excel' | 'geopackage' | 'jpg',
+  format: 'excel' | 'geopackage' | 'jpg' | 'pdf',
   openAfterSave = false,
 ) {
   if (!isDesktopRuntime()) throw new Error('Native Save As exports are available only inside Tauri.')

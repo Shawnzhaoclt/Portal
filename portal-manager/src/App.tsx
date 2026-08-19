@@ -265,10 +265,12 @@ type PortalReleaseStatus = {
   currentUpdateMode?: string | null;
   portalExe: string;
   systemDb: string;
-  desktopSystemDb: string;
   managerSystemDbWritable: boolean;
-  desktopSystemDbReadOnly: boolean;
-  desktopSystemDbCurrent: boolean;
+  desktopCatalogProtection: string;
+  channel: "production" | "test";
+  publishedVersion?: string | null;
+  allowedMachines: string[];
+  configuredTestMachines: string[];
 };
 
 type PageId =
@@ -1290,20 +1292,34 @@ function RepositoryWorkspace({
 
 function ReleaseWorkspace({
   status,
+  channel,
+  allowedMachines,
   updateMode,
   busy,
   progress,
   success,
   setUpdateMode,
+  setChannel,
+  setAllowedMachines,
   publish,
+  promote,
+  saveTargets,
+  savingTargets,
 }: {
   status: PortalReleaseStatus | null;
+  channel: "production" | "test";
+  allowedMachines: string;
   updateMode: "portal-exe" | "full";
   busy: boolean;
   progress: string;
   success: string;
   setUpdateMode: (value: "portal-exe" | "full") => void;
+  setChannel: (value: "production" | "test") => void;
+  setAllowedMachines: (value: string) => void;
   publish: () => void;
+  promote: () => void;
+  saveTargets: () => void;
+  savingTargets: boolean;
 }) {
   const publishedScope = status?.currentUpdateMode === "portal-exe"
     ? "Portal.exe only"
@@ -1314,6 +1330,7 @@ function ReleaseWorkspace({
     <section className="release-workspace">
       <section className="metrics release-metrics" aria-label="Portal release status">
         <div><span>RELEASE VERSION</span><strong>{status?.releaseVersion ?? "-"}</strong></div>
+        <div><span>CHANNEL</span><strong>{channel === "test" ? "Test" : "Production"}</strong></div>
         <div><span>PUBLICATION</span><strong>{status?.published ? "Published" : "Not published"}</strong></div>
         <div><span>UPDATE SCOPE</span><strong>{publishedScope}</strong></div>
       </section>
@@ -1321,9 +1338,44 @@ function ReleaseWorkspace({
       <section className="release-details">
         <div><span>Portable folder</span><strong>{status?.portableRoot ?? "Checking configuration"}</strong></div>
         <div><span>Release folder</span><strong>{status?.releaseRoot ?? "-"}</strong></div>
+        <div><span>Published version</span><strong>{status?.publishedVersion ?? "Not published"}</strong></div>
+        {channel === "test" ? <div><span>Test computers</span><strong>{status?.allowedMachines?.join(", ") || "Not configured"}</strong></div> : null}
         <div><span>Authoritative system database</span><strong>{status ? `${status.systemDb} · ${status.managerSystemDbWritable ? "Writable" : "Read-only"}` : "-"}</strong></div>
-        <div><span>Desktop system database</span><strong>{status ? `${status.desktopSystemDb} · ${status.desktopSystemDbCurrent ? "Current" : "Refresh required"} · ${status.desktopSystemDbReadOnly ? "Read-only" : "Writable"}` : "-"}</strong></div>
+        <div><span>Desktop catalog protection</span><strong>{status?.desktopCatalogProtection ?? "-"}</strong></div>
         <div><span>Portal executable</span><strong>{status?.portalExe ?? "-"}</strong></div>
+      </section>
+
+      <section className={`release-channel-panel ${channel}`}>
+        <div>
+          <p className="eyebrow">RELEASE CHANNEL</p>
+          <h3>{channel === "test" ? "Target a controlled test group" : "Publish for all production computers"}</h3>
+          <p>{channel === "test"
+            ? "Only enrolled computers listed here can install this release. Use Promote after verification to publish these exact artifacts to production."
+            : "Production keeps the standard shared manifest and remains compatible with existing installations."}</p>
+        </div>
+        <label>
+          Channel
+          <select value={channel} onChange={(event) => setChannel(event.target.value as typeof channel)}>
+            <option value="production">Production</option>
+            <option value="test">Test</option>
+          </select>
+        </label>
+        {channel === "test" ? (
+          <label className="release-machine-targets">
+            Allowed computer names
+            <textarea
+              value={allowedMachines}
+              onChange={(event) => setAllowedMachines(event.target.value)}
+              placeholder="TEST-PC-01, TEST-PC-02"
+              rows={2}
+            />
+            <small>Saved in the Manager configuration and reused next time.</small>
+            <button type="button" className="quiet-button release-save-targets" disabled={savingTargets} onClick={saveTargets}>
+              <Save size={16} />
+              {savingTargets ? "Saving computers" : "Save computers"}
+            </button>
+          </label>
+        ) : null}
       </section>
 
       <section className="release-controls">
@@ -1339,14 +1391,26 @@ function ReleaseWorkspace({
             <option value="full">Complete application</option>
           </select>
         </label>
-        <button
-          className="primary-button"
-          disabled={busy || !status}
-          onClick={publish}
-        >
-          <PackageCheck size={17} />
-          {busy ? "Publishing" : "Publish release"}
-        </button>
+        <div className="release-action-buttons">
+          <button
+            className="primary-button"
+            disabled={busy || !status}
+            onClick={publish}
+          >
+            <PackageCheck size={17} />
+            {busy ? "Publishing" : "Publish release"}
+          </button>
+          {channel === "test" ? (
+          <button
+            className="quiet-button release-promote-button"
+            disabled={busy || !status?.publishedVersion}
+            onClick={promote}
+          >
+            <GitBranch size={17} />
+            Promote to production
+          </button>
+          ) : null}
+        </div>
       </section>
 
       {busy && (
@@ -1926,6 +1990,9 @@ export function App() {
   const [configuredRepositoryRoot, setConfiguredRepositoryRoot] = useState("");
   const [releaseStatus, setReleaseStatus] = useState<PortalReleaseStatus | null>(null);
   const [releaseMode, setReleaseMode] = useState<"portal-exe" | "full">("full");
+  const [releaseChannel, setReleaseChannel] = useState<"production" | "test">("production");
+  const [releaseAllowedMachines, setReleaseAllowedMachines] = useState("");
+  const [releaseTargetsBusy, setReleaseTargetsBusy] = useState(false);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseProgress, setReleaseProgress] = useState("");
   const [releaseSuccess, setReleaseSuccess] = useState("");
@@ -2036,13 +2103,18 @@ export function App() {
 
   const refreshRelease = useCallback(async () => {
     try {
-      const response = await invoke<PortalReleaseStatus>("portal_release_status");
+      const response = await invoke<PortalReleaseStatus>("portal_release_status", { channel: releaseChannel });
       setReleaseStatus(response);
+      if (releaseChannel === "test") {
+        setReleaseAllowedMachines((response.configuredTestMachines.length
+          ? response.configuredTestMachines
+          : response.allowedMachines).join("\n"));
+      }
       setError("");
     } catch (reason) {
       setError(String(reason));
     }
-  }, []);
+  }, [releaseChannel]);
 
   useEffect(() => {
     if (activePage === "releases") {
@@ -2543,8 +2615,16 @@ export function App() {
 
   const publishRelease = async () => {
     const label = releaseMode === "portal-exe" ? "Portal.exe only" : "the complete application";
+    const targets = releaseAllowedMachines
+      .split(/[,;\n\r]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (releaseChannel === "test" && !targets.length) {
+      setError("Enter at least one computer name for the test release.");
+      return;
+    }
     if (!(await appConfirm(
-      `Publish release ${releaseStatus?.releaseVersion ?? ""} with update scope ${label}?`,
+      `Publish release ${releaseStatus?.releaseVersion ?? ""} to the ${releaseChannel} channel with update scope ${label}${releaseChannel === "test" ? ` for ${targets.join(", ")}` : ""}?`,
       { title: "Publish Portal release", kind: "warning", confirmLabel: "Publish release" },
     ))) {
       return;
@@ -2555,10 +2635,57 @@ export function App() {
     try {
       const response = await invoke<PortalReleaseStatus>("publish_portal_release", {
         updateMode: releaseMode,
+        channel: releaseChannel,
+        allowedMachines: targets,
       });
       setReleaseStatus(response);
       setReleaseSuccess(`Release ${response.releaseVersion} is available at ${response.releaseRoot}.`);
       setError("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setReleaseBusy(false);
+    }
+  };
+
+  const saveReleaseTargets = async () => {
+    const targets = releaseAllowedMachines
+      .split(/[,;\n\r]+/)
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (!targets.length) {
+      setError("Enter at least one test computer name before saving.");
+      return;
+    }
+    setReleaseTargetsBusy(true);
+    try {
+      const response = await invoke<PortalReleaseStatus>("save_portal_release_test_machines", {
+        machines: targets,
+      });
+      setReleaseStatus(response);
+      setReleaseAllowedMachines(response.configuredTestMachines.join("\n"));
+      setReleaseSuccess("Test computer names saved for future releases.");
+      setError("");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setReleaseTargetsBusy(false);
+    }
+  };
+
+  const promoteTestRelease = async () => {
+    if (!(await appConfirm(
+      `Promote test release ${releaseStatus?.publishedVersion ?? ""} to production using the exact tested files and checksums?`,
+      { title: "Promote tested release", kind: "warning", confirmLabel: "Promote to production" },
+    ))) return;
+    setReleaseSuccess("");
+    setReleaseProgress("Verifying the tested release artifacts.");
+    setReleaseBusy(true);
+    try {
+      const response = await invoke<PortalReleaseStatus>("promote_test_release");
+      setReleaseSuccess(`Tested release ${response.publishedVersion ?? response.releaseVersion} was promoted to production without rebuilding.`);
+      setError("");
+      await refreshRelease();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2749,8 +2876,19 @@ export function App() {
         )}
         {activePage === "releases" && (
           <ReleaseWorkspace
+            allowedMachines={releaseAllowedMachines}
             busy={releaseBusy}
+            channel={releaseChannel}
             progress={releaseProgress}
+            promote={() => void promoteTestRelease()}
+            saveTargets={() => void saveReleaseTargets()}
+            savingTargets={releaseTargetsBusy}
+            setAllowedMachines={setReleaseAllowedMachines}
+            setChannel={(value) => {
+              setReleaseChannel(value);
+              setReleaseStatus(null);
+              setReleaseSuccess("");
+            }}
             setUpdateMode={setReleaseMode}
             status={releaseStatus}
             success={releaseSuccess}

@@ -43,6 +43,10 @@ PYTHON_ROOT = Path(__file__).resolve().parents[2]
 if str(PYTHON_ROOT) not in sys.path:
     sys.path.insert(0, str(PYTHON_ROOT))
 
+from portal.app.core.secure_catalog import install_system_catalog_sqlcipher_hook
+
+install_system_catalog_sqlcipher_hook()
+
 
 JobHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -97,10 +101,22 @@ def management_job(request: dict[str, Any]) -> dict[str, Any]:
     return run(payload, Path(str(settings_value)))
 
 
+def secure_catalog_job(request: dict[str, Any]) -> dict[str, Any]:
+    """Encrypt one verified plaintext catalog for the current Desktop user."""
+    from portal.app.core.secure_catalog import encrypt_plaintext_system_catalog
+
+    source = request.get("source")
+    destination = request.get("destination")
+    if not isinstance(source, str) or not isinstance(destination, str):
+        raise ValueError("System catalog encryption requires source and destination paths.")
+    return encrypt_plaintext_system_catalog(source, destination)
+
+
 JOBS: dict[str, JobHandler] = {
     "request": request_job,
     "health": health_job,
     "management": management_job,
+    "secure_catalog": secure_catalog_job,
 }
 
 

@@ -56,7 +56,7 @@ function requestLocalDialog(type: DialogType, message: string, options: DialogOp
 function requestDialog(type: DialogType, message: string, options: DialogOptions = {}) {
   try {
     const topWindow = window.top
-    if (topWindow && topWindow !== window && topWindow.__portalMessageDialogHost) {
+    if (topWindow?.__portalMessageDialogHost) {
       return topWindow.__portalMessageDialogHost(type, message, options)
     }
   } catch {

@@ -12,6 +12,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 WINDOWS_ICON_SIZES = (16, 20, 24, 32, 40, 48, 64, 128, 256)
 COMPACT_ICON_MAX_SIZE = 48
+WINDOWS_RUNTIME_ICON_SIZE = 32
 
 
 def compact_icon_canvas(master: Image.Image) -> Image.Image:
@@ -86,7 +87,13 @@ def generate(master_path: Path, icon_directory: Path) -> None:
     resized_icon(master, 512).save(icon_directory / "icon.png", optimize=True)
     resized_icon(master, 128).save(icon_directory / "128x128.png", optimize=True)
     resized_icon(master, 256).save(icon_directory / "128x128@2x.png", optimize=True)
-    write_png_ico(icon_directory / "icon.ico", frames)
+    # Tauri uses the first ICO entry for the running Windows window icon.
+    # Keep a native 32px frame first so an unpinned taskbar icon is never
+    # enlarged from the 16px frame. Windows still selects the best matching
+    # frame from the complete ICO family for shortcuts and Explorer.
+    runtime_index = WINDOWS_ICON_SIZES.index(WINDOWS_RUNTIME_ICON_SIZE)
+    ico_frames = [frames[runtime_index], *frames[:runtime_index], *frames[runtime_index + 1 :]]
+    write_png_ico(icon_directory / "icon.ico", ico_frames)
 
 
 def main() -> int:

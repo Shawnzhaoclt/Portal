@@ -30,6 +30,8 @@ import {
   DASHBOARD_CATALOG,
   PORTAL_LOGIN_ROUTE,
   RESOURCE_PRESENTATION_BY_KEY,
+  STM_RISK_MAP_ROUTE,
+  STORM_WATER_ASSET_HISTORY_ROUTE,
   type DashboardCatalogItem,
 } from './dashboardCatalog'
 import {
@@ -65,6 +67,11 @@ import {
 } from './desktop/runtime'
 import { appConfirm } from './components/messageDialogService'
 import { formatDateTime } from './lib/dateTime'
+import {
+  PORTAL_ACTIVATE_HOME_MESSAGE,
+  PORTAL_OPEN_RESOURCE_MESSAGE,
+  type PortalOpenResourceMessage,
+} from './lib/portalNavigation'
 import {
   clearPortalTestAccess,
   savePortalTestAccess,
@@ -130,6 +137,7 @@ function resourceThumbnails(resourceKey: string) {
 type PortalResource = {
   id: string
   resourceId?: string
+  isReleased?: boolean
   effectivePermission?: ManagedPortalResource['effective_permission']
   title: string
   description: string
@@ -354,6 +362,7 @@ function managedResourceCard(resource: ManagedPortalResource, existingResources:
     return {
       ...existing,
       resourceId: resource.resource_id,
+      isReleased: resource.is_released,
       effectivePermission: resource.effective_permission,
       helpUrl: resource.help_url ?? existing.helpUrl,
     }
@@ -361,6 +370,7 @@ function managedResourceCard(resource: ManagedPortalResource, existingResources:
   return {
     id: resource.resource_key,
     resourceId: resource.resource_id,
+    isReleased: resource.is_released,
     effectivePermission: resource.effective_permission,
     title: resource.name,
     description: resource.description ?? resource.name,
@@ -539,6 +549,7 @@ function ResourceCard({
     <article className="home-resource-card">
       <button className={`home-resource-preview ${thumbnail ? 'image-preview' : ''} ${resource.preview}`} type="button" onClick={() => onOpen(resource)} aria-label={`Open ${resource.title}`}>
         {thumbnail ? <img src={thumbnail} alt="" loading="lazy" /> : <span aria-hidden="true" />}
+        {resource.isReleased === false ? <strong className="home-unreleased-preview-badge">Unreleased preview</strong> : null}
       </button>
       <div className="home-resource-body">
         <button className="home-resource-title" type="button" onClick={() => onOpen(resource)}>
@@ -816,6 +827,7 @@ function AccountMenu({
 
 function AboutPortalDialog({
   version,
+  updateChannel,
   loading,
   error,
   desktopRuntime,
@@ -824,6 +836,7 @@ function AboutPortalDialog({
   onClose,
 }: {
   version: string
+  updateChannel: 'production' | 'test'
   loading: boolean
   error: string
   desktopRuntime: boolean
@@ -865,6 +878,9 @@ function AboutPortalDialog({
           <div>
             <span>{desktopRuntime ? 'Installed application' : 'Application'}</span>
             <strong>{versionText}</strong>
+            <small className={updateChannel === 'test' ? 'home-about-channel test' : 'home-about-channel'}>
+              {updateChannel === 'test' ? 'Test update channel' : 'Production update channel'}
+            </small>
           </div>
         </div>
         {error ? <div className="home-test-access-error" role="alert">{error}</div> : null}
@@ -999,6 +1015,11 @@ function TestAccessDialog({
             disabled={!selectedUser || loading || !availableRoles.includes(role)}
             onClick={async () => {
               if (!selectedUser) return
+              // Close the setup dialog before showing the read/write
+              // confirmation. Waiting one task lets React commit the close so
+              // the confirmation is never rendered over this dialog.
+              onClose()
+              await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
               if (mode === 'read_write' && !(await appConfirm(
                 `Start read/write simulation as ${selectedUser.display_name}? Local business-data changes will be applied as the selected user.`,
                 { title: 'Start read/write simulation', kind: 'warning', confirmLabel: 'Start simulation' },
@@ -1038,6 +1059,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
   const [testUsersError, setTestUsersError] = useState('')
   const [aboutOpen, setAboutOpen] = useState(false)
   const [applicationVersion, setApplicationVersion] = useState('')
+  const [updateChannel, setUpdateChannel] = useState<'production' | 'test'>('production')
   const [applicationVersionLoading, setApplicationVersionLoading] = useState(false)
   const [applicationVersionError, setApplicationVersionError] = useState('')
   const [dataCacheStatus, setDataCacheStatus] = useState<DataCacheStatus | null>(null)
@@ -1059,7 +1081,10 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     setApplicationVersionError('')
     getDesktopContext()
       .then((context) => {
-        if (!cancelled) setApplicationVersion(context.applicationVersion)
+        if (!cancelled) {
+          setApplicationVersion(context.applicationVersion)
+          setUpdateChannel(context.updateChannel)
+        }
       })
       .catch((error) => {
         if (!cancelled) setApplicationVersionError(error instanceof Error ? error.message : 'Could not read the installed Portal version.')
@@ -1187,7 +1212,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
 
   useEffect(() => {
     function handleResourceNavigation(event: MessageEvent) {
-      if (event.origin !== window.location.origin || event.data?.type !== 'portal:activate-home') return
+      if (event.origin !== window.location.origin || event.data?.type !== PORTAL_ACTIVATE_HOME_MESSAGE) return
       setPopupResource(null)
       setActiveDesktopResourceId(null)
     }
@@ -1357,6 +1382,57 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
     () => mergeResources(managedCardResources),
     [managedCardResources],
   )
+
+  useEffect(() => {
+    function handleOpenResourceMessage(event: MessageEvent) {
+      if (event.origin !== window.location.origin || event.data?.type !== PORTAL_OPEN_RESOURCE_MESSAGE || !portalUser) return
+      const message = event.data as PortalOpenResourceMessage
+      if (typeof message.href !== 'string' || !message.href.trim()) return
+
+      let targetUrl: URL
+      try {
+        targetUrl = new URL(message.href, window.location.origin)
+      } catch {
+        return
+      }
+      if (targetUrl.origin !== window.location.origin) return
+
+      const catalogItem = DASHBOARD_CATALOG.find((item) => item.path === targetUrl.pathname)
+      if (!catalogItem) return
+
+      const managedTarget = accessibleManagedResources.find((resource) => resource.url === targetUrl.pathname)
+      const inheritedParent = targetUrl.pathname === STORM_WATER_ASSET_HISTORY_ROUTE
+        && targetUrl.searchParams.get('returnTo') === 'map'
+        ? accessibleManagedResources.find((resource) => resource.url === STM_RISK_MAP_ROUTE)
+        : undefined
+      const launchAccess = managedTarget ?? inheritedParent
+      if (!launchAccess) return
+
+      const baseResource = baseResources.find((resource) => resource.id === catalogItem.id) ?? catalogResource(catalogItem)
+      const targetResource: PortalResource = {
+        ...baseResource,
+        resourceId: catalogItem.resource_id,
+        isReleased: managedTarget?.is_released ?? false,
+        effectivePermission: launchAccess.effective_permission,
+        href: `${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`,
+      }
+
+      if (desktopRuntime) {
+        setDesktopResourceTabs((currentTabs) => {
+          const existingIndex = currentTabs.findIndex((resource) => resource.id === targetResource.id)
+          if (existingIndex < 0) return [...currentTabs, targetResource]
+          if (message.preserveExisting) return currentTabs
+          return currentTabs.map((resource, index) => index === existingIndex ? targetResource : resource)
+        })
+        setActiveDesktopResourceId(targetResource.id)
+        return
+      }
+      setPopupResource(targetResource)
+    }
+
+    window.addEventListener('message', handleOpenResourceMessage)
+    return () => window.removeEventListener('message', handleOpenResourceMessage)
+  }, [accessibleManagedResources, baseResources, desktopRuntime, portalUser])
   const favoriteResourceIdSet = useMemo(() => new Set(favoriteResourceIds), [favoriteResourceIds])
   const visibleCategoryOptions = useMemo(
     () =>
@@ -1615,6 +1691,7 @@ export default function HomePage({ theme, onThemeChange }: HomePageProps) {
       {aboutOpen ? (
         <AboutPortalDialog
           version={applicationVersion}
+          updateChannel={updateChannel}
           loading={applicationVersionLoading}
           error={applicationVersionError}
           desktopRuntime={desktopRuntime}

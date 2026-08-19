@@ -82,7 +82,7 @@ The release path comes from `updates.releaseRoot` in
 `G:\Strategic Planning\Planning\stm_risk_app`. The publisher always reads the
 semantic version from the portable folder's `VERSION` file.
 
-Every publication atomically replaces one `portal-release.json`. It contains one
+Production publication atomically replaces the root `portal-release.json`. It contains one
 release version, the selected `updateMode`, the payload for existing installations,
 and a complete `installationPayload` for installation and recovery. New users run
 `Download-Portal.bat`; it reads this same manifest, installs the complete package to
@@ -93,6 +93,16 @@ The script warns that the operation is permanent and requires explicit confirmat
 before deleting `%LOCALAPPDATA%\StormWaterPortal`, including the application, local
 databases, downloaded source cache, settings, and exports. It also removes the Portal
 Desktop shortcut.
+
+Portal Manager also supports a controlled **Test** channel. Test artifacts and a
+schema-2 targeted manifest are published under `updates.releaseRoot\test`. The
+manifest contains an allowlist of Windows computer names, and the test downloader
+enrolls the installation by writing
+`%LOCALAPPDATA%\StormWaterPortal\data\settings\update-channel.json`. Missing channel
+settings always mean Production. A test client refuses a test manifest unless its
+current computer name is allowlisted. After verification, **Promote to production**
+copies the exact tested payloads and checksums into the production release without
+rebuilding them. Semantic versions do not include a channel suffix.
 
 `portal-exe` tells existing installations to replace only `Portal.exe`; `full` tells
 them to replace the complete application folder. Both scopes publish a complete ZIP
@@ -107,10 +117,17 @@ is. The publisher excludes `data` from the complete ZIP, the manifest declares
 directory. Full releases replace `%LOCALAPPDATA%\StormWaterPortal\app` and managed
 configuration only; data synchronization owns the data directory.
 
-On startup, Portal checks the current `portal-release.json` after validating the
+On startup, Portal resolves its enrolled channel and checks that channel's
+`portal-release.json` after validating the
 shared data drive. When its version is newer, Portal closes itself, starts the
-bundled updater, stops and waits for the bundled Python worker, applies the selected
-payload, and restarts. The updater retries application-folder activation while
+updater from `%TEMP%\StormWaterPortal-Updater`, stops and waits for the bundled
+Python worker, applies the selected payload, and restarts. Portal prefers the current
+`PortalUpdater.exe` published beside `portal-release.json` on the shared drive and
+falls back to its bundled updater when the published copy is unavailable. The
+publisher replaces the shared updater atomically. Both the launcher and updater
+explicitly move the updater's working directory outside the installed `app` tree
+before activation, so Windows does not retain a current-directory handle that blocks
+the folder swap. The updater retries application-folder activation while
 Windows releases runtime file locks, records the applied release in
 `config\update-state.json`, and writes diagnostics to
 `data\logs\portal-updater.log`.
@@ -146,9 +163,17 @@ local service, and exits with Portal. The unpacked runtime avoids PyInstaller's
 one-file extraction delay during startup, while keeping the worker warm avoids
 repeating Python import cost for every table or dashboard request.
 
-The read-only system publication is opened directly from portable `config\system.db`.
-Portal Manager refreshes this file from its authoritative writable `system.db`,
-verifies the copy, and marks the Desktop file read-only before every release.
+The system publication is opened from the verified local cache. During each new
+`system.catalog` activation, Desktop creates or loads a random per-Windows-user key,
+protects that key with user-scoped Windows DPAPI, and converts the verified source to
+SQLCipher without staging a plaintext local copy. Desktop atomically mirrors the
+encrypted artifact into portable `config\system.db` and marks both copies read-only.
+The protected key blob is stored at
+`%LOCALAPPDATA%\StormWaterPortal\config\system-catalog.key`; no setup, password, or
+shared hard-coded key is required. If that key is lost, Desktop regenerates it and
+re-encrypts the catalog from the authoritative publication. Portal Manager keeps and
+publishes its authoritative writable plaintext `system.db`; software packages contain
+no `system.db`.
 No business database is packaged. On first use, Portal verifies the active shared
 protocol snapshot and copies it to `%LOCALAPPDATA%\StormWaterPortal\data\stormwater.db`.
 If the shared snapshot is unavailable or invalid, Portal stops rather than creating a

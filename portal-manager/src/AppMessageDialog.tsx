@@ -2,6 +2,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import {
   dialogSnapshot,
+  installMessageDialogHost,
   settleDialog,
   subscribeDialogs,
   type DialogRequest,
@@ -76,6 +77,8 @@ function ActiveMessageDialog({ request }: { request: DialogRequest }) {
 export function AppMessageDialogProvider({ children }: { children: React.ReactNode }) {
   const requests = useSyncExternalStore(subscribeDialogs, dialogSnapshot, dialogSnapshot);
   const active = requests[0];
+
+  useEffect(() => installMessageDialogHost(), []);
 
   useEffect(() => {
     if (!active) return undefined;

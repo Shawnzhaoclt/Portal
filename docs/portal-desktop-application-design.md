@@ -8,8 +8,8 @@ read-only system publication or a writable business database.
 
 1. **System data** contains users, teams, resources, permissions, and team defaults.
    The desktop application reads this database but does not administer or update it.
-   Maintenance tools produce `portal_system.sqlite3`; portable packaging publishes it
-   as `config/system.db`.
+   Portal Manager publishes its authoritative SQLite catalog as versioned
+   `system.catalog` data. Desktop validates and converts it to SQLCipher locally.
 2. **Risk data** contains read-only analytical and inspection datasets stored in
    DuckDB. Connections must be opened in read-only mode.
 3. **Map data** contains external PMTiles archives plus resource-owned styles,
@@ -32,7 +32,7 @@ Portal-Desktop\
       _internal\
   config\
     portal.settings.json
-    system.db                     # read-only system publication
+    system.db                     # generated encrypted read-only runtime mirror
   data\                           # empty at distribution time
   README.txt
   VERSION
@@ -42,7 +42,9 @@ Portal-Desktop\
 The per-user working structure is:
 
 ```text
-%LOCALAPPDATA%\Portal\
+%LOCALAPPDATA%\StormWaterPortal\
+  config\
+    system-catalog.key            # Windows DPAPI-protected per-user key blob
   data\
     stormwater.db                 # writable working database
     backups\
@@ -88,8 +90,8 @@ connection against a mapped drive or UNC path.
 `config/portal.settings.json` beside `Portal.exe` is the single runtime configuration
 contract. Workstation-specific override files are not supported. During development,
 `PORTAL_CONFIG_FILE` may point the host and Python worker to that same canonical file.
-The packaged system database remains at
-`config/system.db`; the settings define named risk databases,
+The active encrypted system database is mirrored to `config/system.db` after verified
+cache activation; the settings define named risk databases,
 PMTiles and terrain roots, business database and exchange folders, media
 root, exports, logs, and temporary storage. Environment tokens use the
 `${PORTAL_DATA_ROOT}` form.
@@ -117,8 +119,8 @@ or `%LOCALAPPDATA%\Portal`.
 At build time, the former combined `portal_management.sqlite3` seed is separated:
 all `SYS_*` tables are published from `portal_system.sqlite3`, while the `CCTV_REVIEW_*`
 tables are registered in the business schema catalog. `RPT5W1C0` remains the resource
-and managed-entity identifier. Portable packaging includes only
-the system publication as `config/system.db`; it never includes `stormwater.db`.
+and managed-entity identifier. Portable packaging includes neither `system.db` nor
+`stormwater.db`.
 On first launch, Portal verifies the immutable snapshot referenced by
 `businessSync.networkRoot\protocol-v1\snapshots\current.json`, verifies its SHA-256
 digest, and installs it as the local `%LOCALAPPDATA%\Portal\data\stormwater.db`
@@ -128,20 +130,24 @@ to create a blank business database when the shared snapshot is unavailable or i
 
 ### SQLite Protection Policy
 
-The standard SQLite library does not provide database passwords or encryption. The
-portable build therefore marks `config/system.db` read-only to prevent accidental
-application writes, and the release manifest records its SHA-256 digest. Approved
-distributions should also be code-signed and installed or extracted into a folder whose
-Windows ACL permits modification only by authorized maintainers.
+The Desktop system catalog uses SQLCipher. On activation, Rust loads or creates a
+random 256-bit per-user key, stores only its Windows DPAPI-protected blob under the
+user profile, and gives the unwrapped key only to the bundled worker process. The
+worker converts the checksum-verified published SQLite source directly to an encrypted
+local version, verifies SQLCipher integrity and schema-object count, and marks it
+read-only. Standard SQLite tools cannot open the ciphertext. A different Windows user
+cannot unwrap the key blob, and no endpoint provisioning is required.
+
+The Manager's authoritative `config/system.db` remains normal writable SQLite so
+administration and publication continue to work. The shared catalog publication is
+the trusted conversion source; the Desktop software archive contains no plaintext
+copy. SQLCipher protects data at rest but does not prevent an authorized Windows user
+from reading data through the running application.
 
 `stormwater.db` cannot use a fixed release checksum because legitimate workflow actions
 change it. Protect it with user-scoped Windows permissions, transactional writes, audit
-events, integrity checks, and tested backups. Encryption at rest requires a deliberate
-migration to SQLite SEE or SQLCipher in every database client used by the application,
-including bundled Python and any Rust-native database code. Encryption keys must come
-from Windows-protected storage or an administrator-managed secret; they must not be
-hard-coded in the executable, configuration JSON, or source tree. Encryption is not
-enabled until that key lifecycle and merge-station compatibility are designed.
+events, integrity checks, and tested backups. The business database remains outside
+this catalog-only encryption scope.
 
 ## Document Status
 
@@ -454,7 +460,7 @@ The existing resource model should remain the organizing unit of the desktop app
 Each resource continues to own:
 
 - a unique `resource_id`;
-- name, type, category, route, description, icon, and active status;
+- name, type, category, route, description, icon, active status, and release status;
 - its React entry point;
 - optional help content;
 - required permissions;
@@ -483,6 +489,15 @@ Recommended additions to each `resource.json`:
 ```
 
 Resource metadata remains discoverable at build time and readable by React, Rust, Python, and maintenance tools. Duplicate resource IDs must fail validation and block registration or packaging.
+
+The authoritative system catalog adds a publication gate independent of the active
+flag. New or discovered resources are unreleased until a System Admin explicitly
+releases them. Active unreleased resources are available only while the current
+session is operating in the System Admin role and are labeled as previews. User and
+Portal Admin roles cannot list or open them, and Public access cannot bypass either
+the active or released gate. Inactive resources remain hidden from every Desktop
+role. Release and withdrawal events are audited and require a new system catalog
+publication before other Desktop clients receive the change.
 
 Resource thumbnail presentation follows the branded illustration, metadata,
 validation, and migration requirements in `docs/dashboard-integration.md`. Each
@@ -1252,7 +1267,10 @@ and warm-network release budgets.
 - Port users, teams, selected roles, permissions, featured items, and help links.
 - Enforce permissions in both React and Rust.
 
-Exit criterion: only active, authorized resources are available to the signed-in user.
+Exit criterion: only active, released, authorized resources are available to normal
+users and Portal Admins; active unreleased resources are available only to the
+selected System Admin role with an explicit preview label; inactive resources remain
+unavailable to every Desktop role.
 
 ### Phase 5: Local Writable Workflows
 

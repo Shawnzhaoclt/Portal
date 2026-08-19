@@ -5,7 +5,7 @@ application for Portal administration and workstation maintenance. It is
 independent of the Portal end-user window and does not host a local web server.
 
 The **Portal Administration** module manages users, teams, roles, resources,
-permissions, dictionaries, holidays, and the read-only `system.db` publication.
+permissions, dictionaries, holidays, and the independent system-catalog publication.
 The **Schema**, repository, snapshot, backup, conflict, and source-data pages
 provide the separate Database Maintenance surface. Portal Desktop exposes only
 account/self-service functions and never publishes the system catalog.
@@ -19,8 +19,9 @@ registered Windows tasks for the signed-in Windows user.
 At startup, Manager resolves the signed-in Windows account and checks it against
 the active users in `config\system.db`. Only active Portal Admin and System Admin
 accounts may enter the Manager workspace. The Manager package's
-`config\system.db` is the authoritative administration database; the Portal
-Desktop copy is only a read-only release target.
+`config\system.db` is the authoritative writable administration database. Portal
+Desktop software packages contain no database copy; each Desktop encrypts the
+published catalog locally with SQLCipher.
 
 ## Source Layout
 
@@ -69,16 +70,32 @@ hard-coded deployment paths.
 Software release publication is a System Admin operation. The **Releases** page does
 not publish `system.db`; catalog data has an independent publication lifecycle.
 
-The page shows one release version read from the built Portal package. Choose only
-the update scope:
+The page shows one release version read from the built Portal package. Select a
+release channel and update scope:
+
+- **Production** publishes the standard root manifest for all installed clients.
+- **Test** publishes under `releaseRoot\test` and requires one or more allowlisted
+  Windows computer names.
+
+The Test channel's **Save computers** action stores the normalized allowlist in
+`config\workstation-manager.settings.json` as `releaseTestMachines`, so the same
+names are available the next time the Manager is opened. Publishing a Test release
+also persists the current list.
 
 - **Portal executable only** replaces only `Portal.exe`.
 - **Complete application** replaces the complete application folder.
 
-Every publication writes one `portal-release.json`. It records the single version,
+Every channel publication writes one `portal-release.json`. It records the single version,
 selected update scope, update payload, SHA-256 values, and a complete installation
 payload. The complete package is always produced for new installation, repair, and
 recovery, even when existing clients need only `Portal.exe`.
+
+The Test view also provides **Promote to production**. Promotion verifies and copies
+the exact test ZIP/EXE, updater, removal script, payload sizes, and SHA-256 values;
+it does not rebuild the application. This makes the production artifact identical
+to the one validated by the test computers. Production retains schema version 1
+for compatibility with previously installed clients; targeted test manifests use
+schema version 2.
 
 The user-owned `%LOCALAPPDATA%\StormWaterPortal\data` directory is excluded from
 packages and permanently protected by the updater. Full updates replace application
@@ -88,15 +105,16 @@ files and managed configuration but never remove or overwrite synchronized data.
 
 The authoritative writable catalog remains at `config\system.db` in Portal Manager.
 A System Admin publishes it from **Portal Administration > System Catalog** by
-selecting **Publish read-only catalog**. No software or semantic version is entered.
+selecting **Publish system catalog**. No software or semantic version is entered.
 
-The Manager closes its catalog worker, creates and verifies the read-only Desktop
-copy, and publishes `system.catalog` through the same central data-manifest workflow
-used by DuckDB and PMTiles sources. The publisher calculates the checksum, schema
+The Manager closes its catalog worker and publishes `system.catalog` through the same
+central data-manifest workflow used by DuckDB and PMTiles sources. The publisher calculates the checksum, schema
 fingerprint, and immutable data version. Changed content receives a generated
 timestamp-and-hash version; unchanged content keeps the existing version. Portal
-Desktop checks and activates this required read-only source at its next startup,
-before user authentication. The Manager's authoritative database remains writable.
+Desktop checks this required source at its next startup, encrypts the verified content
+with a per-user SQLCipher key protected by Windows DPAPI, then activates only the
+encrypted read-only copy before user authentication. The Manager's authoritative
+database remains writable and is never replaced by Desktop ciphertext.
 
 ## Python Sync Worker
 

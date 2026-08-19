@@ -1,0 +1,64 @@
+{
+  "$schema": "./map-template.schema.json",
+  "schemaVersion": 1,
+  "id": "executive-briefing-map",
+  "name": "Executive Briefing Map",
+  "description": "Clean Letter portrait map for reports, decision briefings, and stakeholder communication.",
+  "category": "briefing",
+  "page": {
+    "size": "letter",
+    "orientation": "portrait",
+    "qualityDpi": 300,
+    "marginInches": 0.18
+  },
+  "mapFrame": {
+    "borderWidthPoints": 0.5,
+    "background": "#ffffff",
+    "showScaleBar": true,
+    "scaleBarPosition": "bottom-left",
+    "showLegend": true,
+    "legendPosition": "bottom-right"
+  },
+  "titleBlock": {
+    "placement": "bottom",
+    "sizePercent": 12.5,
+    "background": "#ffffff",
+    "borderColor": "#334155",
+    "borderWidthPoints": 0.75,
+    "cells": [
+      { "id": "north-arrow", "sizePercent": 8, "background": "#ffffff" },
+      { "id": "identity", "sizePercent": 34, "background": "#ffffff" },
+      { "id": "metadata", "sizePercent": 40, "background": "#ffffff" },
+      { "id": "branding", "sizePercent": 18, "background": "#ffffff" }
+    ]
+  },
+  "typography": {
+    "family": "Arial",
+    "title": { "sizePoints": 16, "weight": 700, "color": "#0f172a", "orientation": "horizontal" },
+    "subtitle": { "sizePoints": 10, "weight": 400, "color": "#64748b", "orientation": "horizontal" },
+    "label": { "sizePoints": 10, "weight": 700, "color": "#64748b", "uppercase": true, "letterSpacingEm": 0.08 },
+    "value": { "sizePoints": 12, "weight": 600, "color": "#0f172a" },
+    "scale": { "sizePoints": 12, "weight": 700, "color": "#0f172a" },
+    "footer": { "sizePoints": 10, "weight": 700, "color": "#64748b", "uppercase": true, "letterSpacingEm": 0.08 }
+  },
+  "northArrow": {
+    "style": "vintage-monochrome",
+    "detail": "low",
+    "labels": "north-only",
+    "rotateWithMap": true
+  },
+  "metadata": {
+    "rows": ["preparedBy", "generatedAt", "mapScaleAndRotation"],
+    "showPageNumber": true,
+    "usageLabel": "Briefing use"
+  },
+  "branding": {
+    "logo": "charlotte-mecklenburg-storm-water-services",
+    "logoTreatment": "full-color"
+  },
+  "defaults": {
+    "title": "Storm Water Briefing Map",
+    "subtitle": "Decision overview",
+    "scaleSnap": 100
+  }
+}

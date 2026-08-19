@@ -29,6 +29,7 @@ import {
 import { ADMIN_MANAGEMENT_ROUTE, PORTAL_LOGIN_ROUTE } from '../dashboardCatalog'
 import { isDesktopRuntime } from '../desktop/runtime'
 import { formatDateTime } from '../lib/dateTime'
+import { appConfirm } from '../components/messageDialogService'
 import {
   applyResourceDiscovery,
   clearManagementToken,
@@ -50,6 +51,7 @@ import {
   fetchUsers,
   login,
   replaceResourcePermissions,
+  releaseResource,
   resetUserPassword,
   managementSessionTransferUrl,
   saveManagementToken,
@@ -64,6 +66,7 @@ import {
   updateTeamFeaturedResources,
   updateTeam,
   updateUser,
+  withdrawResourceRelease,
   type AdminSummary,
   type AuditLog,
   type BulkPermissionAssignment,
@@ -390,6 +393,7 @@ export default function ManagementPage({
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   const [publishingSystemCatalog, setPublishingSystemCatalog] = useState(false)
+  const [catalogPublicationPending, setCatalogPublicationPending] = useState(false)
 
   const canManage = canUseManagement(currentUser)
   const visibleTabs = useMemo(
@@ -422,6 +426,7 @@ export default function ManagementPage({
     try {
       const message = await onPublishSystemCatalog()
       if (message) setStatus(message)
+      setCatalogPublicationPending(false)
     } catch (publishError) {
       setError(publishError instanceof Error ? publishError.message : String(publishError || 'Could not publish the system catalog.'))
     } finally {
@@ -994,6 +999,26 @@ export default function ManagementPage({
                 await updateResource(resourceId, payload)
                 await loadAdminData()
               }}
+              onReleaseChange={async (resource, released) => {
+                const action = released ? 'release' : 'withdraw from release'
+                const confirmed = await appConfirm(
+                  released
+                    ? `Release ${resource.name}? Active system administrators can preview it immediately. Other Desktop users will receive it after the system catalog is published.`
+                    : `Withdraw ${resource.name}? It will no longer be visible to Portal users after the updated system catalog reaches Desktop.`,
+                  {
+                    title: released ? 'Release resource' : 'Withdraw resource release',
+                    confirmLabel: released ? 'Release' : 'Withdraw',
+                    kind: released ? 'default' : 'warning',
+                  },
+                )
+                if (!confirmed) return
+                if (released) await releaseResource(resource.id)
+                else await withdrawResourceRelease(resource.id)
+                setCatalogPublicationPending(true)
+                setStatus(`${resource.name} was ${action === 'release' ? 'released' : 'withdrawn from release'}. Publish the system catalog to distribute this change.`)
+                await loadAdminData()
+              }}
+              publicationPending={catalogPublicationPending}
             />
           ) : null}
 
@@ -1046,17 +1071,17 @@ function SystemCatalogPanel({ publishing, onPublish }: {
       <div className="management-panel-heading">
         <div>
           <h2>System Catalog</h2>
-          <p>Publish the authoritative Manager catalog as a versioned, read-only Desktop data source.</p>
+          <p>Publish the authoritative Manager catalog as versioned Portal data. Desktop encrypts it during local activation.</p>
         </div>
         <button className="management-primary-button" type="button" disabled={publishing} onClick={onPublish}>
           <Save size={16} />
-          {publishing ? 'Publishing...' : 'Publish read-only catalog'}
+          {publishing ? 'Publishing...' : 'Publish system catalog'}
         </button>
       </div>
       <div className="management-system-catalog-summary">
         <div><span>Source</span><strong>Manager config/system.db</strong></div>
         <div><span>Publication</span><strong>system.catalog data version</strong></div>
-        <div><span>Desktop access</span><strong>Read-only at next startup</strong></div>
+        <div><span>Desktop access</span><strong>SQLCipher · read-only at next startup</strong></div>
       </div>
       <p className="management-system-catalog-note">
         No software version is required. The content checksum determines whether a new data version is created.
@@ -1997,6 +2022,8 @@ function ResourcesPanel({
   onDelete,
   onRefresh,
   onResourceFlagChange,
+  onReleaseChange,
+  publicationPending,
 }: {
   currentUser: PortalUser
   resources: PortalResource[]
@@ -2004,6 +2031,8 @@ function ResourcesPanel({
   onDelete: (resourceId: number) => Promise<void>
   onRefresh: () => Promise<void>
   onResourceFlagChange: (resourceId: number, payload: Partial<PortalResource>) => Promise<void>
+  onReleaseChange: (resource: PortalResource, released: boolean) => Promise<void>
+  publicationPending: boolean
 }) {
   const [discoveryItems, setDiscoveryItems] = useState<ResourceDiscoveryItem[]>([])
   const [discoveryCounts, setDiscoveryCounts] = useState<Record<string, number>>({})
@@ -2014,6 +2043,8 @@ function ResourcesPanel({
   const [resourceTypeFilter, setResourceTypeFilter] = useState('')
   const [resourceTextFilter, setResourceTextFilter] = useState('')
   const [resourceActiveFilter, setResourceActiveFilter] = useState('')
+  const [resourceReleaseFilter, setResourceReleaseFilter] = useState('')
+  const [resourceAccessFilter, setResourceAccessFilter] = useState('')
   const [discoveryStatusFilter, setDiscoveryStatusFilter] = useState('')
   const [discoverySourceFilter, setDiscoverySourceFilter] = useState('')
   const selectedDiscoveryActions = useMemo<ResourceDiscoveryAction[]>(
@@ -2039,11 +2070,13 @@ function ResourcesPanel({
         if (resourceTypeFilter && resource.resource_type !== resourceTypeFilter) return false
         if (resourceActiveFilter === 'active' && !resource.is_active) return false
         if (resourceActiveFilter === 'inactive' && resource.is_active) return false
-        if (resourceActiveFilter === 'public' && !resource.is_public) return false
-        if (resourceActiveFilter === 'private' && resource.is_public) return false
+        if (resourceReleaseFilter === 'released' && !resource.is_released) return false
+        if (resourceReleaseFilter === 'unreleased' && resource.is_released) return false
+        if (resourceAccessFilter === 'public' && !resource.is_public) return false
+        if (resourceAccessFilter === 'private' && resource.is_public) return false
         return matchesTextFilter([resource.resource_id, resource.name, resource.url, resource.resource_key, resource.category, resource.description], resourceTextFilter)
       }),
-    [resourceActiveFilter, resourceTextFilter, resourceTypeFilter, resources],
+    [resourceAccessFilter, resourceActiveFilter, resourceReleaseFilter, resourceTextFilter, resourceTypeFilter, resources],
   )
   const discoverySources = useMemo(() => Array.from(new Set(discoveryItems.map((item) => item.source))).sort(), [discoveryItems])
   const discoveryStatuses = useMemo(() => Array.from(new Set(discoveryItems.map((item) => item.status))).sort(), [discoveryItems])
@@ -2102,13 +2135,24 @@ function ResourcesPanel({
       <div className="management-panel-heading">
         <h2>Resources</h2>
         <div className="management-panel-heading-actions">
-          <span>{summary ? `${summary.resources} resources, ${summary.permissions} permissions` : `${resources.length} resources`}</span>
-          <button type="button" onClick={handleDiscoverResources} disabled={discovering}>
-            <RefreshCw size={16} />
-            Discover resources
-          </button>
+          <span>
+            {summary
+              ? `${summary.resources} resources · ${summary.released_resources} released · ${summary.unreleased_resources} unreleased · ${summary.permissions} permissions`
+              : `${resources.length} resources`}
+          </span>
+          {canUseSystemAdmin(currentUser) ? (
+            <button type="button" onClick={handleDiscoverResources} disabled={discovering}>
+              <RefreshCw size={16} />
+              Discover resources
+            </button>
+          ) : null}
         </div>
       </div>
+      {publicationPending ? (
+        <div className="management-release-publication-notice" role="status">
+          Resource release changes are saved. Publish the system catalog to distribute them to Desktop.
+        </div>
+      ) : null}
       <div className="management-resource-filters">
         <input value={resourceTextFilter} onChange={(event) => setResourceTextFilter(event.target.value)} placeholder="Filter resource ID, name, URL, key, category" />
         <select value={resourceTypeFilter} onChange={(event) => setResourceTypeFilter(event.target.value)}>
@@ -2116,9 +2160,17 @@ function ResourcesPanel({
           {RESOURCE_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
         </select>
         <select value={resourceActiveFilter} onChange={(event) => setResourceActiveFilter(event.target.value)}>
-          <option value="">All saved resources</option>
+          <option value="">All availability states</option>
           <option value="active">Active only</option>
           <option value="inactive">Inactive only</option>
+        </select>
+        <select value={resourceReleaseFilter} onChange={(event) => setResourceReleaseFilter(event.target.value)}>
+          <option value="">All release states</option>
+          <option value="released">Released only</option>
+          <option value="unreleased">Unreleased only</option>
+        </select>
+        <select value={resourceAccessFilter} onChange={(event) => setResourceAccessFilter(event.target.value)}>
+          <option value="">All access states</option>
           <option value="public">Public only</option>
           <option value="private">Private only</option>
         </select>
@@ -2203,6 +2255,7 @@ function ResourcesPanel({
               <th>URL</th>
               <th>Public</th>
               <th>Active</th>
+              <th>Release</th>
               {canUseSystemAdmin(currentUser) ? <th>Actions</th> : null}
             </tr>
           </thead>
@@ -2215,9 +2268,17 @@ function ResourcesPanel({
                 <td><a href={resource.url}>{resource.url}</a></td>
                 <td><input checked={resource.is_public} onChange={(event) => onResourceFlagChange(resource.id, { is_public: event.target.checked })} type="checkbox" /></td>
                 <td><input checked={resource.is_active} onChange={(event) => onResourceFlagChange(resource.id, { is_active: event.target.checked })} type="checkbox" /></td>
+                <td>
+                  <span className={`management-release-badge ${resource.is_released ? 'released' : 'unreleased'}`}>
+                    {resource.is_released ? 'Released' : 'Unreleased'}
+                  </span>
+                </td>
                 {canUseSystemAdmin(currentUser) ? (
-                  <td>
-                    <button type="button" onClick={() => onDelete(resource.id)}>Delete</button>
+                  <td className="management-resource-actions">
+                    <button type="button" onClick={() => void onReleaseChange(resource, !resource.is_released)}>
+                      {resource.is_released ? 'Withdraw' : 'Release'}
+                    </button>
+                    <button className="management-danger-button" type="button" onClick={() => onDelete(resource.id)}>Delete</button>
                   </td>
                 ) : null}
               </tr>

@@ -1,0 +1,64 @@
+{
+  "$schema": "./map-template.schema.json",
+  "schemaVersion": 1,
+  "id": "engineering-plan-sheet",
+  "name": "Engineering Plan Sheet",
+  "description": "Formal 11 x 17 landscape map for engineering review, planning records, and field coordination.",
+  "category": "engineering",
+  "page": {
+    "size": "tabloid",
+    "orientation": "landscape",
+    "qualityDpi": 300,
+    "marginInches": 0.125
+  },
+  "mapFrame": {
+    "borderWidthPoints": 1,
+    "background": "#ffffff",
+    "showScaleBar": true,
+    "scaleBarPosition": "bottom-left",
+    "showLegend": true,
+    "legendPosition": "bottom-left"
+  },
+  "titleBlock": {
+    "placement": "right",
+    "sizePercent": 8.5,
+    "background": "#ffffff",
+    "borderColor": "#334155",
+    "borderWidthPoints": 0.75,
+    "cells": [
+      { "id": "north-arrow", "sizePercent": 8, "background": "#ffffff" },
+      { "id": "identity", "sizePercent": 34, "background": "#ffffff" },
+      { "id": "metadata", "sizePercent": 40, "background": "#ffffff" },
+      { "id": "branding", "sizePercent": 18, "background": "#ffffff" }
+    ]
+  },
+  "typography": {
+    "family": "Arial",
+    "title": { "sizePoints": 16, "weight": 700, "color": "#111827", "orientation": "vertical" },
+    "subtitle": { "sizePoints": 10, "weight": 500, "color": "#5b6573", "orientation": "vertical" },
+    "label": { "sizePoints": 10, "weight": 700, "color": "#5b6573", "uppercase": true, "letterSpacingEm": 0.08 },
+    "value": { "sizePoints": 12, "weight": 600, "color": "#111827" },
+    "scale": { "sizePoints": 12, "weight": 700, "color": "#111827" },
+    "footer": { "sizePoints": 10, "weight": 700, "color": "#5b6573", "uppercase": true, "letterSpacingEm": 0.08 }
+  },
+  "northArrow": {
+    "style": "vintage-monochrome",
+    "detail": "medium",
+    "labels": "north-only",
+    "rotateWithMap": true
+  },
+  "metadata": {
+    "rows": ["preparedBy", "generatedAt", "mapScaleAndRotation"],
+    "showPageNumber": true,
+    "usageLabel": "Planning use"
+  },
+  "branding": {
+    "logo": "charlotte-mecklenburg-storm-water-services",
+    "logoTreatment": "full-color"
+  },
+  "defaults": {
+    "title": "Storm Water Asset Risk Map",
+    "subtitle": "",
+    "scaleSnap": 100
+  }
+}

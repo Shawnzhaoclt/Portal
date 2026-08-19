@@ -129,6 +129,17 @@
   color: #a15c00;
 }
 
+.desktop-startup-update-icon {
+  width: 32px;
+  height: 32px;
+  margin-top: 28px;
+  color: #255a8f;
+}
+
+.desktop-startup-spinner.desktop-startup-update-icon {
+  margin-top: 28px;
+}
+
 .desktop-startup-error {
   max-width: 560px;
   white-space: pre-line;
@@ -231,6 +242,12 @@
   }
 
   .desktop-startup-content.maintenance .desktop-startup-maintenance-icon {
+    width: 26px;
+    height: 26px;
+    margin-top: 9px;
+  }
+
+  .desktop-startup-content.maintenance .desktop-startup-update-icon {
     width: 26px;
     height: 26px;
     margin-top: 9px;
