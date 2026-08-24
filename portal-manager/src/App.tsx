@@ -1369,11 +1369,13 @@ function ReleaseWorkspace({
               placeholder="TEST-PC-01, TEST-PC-02"
               rows={2}
             />
-            <small>Saved in the Manager configuration and reused next time.</small>
-            <button type="button" className="quiet-button release-save-targets" disabled={savingTargets} onClick={saveTargets}>
-              <Save size={16} />
-              {savingTargets ? "Saving computers" : "Save computers"}
-            </button>
+            <div className="release-machine-targets-footer">
+              <small>Saved in the Manager configuration and reused next time.</small>
+              <button type="button" className="quiet-button release-save-targets" disabled={savingTargets} onClick={saveTargets}>
+                <Save size={16} />
+                {savingTargets ? "Saving computers" : "Save computers"}
+              </button>
+            </div>
           </label>
         ) : null}
       </section>

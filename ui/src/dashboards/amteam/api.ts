@@ -8,12 +8,24 @@ import type {
 } from './types'
 import { portalDataUrl, portalRequestJson } from '../../desktop/request'
 
+/** Which inputs an observation code actually uses, measured from real ITPipes data. */
+export type ObservationCodeMetadata = {
+  grade?: boolean
+  value_percent?: boolean
+  clock?: boolean
+  joint?: boolean
+  continuous?: boolean
+  remarks?: boolean
+  source_rows?: number
+}
+
 export type PortalDictionaryItem = {
   id: number
   item_code: string
   label: string
   sort_order: number
   is_active: boolean
+  metadata?: ObservationCodeMetadata | null
 }
 
 export type PortalDictionaryItemsResponse = {
@@ -61,6 +73,37 @@ export function fetchAmTeamInspections(mlId: string) {
 export function fetchPortalDictionaryItems(dictionaryKey: string) {
   return apiGet<PortalDictionaryItemsResponse>(
     `/api/dictionaries/${encodeURIComponent(dictionaryKey)}/items`,
+  )
+}
+
+/** One observation a reviewer records against an inspection, stored in stormwater.db. */
+export type UserObservationRequest = {
+  code: string
+  observation_text: string
+  distance: number
+  digital_time_seconds: number | null
+  grade: number | null
+  value_percent: number | null
+  clock_from: number | null
+  clock_to: number | null
+  joint: boolean | null
+  remarks: string | null
+  continuous: boolean
+  finish_distance: number | null
+  finish_time_seconds: number | null
+}
+
+export function createUserObservation(mliId: string, payload: UserObservationRequest) {
+  return portalRequestJson<{ mli_id: string; rows: unknown[] }>(
+    `/api/amteam/inspections/${encodeURIComponent(mliId)}/user-observations`,
+    { method: 'POST', body: JSON.stringify(payload) },
+  )
+}
+
+export function deleteUserObservation(mliId: string, mloId: string) {
+  return portalRequestJson<{ mli_id: string; deleted: string[] }>(
+    `/api/amteam/inspections/${encodeURIComponent(mliId)}/user-observations/${encodeURIComponent(mloId)}`,
+    { method: 'DELETE' },
   )
 }
 

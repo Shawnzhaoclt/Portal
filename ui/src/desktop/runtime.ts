@@ -202,7 +202,7 @@ export async function saveAndOpenExcelExport(fileName: string, bytes: Uint8Array
 export async function saveExportAs(
   fileName: string,
   bytes: Uint8Array,
-  format: 'excel' | 'geopackage' | 'jpg' | 'pdf',
+  format: 'excel' | 'geopackage' | 'jpg' | 'pdf' | 'docx',
   openAfterSave = false,
 ) {
   if (!isDesktopRuntime()) throw new Error('Native Save As exports are available only inside Tauri.')

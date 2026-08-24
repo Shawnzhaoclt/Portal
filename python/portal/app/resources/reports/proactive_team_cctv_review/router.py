@@ -52,13 +52,13 @@ class ReportObservationSaveRequest(BaseModel):
     defect_role: Literal["none", "major", "other"] = "none"
     is_extensive: bool = False
     selected_picture_file_name: str | None = None
+    defect_callout: str | None = None
 
 
 class ReportDistanceGroupSaveRequest(BaseModel):
     distance_key: str
     distance_feet: float | None = None
     am_score: int | None = Field(default=None, ge=3, le=5)
-    defect_comment: str | None = None
     no_am_score_ge_3_confirmed: bool = False
     observations: list[ReportObservationSaveRequest] = Field(default_factory=list)
 
@@ -313,44 +313,7 @@ def _report_values(coordinator: Any, report_entity: dict[str, object]) -> dict[s
         filters={"report_global_id": report_global_id},
         order_by=(("pipe_review_id", False), ("distance_group_id", False), ("id", False)),
     )
-    canonical_event_entities = coordinator.query_entities(
-        REVIEW_EVENT_ENTITY_TYPE,
-        filters={
-            "resource_key": RESOURCE_ID,
-            "subject_type": "report",
-            "subject_global_id": report_global_id,
-        },
-        order_by=(("event_at", False), ("global_id", False)),
-    )
-    # Releases before the universal review-event contract used the report key as
-    # resource_key. Keep those immutable audit rows visible while all new events
-    # use the stable resource ID required by the schema and its indexes.
-    legacy_resource_key = str(report.get("report_key") or report_global_id)
-    legacy_event_entities = (
-        coordinator.query_entities(
-            REVIEW_EVENT_ENTITY_TYPE,
-            filters={
-                "resource_key": legacy_resource_key,
-                "subject_type": "report",
-                "subject_global_id": report_global_id,
-            },
-            order_by=(("event_at", False), ("global_id", False)),
-        )
-        if legacy_resource_key != RESOURCE_ID
-        else []
-    )
-    event_entities = list(
-        {
-            str(entity["entity_id"]): entity
-            for entity in [*canonical_event_entities, *legacy_event_entities]
-        }.values()
-    )
-    event_entities.sort(
-        key=lambda entity: (
-            str((_entity_values(entity) or {}).get("event_at") or ""),
-            str(entity["entity_id"]),
-        )
-    )
+    event_entities = _event_entities_for_report(coordinator, report_global_id, str(report.get("report_key") or ""))
 
     observations_by_group: dict[str, list[dict[str, Any]]] = {}
     for entity in observation_entities:
@@ -450,6 +413,7 @@ def _saved_pipes(pipes: list[ReportPipeSaveRequest], report_id: int) -> list[dic
                     "defect_role": observation.defect_role,
                     "is_extensive": observation.is_extensive,
                     "selected_picture_file_name": observation.selected_picture_file_name,
+                    "defect_callout": observation.defect_callout,
                 }
                 for observation_index, observation in enumerate(group.observations, start=1)
             ]
@@ -460,7 +424,6 @@ def _saved_pipes(pipes: list[ReportPipeSaveRequest], report_id: int) -> list[dic
                     "distance_key": group.distance_key,
                     "distance_feet": group.distance_feet,
                     "am_score": group.am_score,
-                    "defect_comment": group.defect_comment,
                     "no_am_score_ge_3_confirmed": group.no_am_score_ge_3_confirmed,
                     "observations": observations,
                 }
@@ -575,6 +538,51 @@ def _entities_for_report(
         filters=filters,
         include_deleted=include_deleted,
     )
+
+
+def _event_entities_for_report(
+    coordinator: Any,
+    report_global_id: str,
+    report_key: str,
+    *,
+    include_deleted: bool = False,
+) -> list[dict[str, object]]:
+    canonical_event_entities = _entities_for_report(
+        coordinator,
+        REVIEW_EVENT_ENTITY_TYPE,
+        report_global_id,
+        include_deleted=include_deleted,
+    )
+    # Releases before the universal review-event contract used the report key as
+    # resource_key. Keep those immutable audit rows visible while all new events
+    # use the stable resource ID required by the schema and its indexes.
+    legacy_resource_key = report_key or report_global_id
+    legacy_event_entities = (
+        coordinator.query_entities(
+            REVIEW_EVENT_ENTITY_TYPE,
+            filters={
+                "resource_key": legacy_resource_key,
+                "subject_type": "report",
+                "subject_global_id": report_global_id,
+            },
+            include_deleted=include_deleted,
+        )
+        if legacy_resource_key != RESOURCE_ID
+        else []
+    )
+    event_entities = list(
+        {
+            str(entity["entity_id"]): entity
+            for entity in [*canonical_event_entities, *legacy_event_entities]
+        }.values()
+    )
+    event_entities.sort(
+        key=lambda entity: (
+            str((_entity_values(entity) or {}).get("event_at") or ""),
+            str(entity["entity_id"]),
+        )
+    )
+    return event_entities
 
 
 def _event_mutation(
@@ -907,13 +915,14 @@ def delete_report(
     if not _can_delete_report(db, current_user, report):
         raise HTTPException(status_code=403, detail="Only the owner, the owner's manager, or an administrator can delete this report.")
     report_global_id = str(entity["entity_id"])
+    report_key = str(report.get("report_key") or "")
     coordinator = _coordinator(current_user)
     child_entities = {
         entity_type: _entities_for_report(
             coordinator,
             entity_type,
             report_global_id,
-            report_key=str(report.get("report_key") or ""),
+            report_key=report_key,
         )
         for entity_type in (
             CCTV_OBSERVATION_ENTITY_TYPE,
@@ -921,27 +930,13 @@ def delete_report(
             CCTV_PIPE_ENTITY_TYPE,
         )
     }
+    event_entities = _event_entities_for_report(coordinator, report_global_id, report_key)
     mutations = [
         mutation
         for entity_type, entities in child_entities.items()
         for mutation in _delete_mutations(coordinator, entity_type, entities)
     ]
-    mutations.append(
-        _event_mutation(
-            coordinator,
-            report_global_id,
-            str(report.get("report_key") or report_global_id),
-            _event(
-                list(values.get("events") or []),
-                report_id,
-                current_user,
-                "deleted",
-                str(report.get("status") or "pending"),
-                None,
-                None,
-            ),
-        )
-    )
+    mutations.extend(_delete_mutations(coordinator, REVIEW_EVENT_ENTITY_TYPE, event_entities))
     mutations.append(
         Mutation(
             entity_type=ENTITY_TYPE,
@@ -965,7 +960,7 @@ def delete_report(
                 for group in pipe.get("distance_groups") or []
                 if isinstance(group, dict)
             ),
-            "events_retained": len(values.get("events") or []) + 1,
+            "events": len(event_entities),
         },
     }
 

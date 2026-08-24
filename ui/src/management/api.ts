@@ -188,13 +188,15 @@ export type CctvReviewObservationSave = {
   defect_role: 'none' | 'major' | 'other'
   is_extensive: boolean
   selected_picture_file_name: string | null
+  defect_callout: string | null
 }
 
 export type CctvReviewDistanceGroupSave = {
   distance_key: string
   distance_feet: number | null
   am_score: number | null
-  defect_comment: string | null
+  /** @deprecated legacy group-level callout, kept only to read reports saved before per-observation callouts */
+  defect_comment?: string | null
   no_am_score_ge_3_confirmed: boolean
   observations: CctvReviewObservationSave[]
 }

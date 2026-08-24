@@ -89,6 +89,8 @@ const THUMBNAIL_ASSETS = import.meta.glob([
   './assets/portal-thumbnails/aif-overview-dark.png',
   './assets/portal-thumbnails/create-aif-from-itpipes.png',
   './assets/portal-thumbnails/create-aif-from-itpipes-dark.png',
+  './assets/portal-thumbnails/design-project-closeout.png',
+  './assets/portal-thumbnails/design-project-closeout-dark.png',
   './assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes.png',
   './assets/portal-thumbnails/critical-asset-clog-facility-aggregate-pipes-dark.png',
   './assets/portal-thumbnails/critical-asset-condition-facility-aggregate-both.png',

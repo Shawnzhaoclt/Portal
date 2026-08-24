@@ -74,6 +74,8 @@ export type AmTeamObservation = {
   image_url: string | null
   image_urls: string[]
   image_available: boolean
+  /** ITPipes rows are read-only; rows a reviewer added in Portal can be deleted again. */
+  origin?: 'itpipes' | 'user'
 }
 
 export type AmTeamPipeSearchResponse = {
@@ -106,6 +108,8 @@ export type AmTeamObservationResponse = {
   mli_id: string
   media: AmTeamInspectionMedia
   rows: AmTeamObservation[]
+  /** Furthest distance a reviewer may record, in feet; null when no length is known. */
+  distance_limit: number | null
 }
 
 export type AmTeamObservationBatchResponse = {

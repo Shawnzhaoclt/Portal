@@ -97,15 +97,25 @@ export type FailureScenario =
       condition_risk?: number | null;
     };
 
+/** One row of the inspection under review, stationed along the pipe by the analysis. */
+export type ReviewedObservation = {
+  mlo_id: string;
+  label: string;
+  distance_feet: number | null;
+  condition_risk?: number | null;
+  origin?: string;
+};
+
 export async function fetchFailureConsequence(
   assetId: string,
   assetType: FailureAssetType,
   scenario?: FailureScenario,
   signal?: AbortSignal,
+  reviewed?: { observations: ReviewedObservation[]; inspection_direction: string | null },
 ): Promise<FailureConsequenceResult> {
   return portalRequestJson<FailureConsequenceResult>("/api/map/failure-consequence", {
     method: "POST",
-    body: JSON.stringify({ asset_id: assetId, asset_type: assetType, scenario }),
+    body: JSON.stringify({ asset_id: assetId, asset_type: assetType, scenario, ...reviewed }),
     signal,
   });
 }

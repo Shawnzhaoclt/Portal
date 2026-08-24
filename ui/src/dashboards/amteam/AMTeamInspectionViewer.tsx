@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent } from 'react'
+import type { CSSProperties, FormEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertCircle,
@@ -12,21 +12,30 @@ import {
   Loader2,
   Pause,
   Play,
+  Plus,
   Search,
   Square,
+  Trash2,
   X,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { fuzzyMatchScore } from './fuzzyMatch'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
-import { appPrompt } from '../../components/messageDialogService'
+import { appConfirm, appPrompt } from '../../components/messageDialogService'
+import { isDesktopRuntime, saveExportAs } from '../../desktop/runtime'
 import {
   fetchAmTeamObservations,
   fetchAmTeamObservationsBatch,
   fetchAmTeamPipeGroups,
   fetchAmTeamPipes,
   fetchPortalDictionaryItems,
+  createUserObservation,
+  deleteUserObservation,
+  type PortalDictionaryItem,
 } from './api'
+import { AddObservationDialog } from './AddObservationDialog'
+import { PipeConsequence3D } from './PipeConsequence3D'
 import {
   fetchCctvReviewReportDetail,
   saveCctvReviewReport,
@@ -83,7 +92,6 @@ type ObservationDefectSelection = {
   majorKey: string
   otherKeys: string[]
   amScore: string
-  defectComment: string
   noHighScoreConfirmed: boolean
 }
 type ObservationDefectRole = '' | 'major' | 'other'
@@ -125,6 +133,9 @@ type ActiveVideoFrame = {
   videoPath: string
   videoName: string
   timeSeconds: number
+  /** Read from the media element, so it is known for any format the player can open,
+   *  unlike the source metadata which is only parsed for MP4 containers. */
+  durationSeconds: number
 }
 type VideoSeekRequest = {
   id: number
@@ -146,6 +157,7 @@ type SavedCctvReviewState = {
   observationDefectSelections: Record<string, ObservationDefectSelection>
   snapshotSelections: Record<string, string>
   extensiveDefectSelections: Record<string, boolean>
+  observationDefectCallouts: Record<string, string[]>
 }
 type ReportImage = {
   data: Uint8Array
@@ -190,6 +202,22 @@ type SaveFilePickerWindow = Window & {
   }) => Promise<SaveFileHandle>
 }
 
+// A major defect carries one callout; an other defect may carry several. They persist in
+// the single defect_callout column, joined by a separator no dictionary label contains.
+const DEFECT_CALLOUT_SEPARATOR = '; '
+
+function parseDefectCallouts(value: string | null | undefined) {
+  return (value ?? '')
+    .split(';')
+    .map((callout) => callout.trim())
+    .filter(Boolean)
+}
+
+function formatDefectCallouts(callouts: string[]) {
+  return callouts.map((callout) => callout.trim()).filter(Boolean).join(DEFECT_CALLOUT_SEPARATOR)
+}
+
+const OBSERVATION_CODE_DICTIONARY_KEY = 'itpipes_observation_code'
 const PIPE_DEFECT_CALLOUT_DICTIONARY_KEY = 'pipe_defect_callout'
 const CLOGGING_DEFECT_CALLOUT_DICTIONARY_KEY = 'clogging_defect_callout'
 const CLOGGING_PERCENT_STEP = 5
@@ -214,26 +242,6 @@ const MIN_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
   snapshot: 100,
 }
 const CCTV_REVIEW_LAYOUT_STORAGE_KEY = 'portal.cctv-review.workspace-layout.v1'
-
-function fuzzyCalloutScore(option: string, query: string) {
-  const candidate = option.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-  const search = query.toLocaleLowerCase().replace(/[^a-z0-9]+/g, ' ').trim()
-  if (!search) return 0
-  if (candidate === search) return -100
-  if (candidate.startsWith(search)) return -75
-  const containedAt = candidate.indexOf(search)
-  if (containedAt >= 0) return -50 + containedAt
-
-  let candidateIndex = -1
-  let gaps = 0
-  for (const character of search.replaceAll(' ', '')) {
-    const nextIndex = candidate.indexOf(character, candidateIndex + 1)
-    if (nextIndex < 0) return null
-    gaps += nextIndex - candidateIndex - 1
-    candidateIndex = nextIndex
-  }
-  return gaps + candidateIndex / 100
-}
 
 function FuzzyCalloutInput({
   value,
@@ -260,7 +268,7 @@ function FuzzyCalloutInput({
   const inputRef = useRef<HTMLInputElement | null>(null)
   const filteredOptions = useMemo(() => (
     options
-      .map((option, index) => ({ option, index, score: fuzzyCalloutScore(option, filterQuery) }))
+      .map((option, index) => ({ option, index, score: fuzzyMatchScore(option, filterQuery) }))
       .filter((entry): entry is { option: string; index: number; score: number } => entry.score !== null)
       .sort((left, right) => left.score - right.score || left.index - right.index)
       .slice(0, 12)
@@ -472,7 +480,6 @@ function emptyObservationDefectSelection(): ObservationDefectSelection {
     majorKey: '',
     otherKeys: [],
     amScore: '',
-    defectComment: '',
     noHighScoreConfirmed: false,
   }
 }
@@ -1369,10 +1376,19 @@ function createReviewReportBlob(report: ReviewReportFile, format: ReviewReportFo
   return format === 'pdf' ? createPdfReportBlob(report) : createDocxReportBlob(report)
 }
 
-function downloadReviewReportFile(report: ReviewReportFile, format: ReviewReportFormat = 'docx') {
+async function downloadReviewReportFile(report: ReviewReportFile, format: ReviewReportFormat = 'docx') {
+  const blob = createReviewReportBlob(report, format)
+  const fileName = reportFileName(report.suggestedBaseName, format)
+
+  if (isDesktopRuntime()) {
+    const bytes = new Uint8Array(await blob.arrayBuffer())
+    await saveExportAs(fileName, bytes, format, true)
+    return
+  }
+
   const link = document.createElement('a')
-  link.href = URL.createObjectURL(createReviewReportBlob(report, format))
-  link.download = reportFileName(report.suggestedBaseName, format)
+  link.href = URL.createObjectURL(blob)
+  link.download = fileName
   document.body.appendChild(link)
   link.click()
   URL.revokeObjectURL(link.href)
@@ -1418,7 +1434,7 @@ async function saveReviewReportFile(report: ReviewReportFile) {
   const format = reportFormatFromFileName(fallbackName)
   const downloadName = fallbackName.toLowerCase().endsWith(`.${format}`) ? fallbackName : reportFileName(fallbackName, format)
   const directDownloadReport = { ...report, suggestedBaseName: downloadName.replace(/\.[^.]+$/, '') }
-  downloadReviewReportFile(directDownloadReport, format)
+  await downloadReviewReportFile(directDownloadReport, format)
 }
 
 function pipeGradeThreePlusCount(
@@ -1665,6 +1681,7 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
   const observationDefectSelections: Record<string, ObservationDefectSelection> = {}
   const snapshotSelections: Record<string, string> = {}
   const extensiveDefectSelections: Record<string, boolean> = {}
+  const observationDefectCallouts: Record<string, string[]> = {}
 
   const savedPipeContexts = detail.pipes.flatMap((savedPipe) => {
     const pipeId = recordId(savedPipe.ml_id)
@@ -1699,7 +1716,6 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
     for (const savedDistanceGroup of savedPipe.distance_groups) {
       const groupSelection = emptyObservationDefectSelection()
       groupSelection.amScore = savedDistanceGroup.am_score === null ? '' : String(savedDistanceGroup.am_score)
-      groupSelection.defectComment = savedDistanceGroup.defect_comment ?? ''
       groupSelection.noHighScoreConfirmed = savedDistanceGroup.no_am_score_ge_3_confirmed
 
       for (const savedObservation of savedDistanceGroup.observations) {
@@ -1712,6 +1728,13 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
 
         if (savedObservation.defect_role !== 'none') {
           extensiveDefectSelections[scopedCardKey] = savedObservation.is_extensive
+          const legacyGroupCallout = savedObservation.defect_role === 'major' ? savedDistanceGroup.defect_comment ?? '' : ''
+          const savedCallout = savedObservation.defect_callout ?? legacyGroupCallout
+          // Only an other defect stores several callouts, so a major defect keeps its saved
+          // text whole rather than splitting free-typed wording that contains a separator.
+          observationDefectCallouts[scopedCardKey] = savedObservation.defect_role === 'major'
+            ? (savedCallout.trim() ? [savedCallout.trim()] : [])
+            : parseDefectCallouts(savedCallout)
         }
 
         const selectedSnapshotUrl = selectedSnapshotUrlFromFileName(
@@ -1742,6 +1765,7 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
     observationDefectSelections,
     snapshotSelections,
     extensiveDefectSelections,
+    observationDefectCallouts,
   }
 }
 
@@ -1758,7 +1782,7 @@ export async function downloadSavedCctvReviewReport(report: CctvReviewReport) {
     extensiveDefectSelections: savedState.extensiveDefectSelections,
     mediaMode,
   })
-  downloadReviewReportFile(reportFile, 'docx')
+  await downloadReviewReportFile(reportFile, 'docx')
 }
 
 function inspectionDateOptionsFromGroups(groups: AmTeamPipeInspectionGroup[]) {
@@ -2205,12 +2229,15 @@ function InspectionVideoPlayer({
   videos,
   seekRequest,
   onFrameChange,
+  trailingAction,
 }: {
   mediaMode: MediaSourceMode
   mediaRoot: string
   videos: AmTeamMediaAsset[]
   seekRequest: VideoSeekRequest | null
   onFrameChange: (frame: ActiveVideoFrame | null) => void
+  /** Rendered at the end of the transport bar, beside the speed selector. */
+  trailingAction?: ReactNode
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [selectedVideoPath, setSelectedVideoPath] = useState('')
@@ -2296,8 +2323,9 @@ function InspectionVideoPlayer({
       videoPath: selectedVideo.relative_path,
       videoName: selectedVideo.name,
       timeSeconds: currentTime,
+      durationSeconds: duration,
     })
-  }, [currentTime, onFrameChange, selectedVideo])
+  }, [currentTime, duration, onFrameChange, selectedVideo])
 
   if (!videos.length || !selectedVideo) return null
 
@@ -2423,6 +2451,8 @@ function InspectionVideoPlayer({
             <option value={2}>2x</option>
           </select>
         </label>
+
+        {trailingAction}
       </div>
     </section>
   )
@@ -2448,6 +2478,8 @@ function PipeDefectReviewPanel({
   onShowPipeInfo,
   onNextPipe,
   onGenerateReport,
+  generateReportLabel,
+  onShow3d,
   canDownloadExport,
   onDownloadExport,
   readOnly = false,
@@ -2471,6 +2503,8 @@ function PipeDefectReviewPanel({
   onShowPipeInfo: () => void
   onNextPipe: () => void
   onGenerateReport: () => void
+  generateReportLabel: string
+  onShow3d: () => void
   canDownloadExport: boolean
   onDownloadExport: () => void
   readOnly?: boolean
@@ -2602,9 +2636,12 @@ function PipeDefectReviewPanel({
             Next
             <ChevronRight size={15} aria-hidden="true" />
           </button>
+          <button type="button" className="secondary" onClick={onShow3d} title="Show the pipe, its defects and surroundings in a 3D terrain cutaway">
+            3D view
+          </button>
           {!readOnly ? (
             <button type="button" className="report" onClick={onGenerateReport}>
-              Generate report
+              {generateReportLabel}
             </button>
           ) : null}
           <button
@@ -2725,6 +2762,9 @@ export default function AMTeamInspectionViewer({
   const [selectedInspection, setSelectedInspection] = useState<AmTeamInspection | null>(null)
   const [observations, setObservations] = useState<AmTeamObservation[]>([])
   const [inspectionMedia, setInspectionMedia] = useState<AmTeamInspectionMedia>(EMPTY_INSPECTION_MEDIA)
+  // Furthest distance a reviewer may record on the loaded inspection. Null means the
+  // source carries no length, in which case only the API enforces a bound.
+  const [inspectionDistanceLimit, setInspectionDistanceLimit] = useState<number | null>(null)
   const [candidateStatus, setCandidateStatus] = useState<LoadStatus>('idle')
   const [candidateMessage, setCandidateMessage] = useState('')
   const [candidateOpen, setCandidateOpen] = useState(false)
@@ -2745,6 +2785,12 @@ export default function AMTeamInspectionViewer({
   const [collapsedDistanceGroups, setCollapsedDistanceGroups] = useState<Record<string, boolean>>({})
   const [snapshotSelections, setSnapshotSelections] = useState<Record<string, string>>({})
   const [extensiveDefectSelections, setExtensiveDefectSelections] = useState<Record<string, boolean>>({})
+  const [observationDefectCallouts, setObservationDefectCallouts] = useState<Record<string, string[]>>({})
+  const [observationCodes, setObservationCodes] = useState<PortalDictionaryItem[]>([])
+  const [isAddObservationOpen, setAddObservationOpen] = useState(false)
+  const [isConsequence3dOpen, setConsequence3dOpen] = useState(false)
+  const [addObservationBusy, setAddObservationBusy] = useState(false)
+  const [addObservationError, setAddObservationError] = useState('')
   const [activeVideoFrame, setActiveVideoFrame] = useState<ActiveVideoFrame | null>(null)
   const [videoSeekRequest, setVideoSeekRequest] = useState<VideoSeekRequest | null>(null)
   const [focusedObservationKey, setFocusedObservationKey] = useState('')
@@ -2783,6 +2829,7 @@ export default function AMTeamInspectionViewer({
     setSelectedInspection(null)
     setObservations([])
     setInspectionMedia(EMPTY_INSPECTION_MEDIA)
+    setInspectionDistanceLimit(null)
     setObservationDefectSelections({})
     setPipeReviewInputs({})
     setPipeObservationCache({})
@@ -2793,6 +2840,7 @@ export default function AMTeamInspectionViewer({
     setCollapsedDistanceGroups({})
     setSnapshotSelections({})
     setExtensiveDefectSelections({})
+    setObservationDefectCallouts({})
     setActiveVideoFrame(null)
     setVideoSeekRequest(null)
     setFocusedObservationKey('')
@@ -2821,6 +2869,21 @@ export default function AMTeamInspectionViewer({
       })
       .catch(() => {
         if (!cancelled) setPipeDefectCalloutOptions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    fetchPortalDictionaryItems(OBSERVATION_CODE_DICTIONARY_KEY)
+      .then((response) => {
+        if (cancelled) return
+        setObservationCodes(response.items)
+      })
+      .catch(() => {
+        if (!cancelled) setObservationCodes([])
       })
     return () => {
       cancelled = true
@@ -2894,6 +2957,14 @@ export default function AMTeamInspectionViewer({
           delete nextExtensiveSelections[pipeScopedKey(pipeId, previousMajorKey)]
           return nextExtensiveSelections
         })
+        setObservationDefectCallouts((currentCallouts) => {
+          if (currentCallouts[scopedCardKey]?.length) return currentCallouts
+          const seeded = pipeDefectCalloutOptions[0]
+          return {
+            ...currentCallouts,
+            [scopedCardKey]: seeded ? [seeded] : [],
+          }
+        })
 
         return {
           ...currentSelections,
@@ -2901,7 +2972,6 @@ export default function AMTeamInspectionViewer({
             majorKey: cardKey,
             otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
             amScore: currentGroupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE,
-            defectComment: currentGroupSelection.defectComment || pipeDefectCalloutOptions[0] || '',
             noHighScoreConfirmed: false,
           },
         }
@@ -2910,6 +2980,15 @@ export default function AMTeamInspectionViewer({
       if (role === 'other') {
         if (!currentGroupSelection.majorKey || currentGroupSelection.majorKey === cardKey) return currentSelections
         if (currentGroupSelection.otherKeys.includes(cardKey)) return currentSelections
+
+        setObservationDefectCallouts((currentCallouts) => {
+          if (currentCallouts[scopedCardKey]?.length) return currentCallouts
+          const seeded = pipeDefectCalloutOptions[0]
+          return {
+            ...currentCallouts,
+            [scopedCardKey]: seeded ? [seeded] : [],
+          }
+        })
 
         return {
           ...currentSelections,
@@ -2928,6 +3007,12 @@ export default function AMTeamInspectionViewer({
           currentGroupSelection.otherKeys.forEach((otherKey) => delete nextExtensiveSelections[pipeScopedKey(pipeId, otherKey)])
           return nextExtensiveSelections
         })
+        setObservationDefectCallouts((currentCallouts) => {
+          const nextCallouts = { ...currentCallouts }
+          delete nextCallouts[scopedCardKey]
+          currentGroupSelection.otherKeys.forEach((otherKey) => delete nextCallouts[pipeScopedKey(pipeId, otherKey)])
+          return nextCallouts
+        })
         return {
           ...currentSelections,
           [groupKey]: emptyObservationDefectSelection(),
@@ -2940,6 +3025,12 @@ export default function AMTeamInspectionViewer({
           const nextExtensiveSelections = { ...currentExtensiveSelections }
           delete nextExtensiveSelections[scopedCardKey]
           return nextExtensiveSelections
+        })
+        setObservationDefectCallouts((currentCallouts) => {
+          if (!currentCallouts[scopedCardKey]) return currentCallouts
+          const nextCallouts = { ...currentCallouts }
+          delete nextCallouts[scopedCardKey]
+          return nextCallouts
         })
 
         return {
@@ -2979,22 +3070,99 @@ export default function AMTeamInspectionViewer({
     })
   }
 
-  function updateDistanceGroupDefectComment(groupKey: string, value: string) {
+  async function reloadInspectionObservations() {
+    if (!selectedInspection) return
+    const mliId = recordId(selectedInspection.mli_id)
+    if (!mliId) return
+    const response = await fetchAmTeamObservations(mliId)
+    setObservations(response.rows)
+    setInspectionMedia(response.media ?? EMPTY_INSPECTION_MEDIA)
+    setInspectionDistanceLimit(response.distance_limit ?? null)
+    setPipeObservationCache((currentCache) => ({
+      ...currentCache,
+      [recordId(selectedInspection.ml_id)]: {
+        inspection: selectedInspection,
+        observations: response.rows,
+        media: response.media ?? EMPTY_INSPECTION_MEDIA,
+      },
+    }))
+  }
+
+  async function submitUserObservation(payload: Parameters<typeof createUserObservation>[1]) {
+    if (readOnly || !selectedInspection) return
+    const mliId = recordId(selectedInspection.mli_id)
+    if (!mliId) return
+    setAddObservationBusy(true)
+    setAddObservationError('')
+    try {
+      await createUserObservation(mliId, payload)
+      await reloadInspectionObservations()
+      markWorkspaceDirty()
+      clearGeneratedReviewReport()
+      setAddObservationOpen(false)
+      showReviewNotice(payload.continuous ? 'Continuous defect added.' : 'Observation added.')
+    } catch (error) {
+      setAddObservationError(error instanceof Error ? error.message : 'The observation could not be added.')
+    } finally {
+      setAddObservationBusy(false)
+    }
+  }
+
+  async function removeUserObservation(observation: AmTeamObservation) {
+    if (readOnly || !selectedInspection) return
+    const mliId = recordId(selectedInspection.mli_id)
+    const mloId = recordId(observation.mlo_id)
+    if (!mliId || !mloId) return
+    const isContinuous = Boolean(String(observation.continuous ?? '').trim())
+    const confirmed = await appConfirm(
+      isContinuous
+        ? `Remove ${mloId}? Both halves of this continuous defect are removed together.`
+        : `Remove observation ${mloId}?`,
+      { title: 'Remove observation', confirmLabel: 'Remove' },
+    )
+    if (!confirmed) return
+    try {
+      await deleteUserObservation(mliId, mloId)
+      await reloadInspectionObservations()
+      markWorkspaceDirty()
+      clearGeneratedReviewReport()
+      showReviewNotice('Observation removed.')
+    } catch (error) {
+      showReviewNotice(error instanceof Error ? error.message : 'The observation could not be removed.')
+    }
+  }
+
+  function updateObservationDefectCallout(cardKey: string, value: string) {
     if (readOnly) return
     markWorkspaceDirty()
     clearGeneratedReviewReport()
-    setObservationDefectSelections((currentSelections) => {
-      const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
-      if (!currentGroupSelection.majorKey) return currentSelections
+    setObservationDefectCallouts((currentCallouts) => ({
+      ...currentCallouts,
+      [cardKey]: value.trim() ? [value] : [],
+    }))
+  }
 
-      return {
-        ...currentSelections,
-        [groupKey]: {
-          ...currentGroupSelection,
-          defectComment: value,
-        },
-      }
+  function addObservationDefectCallout(cardKey: string, value: string) {
+    if (readOnly) return
+    const callout = value.trim()
+    if (!callout) return
+    markWorkspaceDirty()
+    clearGeneratedReviewReport()
+    setObservationDefectCallouts((currentCallouts) => {
+      const current = currentCallouts[cardKey] ?? []
+      if (current.includes(callout)) return currentCallouts
+      return { ...currentCallouts, [cardKey]: [...current, callout] }
     })
+  }
+
+  function removeObservationDefectCallout(cardKey: string, value: string) {
+    if (readOnly) return
+    markWorkspaceDirty()
+    clearGeneratedReviewReport()
+    setObservationDefectCallouts((currentCallouts) => ({
+      ...currentCallouts,
+      [cardKey]: (currentCallouts[cardKey] ?? []).filter((callout) => callout !== value),
+    }))
   }
 
   function updateObservationSnapshotSelection(cardKey: string, imageUrl: string) {
@@ -3226,7 +3394,6 @@ export default function AMTeamInspectionViewer({
               distance_key: distanceGroup.key,
               distance_feet: Number.isFinite(distanceGroup.sortValue) ? distanceGroup.sortValue : finiteNumberValue(distanceGroup.observations[0]?.distance),
               am_score: hasMajorDefect ? Number(selection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE) : null,
-              defect_comment: hasMajorDefect && selection.defectComment.trim() ? selection.defectComment.trim() : null,
               no_am_score_ge_3_confirmed: selection.noHighScoreConfirmed,
               observations: distanceGroup.observations.map((observation, index) => {
                 const cardKey = observationCardKey(observation, index)
@@ -3236,6 +3403,7 @@ export default function AMTeamInspectionViewer({
                   : selection.otherKeys.includes(cardKey)
                     ? 'other'
                     : 'none'
+                const defectCallout = formatDefectCallouts(observationDefectCallouts[scopedCardKey] ?? [])
 
                 return {
                   mlo_id: recordId(observation.mlo_id) || null,
@@ -3249,12 +3417,29 @@ export default function AMTeamInspectionViewer({
                     selectedMediaMode,
                     mediaRoot,
                   ),
+                  defect_callout: defectRole !== 'none' && defectCallout ? defectCallout : null,
                 }
               }),
             }
           }),
         }
       }),
+    }
+  }
+
+  async function saveReviewDraft() {
+    if (readOnly || !reportSaveContext) return
+    setReportProgressMessage('Saving report draft.')
+    try {
+      const savePayload = buildCctvReviewReportSavePayload(null)
+      if (!savePayload) return
+      const saveResponse = await saveCctvReviewReport(savePayload)
+      onReportSaved?.(saveResponse.report)
+      clearReviewNotice()
+    } catch (error) {
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to save the report draft.')
+    } finally {
+      setReportProgressMessage('')
     }
   }
 
@@ -3403,6 +3588,7 @@ export default function AMTeamInspectionViewer({
         setObservationDefectSelections(savedState.observationDefectSelections)
         setSnapshotSelections(savedState.snapshotSelections)
         setExtensiveDefectSelections(savedState.extensiveDefectSelections)
+        setObservationDefectCallouts(savedState.observationDefectCallouts)
         setReviewedPipeIds(Object.fromEntries(savedState.visiblePipeGroups.map((group) => [recordId(group.ml_id), true])))
         setCollapsedDistanceGroups({})
         setDistanceGroupValidationFailures({})
@@ -3486,6 +3672,7 @@ export default function AMTeamInspectionViewer({
     if (!selectedInspection) {
       setObservations([])
       setInspectionMedia(EMPTY_INSPECTION_MEDIA)
+      setInspectionDistanceLimit(null)
       setObservationStatus('idle')
       return
     }
@@ -3496,6 +3683,7 @@ export default function AMTeamInspectionViewer({
     setObservationStatus('loading')
     setObservations([])
     setInspectionMedia(EMPTY_INSPECTION_MEDIA)
+    setInspectionDistanceLimit(null)
     setDistanceGroupValidationFailures({})
     clearReviewNotice()
     setCollapsedDistanceGroups({})
@@ -3506,6 +3694,7 @@ export default function AMTeamInspectionViewer({
         if (cancelled) return
         setObservations(response.rows)
         setInspectionMedia(response.media ?? EMPTY_INSPECTION_MEDIA)
+        setInspectionDistanceLimit(response.distance_limit ?? null)
         setPipeObservationCache((currentCache) => ({
           ...currentCache,
           [recordId(selectedInspection.ml_id)]: {
@@ -3520,6 +3709,7 @@ export default function AMTeamInspectionViewer({
         if (cancelled) return
         setObservations([])
         setInspectionMedia(EMPTY_INSPECTION_MEDIA)
+        setInspectionDistanceLimit(null)
         setObservationStatus('error')
         setErrorMessage(error instanceof Error ? error.message : 'Observation lookup failed.')
       })
@@ -3537,6 +3727,10 @@ export default function AMTeamInspectionViewer({
     () => sortPipeGroupsByMli(filterPipeGroupsByDate(pipeGroups, selectedInspectionDateKey), selectedInspectionDateKey),
     [pipeGroups, selectedInspectionDateKey],
   )
+  // Editing a saved report separates the two actions: the primary button is a plain
+  // draft save reviewers can press at any point, and the Download button runs the
+  // fully validated generate-and-download flow when the review is complete.
+  const reportDraftMode = Boolean(reportSaveContext) && !readOnly
   const selectedPipeIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
   const hasPreviousPipe = selectedPipeIndex > 0
   const hasNextPipe = selectedPipeIndex >= 0 && selectedPipeIndex < visiblePipeGroups.length - 1
@@ -3839,9 +4033,11 @@ export default function AMTeamInspectionViewer({
                     onSelectPipe={selectPipeById}
                     onShowPipeInfo={showSelectedPipeInfo}
                     onNextPipe={selectNextPipe}
-                    onGenerateReport={generateReviewReport}
-                    canDownloadExport={Boolean(generatedReviewReport) || canBuildReadOnlyExport}
-                    onDownloadExport={downloadGeneratedReviewExport}
+                    onGenerateReport={reportDraftMode ? saveReviewDraft : generateReviewReport}
+                    generateReportLabel={reportDraftMode ? 'Save' : 'Generate report'}
+                    onShow3d={() => setConsequence3dOpen(true)}
+                    canDownloadExport={reportDraftMode || Boolean(generatedReviewReport) || canBuildReadOnlyExport}
+                    onDownloadExport={reportDraftMode ? generateReviewReport : downloadGeneratedReviewExport}
                     readOnly={readOnly}
                   />
                 ) : null}
@@ -3853,6 +4049,20 @@ export default function AMTeamInspectionViewer({
                     videos={inspectionMedia.videos}
                     seekRequest={videoSeekRequest}
                     onFrameChange={setActiveVideoFrame}
+                    trailingAction={canShowDefectTable && !readOnly ? (
+                      <button
+                        type="button"
+                        className="amteam-add-observation-button"
+                        onClick={() => { setAddObservationError(''); setAddObservationOpen(true) }}
+                        disabled={observationCodes.length === 0}
+                        title={observationCodes.length === 0
+                          ? 'The ITPipes observation code dictionary has not been loaded, so no codes are available to choose.'
+                          : 'Record a defect that ITPipes did not capture, at the current video position'}
+                      >
+                        <Plus size={15} aria-hidden="true" />
+                        Add defect
+                      </button>
+                    ) : null}
                   />
                 ) : null}
               </section>
@@ -3999,16 +4209,6 @@ export default function AMTeamInspectionViewer({
                                 onChange={(event) => updateDistanceGroupAmScore(scopedGroupKey, event.currentTarget.value)}
                               />
                             </label>
-                            <div className="amteam-tree-review-control">
-                              <FuzzyCalloutInput
-                                ariaLabel="Pipe defect callout"
-                                options={pipeDefectCalloutOptions}
-                                disabled={readOnly || !majorObservationEntry}
-                                placeholder="Select or enter"
-                                value={majorObservationEntry ? groupSelection.defectComment : ''}
-                                onChange={(value) => updateDistanceGroupDefectComment(scopedGroupKey, value)}
-                              />
-                            </div>
                           </div>
                         </div>
 
@@ -4105,6 +4305,17 @@ export default function AMTeamInspectionViewer({
                                   >
                                     {displayValue(observation.mlo_id)}
                                   </button>
+                                  {observation.origin === 'user' && !readOnly ? (
+                                    <button
+                                      type="button"
+                                      className="amteam-remove-observation-button"
+                                      aria-label={`Remove observation ${displayValue(observation.mlo_id)}`}
+                                      title="Remove this Portal-added observation"
+                                      onClick={() => { void removeUserObservation(observation) }}
+                                    >
+                                      <Trash2 size={13} aria-hidden="true" />
+                                    </button>
+                                  ) : null}
                                 </div>
 
                                 <div
@@ -4112,6 +4323,44 @@ export default function AMTeamInspectionViewer({
                                   title={displayValue(observation.observation_text)}
                                 >
                                   <strong>{displayValue(observation.code)} (Grade {displayValue(observation.grade)})</strong>
+                                  {isMajorDefect ? (
+                                    <FuzzyCalloutInput
+                                      ariaLabel={`Observation ${observationNumber} defect callout`}
+                                      options={pipeDefectCalloutOptions}
+                                      disabled={readOnly}
+                                      placeholder="Select or enter"
+                                      value={observationDefectCallouts[scopedCardKey]?.[0] ?? ''}
+                                      onChange={(value) => updateObservationDefectCallout(scopedCardKey, value)}
+                                    />
+                                  ) : null}
+                                  {isOtherDefect ? (
+                                    <div className="amteam-defect-callout-list">
+                                      {(observationDefectCallouts[scopedCardKey] ?? []).map((callout) => (
+                                        <span className="amteam-defect-callout-chip" key={callout}>
+                                          <span title={callout}>{callout}</span>
+                                          <button
+                                            type="button"
+                                            aria-label={`Remove callout ${callout}`}
+                                            title="Remove callout"
+                                            disabled={readOnly}
+                                            onClick={() => removeObservationDefectCallout(scopedCardKey, callout)}
+                                          >
+                                            <X size={12} />
+                                          </button>
+                                        </span>
+                                      ))}
+                                      <FuzzyCalloutInput
+                                        ariaLabel={`Observation ${observationNumber} add defect callout`}
+                                        options={pipeDefectCalloutOptions.filter((option) => (
+                                          !(observationDefectCallouts[scopedCardKey] ?? []).includes(option)
+                                        ))}
+                                        disabled={readOnly}
+                                        placeholder="Add callout"
+                                        value=""
+                                        onChange={(value) => addObservationDefectCallout(scopedCardKey, value)}
+                                      />
+                                    </div>
+                                  ) : null}
                                 </div>
 
                                 <div className="amteam-defect-cell amteam-defect-observation-review-cell">
@@ -4176,6 +4425,33 @@ export default function AMTeamInspectionViewer({
         </div>
       ) : null}
       {reportProgressMessage ? <ReportProgressOverlay message={reportProgressMessage} /> : null}
+      <PipeConsequence3D
+        open={isConsequence3dOpen && Boolean(selectedInspection)}
+        assetId={selectedInspection ? recordId(selectedInspection.ml_name) : ''}
+        observations={observations}
+        inspectionDirection={selectedInspection?.inspection_direction ?? null}
+        onClose={() => setConsequence3dOpen(false)}
+      />
+      <AddObservationDialog
+        open={isAddObservationOpen}
+        codes={observationCodes}
+        currentTimeSeconds={activeVideoFrame?.timeSeconds ?? null}
+        maxDistance={inspectionDistanceLimit}
+        videoDurationSeconds={
+          activeVideoFrame?.durationSeconds
+          || selectedVideoForObservationJump()?.duration_seconds
+          || null
+        }
+        onSeek={(seconds) => {
+          const video = selectedVideoForObservationJump()
+          if (!video) return
+          setVideoSeekRequest({ id: Date.now(), videoPath: video.relative_path, timeSeconds: seconds })
+        }}
+        busy={addObservationBusy}
+        errorMessage={addObservationError}
+        onCancel={() => setAddObservationOpen(false)}
+        onSubmit={(payload) => { void submitUserObservation(payload) }}
+      />
       <ObservationDetailsDialog
         selection={selectedObservationDetails}
         onClose={() => setSelectedObservationDetails(null)}

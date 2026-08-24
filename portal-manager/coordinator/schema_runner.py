@@ -34,6 +34,7 @@ from portal.app.schema.catalog import (
 )
 from portal.app.schema.shared_publisher import SharedSchemaPublisher
 from portal.app.schema.manager import SchemaManager
+from portal.app.sync.storage import sqlite_readonly_uri
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -173,6 +174,51 @@ def _migration_operations(
     return prepare_schema_migration_operations(tables, operations)
 
 
+REBUILD_SCHEMA_HANDLER = "registered_physical_schema_rebuild"
+
+
+def _physical_type_drift(
+    snapshot: Path, tables: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Return the retype operations a snapshot needs to match the registered catalog.
+
+    A registered type change cannot be applied with ALTER TABLE, so the physical
+    database keeps its original column type until the table is rebuilt. Comparing the
+    catalog against the published snapshot surfaces exactly which columns drifted.
+    """
+    operations: list[dict[str, Any]] = []
+    # The published snapshot normally lives on a UNC share, which SQLite rejects unless
+    # the URI is built to keep the server name out of the authority component.
+    with closing(
+        sqlite3.connect(sqlite_readonly_uri(snapshot, immutable=True), uri=True)
+    ) as connection:
+        available = {
+            str(row[0]).lower()
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        for table in tables:
+            physical_table = str(table["physical_table"])
+            if physical_table.lower() not in available:
+                continue
+            actual = {
+                str(row[1]): str(row[2] or "TEXT").upper()
+                for row in connection.execute(f'PRAGMA table_info("{physical_table}")')
+            }
+            for field in table.get("fields", []):
+                column = str(field["physical_column"])
+                expected = str(field["sqlite_type"]).upper()
+                if column in actual and actual[column] != expected:
+                    operations.append(
+                        {
+                            "kind": "retype_column",
+                            "table": physical_table,
+                            "column": column,
+                            "sqlite_type": expected,
+                        }
+                    )
+    return operations
+
+
 def _test_draft(
     settings_path: Path,
     system_database: Path,
@@ -186,6 +232,9 @@ def _test_draft(
     migration_operations = _migration_operations(active_catalog["tables"], operations)
     publisher = SharedSchemaPublisher(system_database, network_root)
     status = publisher.status()
+    drift_operations = _physical_type_drift(
+        Path(str(status["active_snapshot_path"])), active_catalog["tables"]
+    )
     affected_table_ids = {str(item["table_id"]) for item in operations}
     affected_tables = sorted(
         str(table["physical_table"])
@@ -205,9 +254,42 @@ def _test_draft(
             test_system,
             test_business,
             catalog_override=schema_draft_catalog_for_registration(draft["tables"]),
-            migration_handler=ALEMBIC_SCHEMA_HANDLER,
-            migration_specification={"operations": migration_operations},
+            migration_handler=(
+                REBUILD_SCHEMA_HANDLER if drift_operations else ALEMBIC_SCHEMA_HANDLER
+            ),
+            migration_specification=(
+                {
+                    "retype_operations": drift_operations,
+                    "operations": migration_operations,
+                }
+                if drift_operations
+                else {"operations": migration_operations}
+            ),
         )
+        # Register collapses the route from the published release to the new target so a
+        # superseded intermediate migration cannot be replayed. Mirror that here, or the
+        # test would plan a different path than the publish it is meant to rehearse.
+        installed_release_id = status.get("installed_release_id")
+        if installed_release_id and str(installed_release_id) != registration["release_id"]:
+            ensure_compatible_schema_transition(
+                test_system,
+                from_release_id=str(installed_release_id),
+                from_schema_version=int(status.get("installed_schema_version") or 1),
+                from_catalog_hash=str(status.get("installed_catalog_hash") or "unknown"),
+                migration_handler=(
+                    REBUILD_SCHEMA_HANDLER if drift_operations else ALEMBIC_SCHEMA_HANDLER
+                ),
+                migration_specification=(
+                    {
+                        "retype_operations": drift_operations,
+                        "operations": migration_operations,
+                    }
+                    if drift_operations
+                    else {"operations": migration_operations}
+                ),
+                migration_kind="rebuild" if drift_operations else None,
+            )
+
         manager = SchemaManager(test_system, test_business)
         plan = manager.plan()
         result = manager.migrate()
@@ -292,6 +374,13 @@ def main() -> int:
                 shared_status = publisher.status()
                 transition = None
                 installed_release_id = shared_status.get("installed_release_id")
+                # A registered type change never reaches the published snapshot through
+                # ALTER TABLE, so repair that drift with an explicit table rebuild as part
+                # of the same transition that applies the draft.
+                drift_operations = _physical_type_drift(
+                    Path(str(shared_status["active_snapshot_path"])),
+                    registered_business_catalog(system_database)["tables"],
+                )
                 if installed_release_id and installed_release_id != shared_status.get("target_release_id"):
                     transition = ensure_compatible_schema_transition(
                         system_database,
@@ -299,15 +388,23 @@ def main() -> int:
                         from_schema_version=int(shared_status.get("installed_schema_version") or 1),
                         from_catalog_hash=str(shared_status.get("installed_catalog_hash") or "unknown"),
                         migration_handler=(
-                            ALEMBIC_SCHEMA_HANDLER
+                            REBUILD_SCHEMA_HANDLER
+                            if drift_operations
+                            else ALEMBIC_SCHEMA_HANDLER
                             if draft_operations
                             else "registered_physical_schema"
                         ),
                         migration_specification=(
-                            {"operations": migration_operations}
+                            {
+                                "retype_operations": drift_operations,
+                                "operations": migration_operations,
+                            }
+                            if drift_operations
+                            else {"operations": migration_operations}
                             if draft_operations
                             else None
                         ),
+                        migration_kind="rebuild" if drift_operations else None,
                     )
             if draft_operations:
                 _draft_path(args.portal_settings).unlink(missing_ok=True)

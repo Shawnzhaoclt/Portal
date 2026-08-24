@@ -1,0 +1,16 @@
+{
+  "resource_id": "FRMDPC01",
+  "resource_slug": "design_project_closeout",
+  "type": "form",
+  "name": "Design Project Close-Out",
+  "url": "/form_design_project_closeout",
+  "category": "Operations",
+  "description": "Record post-project asset assessments manually, from the Excel template, or from a Cityworks work order; review submissions and export the master table.",
+  "presentation": {
+    "thumbnail_light": "assets/portal-thumbnails/design-project-closeout.png",
+    "thumbnail_dark": "assets/portal-thumbnails/design-project-closeout-dark.png"
+  },
+  "is_public": false,
+  "is_active": true,
+  "show_in_catalog": true
+}

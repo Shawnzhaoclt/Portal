@@ -12,14 +12,24 @@ from urllib.parse import quote
 
 import duckdb
 
-from portal.runtime.transport import APIRouter, FileResponse, HTTPException, Query
+from pydantic import BaseModel, Field
+
+from portal.runtime.transport import APIRouter, Depends, FileResponse, HTTPException, Query
 
 from portal.app.core.records import clean_record
+from portal.app.dashboards.amteam import user_observations
+from portal.app.management.models import User
+from portal.app.management.router import get_current_user
+from portal.app.sync.errors import RevisionChanged, SyncError
+from portal.app.sync.models import Identity
+from portal.app.sync.physical_entities import MLO_ENTITY_TYPE
+from portal.app.sync.runtime import current_coordinator
+
 router = APIRouter(prefix="/api/amteam", tags=["am-team"])
 
 PIPE_TABLE = "ML"
 INSPECTION_TABLE = "MLI"
-OBSERVATION_TABLE = "ITPipes_Defects_Merged_PT"
+OBSERVATION_TABLE = "ITPipes_Defects_Merged_PT_With_Source_Distance"
 EXCLUDED_OBSERVATION_TEXT = ("Access", "Vermin", "Misc")
 SNAPSHOT_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".avi", ".wmv"}
@@ -93,6 +103,23 @@ def connect_amteam_database() -> duckdb.DuckDBPyConnection:
                 group by MLO_ID
             ) as media
               on media.MLO_ID = try_cast(observation.MLO_ID as bigint)
+            '''
+        )
+        # The risk-scoring merge overwrites Distance with MAX_CL_POINT_DISTANCE
+        # (a computed distance to the worst-scoring consequence location) for
+        # defects that have one, which is unrelated to where the observation
+        # actually sits along the pipe. Observation distance must reflect the
+        # original inspection reading, so pull it back from the source MLO
+        # table rather than trusting the merged copy.
+        connection.execute(
+            '''
+            create temp view "ITPipes_Defects_Merged_PT_With_Source_Distance" as
+            select
+                observation.* exclude ("Distance"),
+                source_mlo."Distance" as "Distance"
+            from "ITPipes_Defects_Merged_PT" as observation
+            left join itpipes_source.MLO as source_mlo
+              on source_mlo.MLO_ID = try_cast(observation.MLO_ID as bigint)
             '''
         )
         return connection
@@ -986,6 +1013,7 @@ def inspection_observation_payload(
     *,
     limit: int,
     columns: ColumnMap | None = None,
+    user_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Load one inspection using indexed keys and one reusable source connection."""
     context = inspection_context(connection, mli_id)
@@ -1036,17 +1064,37 @@ def inspection_observation_payload(
         row["image_urls"] = [snapshot["url"] for snapshot in matched_snapshots]
         row["image_available"] = len(matched_snapshots) > 0
         row["image_url"] = row["image_urls"][0] if row["image_urls"] else None
-    return {"mli_id": mli_id, "media": media, "rows": rows}
+        row["origin"] = "itpipes"
+
+    # Reviewer-added observations live in stormwater.db rather than the read-only source
+    # cache, so they are merged here and ordered into the same distance sequence.
+    rows.extend(user_rows or [])
+    rows.sort(key=lambda item: (
+        float(item.get("distance")) if isinstance(item.get("distance"), (int, float)) else 0.0,
+        str(item.get("mlo_id") or ""),
+    ))
+    return {
+        "mli_id": mli_id,
+        "media": media,
+        "rows": rows,
+        # Lets the add-observation form reject an out-of-range distance before posting.
+        "distance_limit": inspection_distance_limit(connection, mli_id),
+    }
 
 
 @router.get("/inspections/{mli_id}/observations")
 def inspection_observations(
     mli_id: str,
     limit: int = Query(default=1000, ge=1, le=5000),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
+    user_rows = [
+        user_observations.observation_row(values)
+        for values in stored_user_observations(current_user, mli_id)
+    ]
     connection = connect_amteam_database()
     try:
-        return inspection_observation_payload(connection, mli_id, limit=limit)
+        return inspection_observation_payload(connection, mli_id, limit=limit, user_rows=user_rows)
     finally:
         connection.close()
 
@@ -1055,6 +1103,7 @@ def inspection_observations(
 def inspection_observations_batch(
     mli_id: list[str] | None = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
+    current_user: User = Depends(get_current_user),
 ) -> dict[str, Any]:
     requested_ids = list(dict.fromkeys(item.strip() for item in (mli_id or []) if item and item.strip()))
     if not requested_ids:
@@ -1062,6 +1111,7 @@ def inspection_observations_batch(
     if len(requested_ids) > 500:
         raise HTTPException(status_code=422, detail="A maximum of 500 inspection IDs can be loaded at once.")
 
+    user_rows_by_inspection = stored_user_observations_by_inspection(current_user)
     connection = connect_amteam_database()
     try:
         columns = observation_columns(available_column_lookup(connection, OBSERVATION_TABLE))
@@ -1072,6 +1122,7 @@ def inspection_observations_batch(
                     inspection_id,
                     limit=limit,
                     columns=columns,
+                    user_rows=user_rows_by_inspection.get(inspection_id, []),
                 )
                 for inspection_id in requested_ids
             }
@@ -1102,3 +1153,336 @@ def observation_media(mlo_id: str):
             "mlo_id": mlo_id,
         },
     )
+
+
+# Reviewers work a shared inspection queue, so a handful of retries covers the few
+# reviewers who can realistically be adding to one inspection at the same moment.
+USER_OBSERVATION_COLLISION_RETRIES = 5
+
+
+class UserObservationRequest(BaseModel):
+    """One reviewer-added observation, limited to the fields the STM Risk ETL reads."""
+
+    code: str = Field(min_length=1, max_length=32)
+    observation_text: str = Field(min_length=1, max_length=255)
+    distance: float = Field(ge=0)
+    digital_time_seconds: float | None = Field(default=None, ge=0)
+    grade: float | None = Field(default=None, ge=1, le=5)
+    value_percent: float | None = Field(default=None, ge=0, le=100)
+    clock_from: float | None = Field(default=None, ge=0, le=12)
+    clock_to: float | None = Field(default=None, ge=0, le=12)
+    joint: bool | None = None
+    remarks: str | None = Field(default=None, max_length=500)
+    # A continuous defect repeats the same defect at a second, further distance.
+    continuous: bool = False
+    finish_distance: float | None = Field(default=None, ge=0)
+    finish_time_seconds: float | None = Field(default=None, ge=0)
+
+
+def _amteam_coordinator(user: User):
+    try:
+        return current_coordinator(
+            Identity(
+                user_id=str(user.id),
+                employee_number=str(user.employee_id or "").strip(),
+                email=str(user.email),
+            )
+        )
+    except SyncError as error:
+        _amteam_sync_error(error)
+
+
+def _amteam_sync_error(error: SyncError) -> None:
+    raise HTTPException(
+        status_code=503,
+        detail={"code": error.code, "message": str(error), "details": error.details},
+    )
+
+
+def stored_user_observations(user: User, mli_id: str) -> list[dict[str, Any]]:
+    """Return the reviewer-added MLO rows recorded against one inspection."""
+    coordinator = _amteam_coordinator(user)
+    entities = coordinator.query_entities(MLO_ENTITY_TYPE, filters={"MLI_ID": str(mli_id)})
+    rows: list[dict[str, Any]] = []
+    for entity in entities:
+        if bool(entity.get("deleted")):
+            continue
+        values = entity.get("values")
+        if isinstance(values, dict):
+            rows.append(dict(values))
+    return rows
+
+
+def stored_user_observation_history(user: User, mli_id: str) -> list[dict[str, Any]]:
+    """Every reviewer MLO row ever written for one inspection, deleted ones included.
+
+    Deleting an observation leaves a tombstone under the same global identifier, so the
+    identifier stays taken even though the row has left the review table. Allocation has
+    to see those rows or it would reissue an identifier that cannot be inserted again.
+    """
+    coordinator = _amteam_coordinator(user)
+    rows: list[dict[str, Any]] = []
+    for entity in coordinator.query_entities(
+        MLO_ENTITY_TYPE, filters={"MLI_ID": str(mli_id)}, include_deleted=True
+    ):
+        values = entity.get("values")
+        if isinstance(values, dict):
+            rows.append(dict(values))
+    return rows
+
+
+def stored_user_observations_by_inspection(user: User) -> dict[str, list[dict[str, Any]]]:
+    """Group every reviewer-added observation by inspection in a single read."""
+    coordinator = _amteam_coordinator(user)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for entity in coordinator.query_entities(MLO_ENTITY_TYPE):
+        if bool(entity.get("deleted")):
+            continue
+        values = entity.get("values")
+        if not isinstance(values, dict):
+            continue
+        grouped.setdefault(str(values.get("MLI_ID") or ""), []).append(
+            user_observations.observation_row(values)
+        )
+    return grouped
+
+
+def source_continuous_values(connection: duckdb.DuckDBPyConnection, mli_id: str) -> list[str]:
+    """Continuous markers already used by ITPipes on one inspection."""
+    columns = observation_columns(available_column_lookup(connection, OBSERVATION_TABLE))
+    continuous_column = columns.get("continuous")
+    if not continuous_column:
+        return []
+    rows = fetch_dicts(
+        connection,
+        f"""
+        select distinct cast({quote_identifier(str(continuous_column))} as varchar) as continuous
+        from {table_reference(OBSERVATION_TABLE)}
+        where {quote_identifier(str(columns["mli_id"]))} = ?
+        """,
+        [mli_id],
+    )
+    return [str(row.get("continuous") or "") for row in rows]
+
+
+def inspection_distance_limit(
+    connection: duckdb.DuckDBPyConnection, mli_id: str
+) -> float | None:
+    """Return how far along the pipe an observation may sit, or None when unknown.
+
+    The inspected length is preferred over the inventory section length. Measured across
+    the source data, the inspected length is present for 96% of inspections and only
+    0.01% of real ITPipes observations exceed it, whereas the inventory length is present
+    for 14% of pipes and 7.6% of observations already run past it, so treating the
+    inventory figure as a hard bound would reject field data that is actually correct.
+    The inventory length is kept only as a fallback when an inspection carries no length.
+    """
+    inspection_columns_lookup = inspection_columns(
+        available_column_lookup(connection, INSPECTION_TABLE)
+    )
+    length_column = inspection_columns_lookup.get("inspection_length")
+    pipe_columns_lookup = pipe_columns(available_column_lookup(connection, PIPE_TABLE))
+    section_column = optional_column(
+        available_column_lookup(connection, PIPE_TABLE),
+        ("Section_Length", "Section Length", "SectionLength"),
+    )
+
+    selected = []
+    if length_column:
+        selected.append(
+            f"try_cast(inspection.{quote_identifier(str(length_column))} as double) as inspected_length"
+        )
+    if section_column:
+        selected.append(
+            f"try_cast(pipe.{quote_identifier(str(section_column))} as double) as section_length"
+        )
+    if not selected:
+        return None
+
+    rows = fetch_dicts(
+        connection,
+        f"""
+        select {', '.join(selected)}
+        from {table_reference(INSPECTION_TABLE)} as inspection
+        left join {table_reference(PIPE_TABLE)} as pipe
+          on pipe.{quote_identifier(str(pipe_columns_lookup["ml_id"]))}
+             = inspection.{quote_identifier(str(inspection_columns_lookup["ml_id"]))}
+        where cast(inspection.{quote_identifier(str(inspection_columns_lookup["mli_id"]))} as varchar) = ?
+        """,
+        [str(mli_id)],
+    )
+    if not rows:
+        return None
+
+    for key in ("inspected_length", "section_length"):
+        value = rows[0].get(key)
+        if value is not None and float(value) > 0:
+            return float(value)
+    return None
+
+
+@router.get("/inspections/{mli_id}/user-observations")
+def list_user_observations(
+    mli_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    rows = [
+        user_observations.observation_row(values)
+        for values in stored_user_observations(current_user, mli_id)
+    ]
+    rows.sort(key=lambda row: (float(row.get("distance") or 0), str(row.get("mlo_id") or "")))
+    return {"mli_id": mli_id, "rows": rows}
+
+
+@router.post("/inspections/{mli_id}/user-observations")
+def create_user_observation(
+    mli_id: str,
+    payload: UserObservationRequest,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if payload.continuous and payload.finish_distance is None:
+        raise HTTPException(status_code=422, detail="A continuous defect needs a finish distance.")
+    if payload.continuous and payload.finish_distance is not None and payload.finish_distance <= payload.distance:
+        raise HTTPException(
+            status_code=422,
+            detail="The finish distance of a continuous defect must be greater than its start distance.",
+        )
+    # The camera only travels forward, so the finish cannot sit earlier in the video than
+    # the start. Equal seconds are accepted because the position is stored whole-second
+    # and a short defect can round both ends onto the same one.
+    if (
+        payload.continuous
+        and payload.finish_time_seconds is not None
+        and payload.digital_time_seconds is not None
+        and payload.finish_time_seconds < payload.digital_time_seconds
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="The finish video time of a continuous defect cannot be before its start.",
+        )
+
+    connection = connect_amteam_database()
+    try:
+        distance_limit = inspection_distance_limit(connection, mli_id)
+        source_continuous = source_continuous_values(connection, mli_id) if payload.continuous else []
+    finally:
+        connection.close()
+
+    # An observation cannot sit beyond the end of what was inspected. Unknown lengths are
+    # left unchecked rather than guessed at, so a missing length never blocks a review.
+    if distance_limit is not None:
+        furthest = max(
+            payload.distance,
+            payload.finish_distance if payload.continuous and payload.finish_distance is not None else payload.distance,
+        )
+        if furthest > distance_limit:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"Distance {furthest:g} ft is beyond the inspected length of this pipe "
+                    f"({distance_limit:g} ft)."
+                ),
+            )
+
+    fields = {
+        "Code": payload.code,
+        "Observation_Text": payload.observation_text,
+        "Grade": payload.grade,
+        "Joint": payload.joint,
+        "Value_Percent": payload.value_percent,
+        "Remarks": payload.remarks,
+        "Clock_From": payload.clock_from,
+        "Clock_To": payload.clock_to,
+    }
+
+    # Identifiers are derived from what is already stored, so a reviewer who loses the
+    # race for a sequence number re-reads and takes the next one instead of failing.
+    coordinator = _amteam_coordinator(current_user)
+    last_conflict: RevisionChanged | None = None
+    for _attempt in range(USER_OBSERVATION_COLLISION_RETRIES):
+        # Identifiers are allocated against every row ever written, including deleted
+        # ones, because their tombstones still hold the identifier.
+        sequence = user_observations.next_observation_sequence(
+            stored_user_observation_history(current_user, mli_id), mli_id
+        )
+
+        continuous_sequence: int | None = None
+        if payload.continuous:
+            # Continuity markers carry no tombstone, so a number freed by a deletion is
+            # genuinely available again and only the live rows matter here.
+            used = list(source_continuous)
+            used.extend(
+                str(values.get("Continuous") or "")
+                for values in stored_user_observations(current_user, mli_id)
+            )
+            continuous_sequence = user_observations.next_continuous_sequence(used)
+
+        rows = user_observations.build_observation_mutations(
+            mli_id=mli_id,
+            fields=fields,
+            start_distance=payload.distance,
+            finish_distance=payload.finish_distance if payload.continuous else None,
+            start_time_seconds=payload.digital_time_seconds,
+            finish_time_seconds=payload.finish_time_seconds,
+            sequence=sequence,
+            continuous_sequence=continuous_sequence,
+        )
+        try:
+            coordinator.commit(user_observations.insert_mutations(rows, mli_id))
+        except RevisionChanged as error:
+            # Another reviewer took this identifier between the read and the commit.
+            last_conflict = error
+            continue
+        except SyncError as error:
+            _amteam_sync_error(error)
+
+        return {
+            "mli_id": mli_id,
+            "rows": [user_observations.observation_row(values) for _mlo_id, values in rows],
+        }
+
+    if last_conflict is not None:
+        _amteam_sync_error(last_conflict)
+    raise HTTPException(status_code=409, detail="The observation could not be given a free identifier.")
+
+
+@router.delete("/inspections/{mli_id}/user-observations/{mlo_id}")
+def delete_user_observation(
+    mli_id: str,
+    mlo_id: str,
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
+    if not user_observations.is_user_mlo_id(mlo_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Only observations added in Portal can be deleted. ITPipes observations are read-only.",
+        )
+
+    coordinator = _amteam_coordinator(current_user)
+    entities = [
+        entity
+        for entity in coordinator.query_entities(MLO_ENTITY_TYPE, filters={"MLO_ID": mlo_id})
+        if not bool(entity.get("deleted"))
+    ]
+    if not entities:
+        raise HTTPException(status_code=404, detail=f"Observation {mlo_id} was not found.")
+
+    # The start and finish of a continuous defect are one reviewer entry, so removing
+    # either one removes the pair and never leaves an unmatched marker for the ETL.
+    partner_ids = user_observations.continuous_partner_ids(
+        stored_user_observations(current_user, mli_id), mlo_id
+    )
+    for partner_id in partner_ids:
+        entities.extend(
+            entity
+            for entity in coordinator.query_entities(MLO_ENTITY_TYPE, filters={"MLO_ID": partner_id})
+            if not bool(entity.get("deleted"))
+        )
+
+    try:
+        coordinator.commit(user_observations.delete_mutations(entities))
+    except SyncError as error:
+        _amteam_sync_error(error)
+
+    removed = sorted({str((entity.get("values") or {}).get("MLO_ID") or "") for entity in entities})
+    return {"mli_id": mli_id, "deleted": removed}

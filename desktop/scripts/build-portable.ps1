@@ -281,6 +281,12 @@ if (
 ) {
     throw "Refusing to replace unsafe portable output path: $OutputDirectory"
 }
+# Assemble into a staging folder and swap at the very end. A file locked by a running
+# Portal then fails the swap while the deployed build stays intact, instead of the old
+# behavior where the wipe destroyed config/ before the failure surfaced.
+$finalOutputDirectory = $OutputDirectory
+$OutputDirectory = "$finalOutputDirectory.staging"
+$outputPrefix = $OutputDirectory.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
 if (Test-Path -LiteralPath $OutputDirectory -PathType Container) {
     Remove-Item -LiteralPath $OutputDirectory -Recurse -Force
 }
@@ -359,24 +365,11 @@ Set-Content -LiteralPath (Join-Path $OutputDirectory "VERSION") -Value $version 
 Storm Water Asset Intelligence Portal Desktop $version
 
 Run Portal.exe from this local folder. No local service or installer is required.
-Writable application data is stored under %LOCALAPPDATA%\StormWaterPortal\data. At startup,
-the application checks the shared publication manifest and activates verified read-only
-DuckDB, PMTiles, and terrain files in its local versioned source cache. The system catalog
-is converted to SQLCipher with a per-user key protected by Windows DPAPI; no plaintext
-system database is included in this package.
-The frequently refreshed portal.serving SQLite snapshot is the only direct-network
-source and is resolved through its atomic G-drive manifest. All other resources read
-active local versions. The map project catalog is
-packaged as config\project.toml, while map styles and sprites are packaged with
-the map resource.
 
-Business snapshots, submissions, and conflict packages use the businessSync network
-root in config\portal.settings.json. Portal.exe never opens a writable SQLite
-connection on that network share. The active shared protocol snapshot is verified and
-copied locally on first use; no business database is included in this portable folder.
+If you are using the application over home internet via VPN, data sync may take
+longer than it does on the office network.
 
-The desktop application uses Tauri IPC and local Python commands. It does not start
-FastAPI, expose REST endpoints, or require a localhost service.
+Questions or issues? Contact shawn.zhao@charlottenc.gov
 "@ | Set-Content -LiteralPath (Join-Path $OutputDirectory "README.txt") -Encoding ascii
 
 $manifestPath = Join-Path $OutputDirectory "manifest.json"
@@ -391,4 +384,22 @@ $manifest = Get-ChildItem -LiteralPath $OutputDirectory -File -Recurse |
 }
 $manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
-Write-Host "Portable folder ready: $OutputDirectory"
+$retiredDirectory = "$finalOutputDirectory.previous"
+if (Test-Path -LiteralPath $retiredDirectory -PathType Container) {
+    Remove-Item -LiteralPath $retiredDirectory -Recurse -Force
+}
+if (Test-Path -LiteralPath $finalOutputDirectory -PathType Container) {
+    try {
+        Move-Item -LiteralPath $finalOutputDirectory -Destination $retiredDirectory -Force
+    }
+    catch {
+        throw ("The deployed build at {0} is in use (close Portal.exe) and was left untouched. " -f $finalOutputDirectory) + `
+            ("The finished new build is waiting at {0}; rerun this script after closing Portal." -f $OutputDirectory)
+    }
+}
+Move-Item -LiteralPath $OutputDirectory -Destination $finalOutputDirectory -Force
+if (Test-Path -LiteralPath $retiredDirectory -PathType Container) {
+    Remove-Item -LiteralPath $retiredDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host "Portable folder ready: $finalOutputDirectory"

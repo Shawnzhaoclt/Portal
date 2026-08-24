@@ -34,6 +34,7 @@ BUSINESS_TABLES = tuple(
         spec.entity_type,
         "tombstone",
         spec.dependency_order,
+        spec.deprecated,
     )
     for spec in all_physical_specs()
 )
@@ -72,13 +73,17 @@ def _business_catalog(business_database: Path) -> list[dict[str, Any]]:
             row[0]
             for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
-        expected = {table_name for table_name, *_ in BUSINESS_TABLES}
+        # A deprecated table may already have been dropped by hand, so only the live
+        # ones are required to be present.
+        expected = {table_name for table_name, _id, _policy, _order, retired in BUSINESS_TABLES if not retired}
         missing = sorted(expected - available)
         if missing:
             raise RuntimeError(f"The business database is missing registered tables: {', '.join(missing)}")
 
         catalog: list[dict[str, Any]] = []
-        for physical_table, table_id, delete_policy, dependency_order in BUSINESS_TABLES:
+        for physical_table, table_id, delete_policy, dependency_order, deprecated in BUSINESS_TABLES:
+            if deprecated and physical_table not in available:
+                continue
             columns = []
             for ordinal, row in enumerate(connection.execute(f'PRAGMA table_info("{physical_table}")')):
                 _, column_name, sqlite_type, not_null, default_value, primary_key = row
@@ -127,6 +132,7 @@ def _business_catalog(business_database: Path) -> list[dict[str, Any]]:
                     "replication_profile": "full",
                     "reducer_policy": "coordinator_entity",
                     "dependency_order": dependency_order,
+                    "active": 0 if deprecated else 1,
                     "fields": columns,
                     "indexes": indexes,
                 }
@@ -446,8 +452,9 @@ def register_business_schema(
                 """
                 INSERT INTO SYS_SCHEMA_TABLES (
                     release_id, table_id, physical_table, table_kind, sync_enabled,
-                    edit_policy, delete_policy, replication_profile, reducer_policy, dependency_order
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    edit_policy, delete_policy, replication_profile, reducer_policy,
+                    dependency_order, active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     active_release_id,
@@ -460,6 +467,7 @@ def register_business_schema(
                     table["replication_profile"],
                     table["reducer_policy"],
                     table["dependency_order"],
+                    int(table.get("active", 1)),
                 ),
             )
             for field in table["fields"]:

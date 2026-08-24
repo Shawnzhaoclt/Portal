@@ -128,6 +128,7 @@ CLONE_ITEMS: list[CloneItem] = [
     CloneItem("cityworks_prod", "azteca", "PWCODE", "azteca_PWCODE", source_note="Cityworks priority/status lookup"),
     CloneItem("cityworks_prod", "azteca", "WORKORDER", "azteca_WORKORDER", source_note="H&H/post-processing work orders"),
     CloneItem("cityworks_prod", "azteca", "WORKORDERENTITY", "azteca_WORKORDERENTITY", source_note="workorder-to-asset QA/QC"),
+    CloneItem("cityworks_prod", "azteca", "WORKORDERIMG", "azteca_WORKORDERIMG", source_note="workorder attachment paths for close-out Excel discovery"),
     CloneItem("cityworks_prod", "azteca", "REQUEST", "azteca_REQUEST", source_note="workorder-to-request QA/QC"),
 ]
 

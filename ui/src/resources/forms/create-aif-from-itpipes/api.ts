@@ -224,7 +224,13 @@ export function saveAif(record: AifRecord, fields: AifEditableFields, memo?: str
 }
 
 export function deleteAif(record: AifRecord) {
-  return portalRequestJson<{ ok: boolean; global_id: string; inspection_id: string; events_retained: boolean }>(
+  return portalRequestJson<{
+    ok: boolean
+    global_id: string
+    inspection_id: string
+    /** An AIF is removed together with its review events. */
+    deleted: { aifs: number; events: number }
+  }>(
     `${ROOT}/aifs/${encodeURIComponent(record.global_id)}`,
     { method: 'DELETE', body: JSON.stringify({ record_revision: record.record_revision }) },
   )

@@ -1054,13 +1054,19 @@
 
 .amteam-video-controls {
   display: grid;
-  grid-template-columns: auto minmax(160px, 1fr) auto auto;
+  grid-template-columns: auto minmax(160px, 1fr) auto auto auto;
   align-items: center;
   gap: 10px;
 }
 
+/* Narrow layout: the transport keeps its own row with the progress bar spanning
+   the rest, so the time, speed and trailing action share the second row. */
 .amteam-summary-grid .amteam-video-controls {
-  grid-template-columns: auto minmax(90px, 1fr);
+  grid-template-columns: auto minmax(90px, 1fr) auto;
+}
+
+.amteam-summary-grid .amteam-video-progress {
+  grid-column: span 2;
 }
 
 .amteam-video-buttons {
@@ -1333,8 +1339,9 @@
   background: var(--amteam-distance-row-bg);
 }
 
+/* A selected defect adds its callout control below the code, so the row grows past the
+   compact default instead of clipping. Unselected rows keep the original 36px height. */
 .amteam-defect-observation-row {
-  height: 36px;
   min-height: 36px;
 }
 
@@ -1528,6 +1535,382 @@
   margin-top: 0;
 }
 
+/* Reviewer-added observations: the action that creates them and the control that
+   removes them. ITPipes rows never show the remove control. */
+.amteam-add-observation-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 30px;
+  white-space: nowrap;
+  padding: 0 11px;
+  border: 1px solid var(--amteam-border-strong);
+  border-radius: 0;
+  background: var(--amteam-panel);
+  color: var(--amteam-blue);
+  font-size: 0.76rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.amteam-add-observation-button:hover:not(:disabled) {
+  background: var(--amteam-panel-strong);
+}
+
+.amteam-add-observation-button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.amteam-remove-observation-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--amteam-muted);
+  cursor: pointer;
+}
+
+.amteam-remove-observation-button:hover {
+  background: rgba(201, 52, 47, 0.14);
+  color: rgb(178, 42, 38);
+}
+
+.amteam-add-observation-dialog {
+  width: min(560px, calc(100vw - 48px));
+}
+
+.amteam-add-observation-body {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px;
+}
+
+/* Checkbox rows opt out: they lay their control out beside the caption rather
+   than stacking a caption above a field. */
+.amteam-add-observation-body label:not(.amteam-add-observation-check),
+.amteam-add-observation-field {
+  display: grid;
+  gap: 4px;
+  color: var(--amteam-muted);
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+/* The code list is long enough to need searching, so it renders as a combobox.
+   Its menu is portalled to the body, outside the token scope, which is why the
+   menu rules below use literal colours like the other callout menus. */
+.amteam-observation-code-combobox > input {
+  text-transform: none;
+}
+
+.amteam-observation-code-menu .amteam-callout-option {
+  display: grid;
+  grid-template-columns: 66px minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+}
+
+.amteam-observation-code-menu .amteam-callout-option strong {
+  color: #0f4c81;
+  font-weight: 850;
+}
+
+.amteam-observation-code-menu .amteam-callout-option span {
+  font-weight: 650;
+}
+
+/* Number field above, then the scrubber and the frame picker sharing one row so the
+   control stays two rows tall rather than three. */
+.amteam-add-observation-time {
+  display: grid;
+  gap: 6px;
+}
+
+.amteam-add-observation-time-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.amteam-add-observation-time-controls input[type='range'] {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--amteam-accent);
+  cursor: pointer;
+}
+
+.amteam-add-observation-time-controls .amteam-add-observation-pick {
+  flex: 0 0 auto;
+}
+
+.amteam-add-observation-pick {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid var(--amteam-border-strong);
+  border-radius: 0;
+  background: var(--amteam-panel);
+  color: var(--amteam-blue);
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: none;
+  cursor: pointer;
+}
+
+.amteam-add-observation-pick:hover {
+  background: var(--amteam-panel-strong);
+}
+
+/* Replaces the dialog while a frame is being chosen, so the video underneath keeps
+   its own controls and full brightness. Deliberately has no backdrop. */
+.amteam-observation-pick-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  position: fixed;
+  z-index: 80;
+  max-width: calc(100vw - 32px);
+  padding: 10px 14px;
+  border: 1px solid var(--amteam-accent);
+  background: var(--amteam-panel-strong);
+  box-shadow: 0 14px 32px rgba(21, 50, 77, 0.28);
+}
+
+.amteam-observation-pick-copy {
+  display: grid;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 1px;
+}
+
+.amteam-observation-pick-copy strong {
+  color: var(--amteam-text);
+  font-size: 0.8rem;
+  font-weight: 850;
+}
+
+.amteam-observation-pick-copy span {
+  color: var(--amteam-muted);
+  font-size: 0.7rem;
+  font-weight: 650;
+}
+
+.amteam-observation-pick-time {
+  color: var(--amteam-blue);
+  font-size: 1rem;
+  font-weight: 850;
+  font-variant-numeric: tabular-nums;
+}
+
+.amteam-observation-pick-bar button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--amteam-border-strong);
+  border-radius: 0;
+  background: var(--amteam-panel);
+  color: var(--amteam-blue);
+  font-size: 0.76rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.amteam-observation-pick-bar button.primary {
+  border-color: var(--amteam-accent);
+  background: var(--amteam-accent);
+  color: #fff;
+}
+
+.amteam-observation-pick-bar button:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.amteam-add-observation-hint {
+  color: var(--amteam-muted);
+  font-size: 0.66rem;
+  font-style: normal;
+  font-weight: 700;
+  opacity: 0.85;
+}
+
+.amteam-callout-empty {
+  margin: 0;
+  padding: 10px;
+  background: #fff;
+  color: #526b80;
+  font-size: 0.75rem;
+  font-weight: 650;
+}
+
+/* Text fields only: a checkbox must keep its native box rather than being
+   stretched to field height and given a field border. */
+.amteam-add-observation-body input:not([type='checkbox']):not([type='range']),
+.amteam-add-observation-body select,
+.amteam-add-observation-body textarea {
+  min-width: 0;
+  min-height: 30px;
+  border: 1px solid var(--amteam-border-strong);
+  padding: 4px 7px;
+  background: var(--amteam-panel);
+  color: var(--amteam-text);
+  font: inherit;
+  font-size: 0.78rem;
+  text-transform: none;
+}
+
+/* Start-aligned so a short field keeps its own height instead of stretching to match
+   a taller neighbour such as the video position controls. */
+.amteam-add-observation-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  align-items: start;
+  gap: 10px;
+}
+
+.amteam-add-observation-row:empty {
+  display: none;
+}
+
+.amteam-add-observation-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--amteam-text);
+  text-transform: none;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.amteam-add-observation-check input[type='checkbox'] {
+  flex: 0 0 auto;
+  width: 15px;
+  height: 15px;
+  min-height: 0;
+  margin: 0;
+  accent-color: var(--amteam-accent);
+}
+
+.amteam-add-observation-error {
+  margin: 0;
+  color: rgb(178, 42, 38);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.amteam-add-observation-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.amteam-add-observation-actions button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--amteam-border-strong);
+  border-radius: 0;
+  background: var(--amteam-panel);
+  color: var(--amteam-text);
+  font-size: 0.76rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.amteam-add-observation-actions button.primary {
+  border-color: var(--amteam-blue);
+  background: var(--amteam-blue);
+  color: #fff;
+}
+
+.amteam-add-observation-actions button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* Keep the callout control at table density so a selected row grows by one compact line. */
+.amteam-defect-observation-text-cell .amteam-callout-combobox {
+  width: 100%;
+  max-width: 100%;
+}
+
+.amteam-defect-treelist .amteam-defect-observation-text-cell .amteam-callout-combobox > input {
+  height: 26px;
+  min-height: 26px;
+  padding-block: 0;
+}
+
+.amteam-defect-observation-text-cell {
+  padding-block: 4px;
+}
+
+/* An other defect may carry several callouts, listed as removable chips. */
+.amteam-defect-callout-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 3px 4px;
+  width: 100%;
+  margin-top: 3px;
+}
+
+.amteam-defect-callout-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  padding: 1px 3px 1px 6px;
+  border: 1px solid var(--amteam-border);
+  border-radius: 999px;
+  background: var(--amteam-surface-strong, rgba(148, 163, 184, 0.16));
+  color: var(--amteam-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.amteam-defect-callout-chip > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 190px;
+}
+
+.amteam-defect-callout-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--amteam-muted);
+  cursor: pointer;
+}
+
+.amteam-defect-callout-chip button:hover:not(:disabled) {
+  background: rgba(148, 163, 184, 0.28);
+  color: var(--amteam-text);
+}
+
+.amteam-defect-callout-chip button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
 .amteam-defect-distance-review-cell {
   align-content: center;
   overflow: hidden;
@@ -1579,7 +1962,7 @@
 
 .amteam-tree-am-score-control {
   flex: 0 0 auto;
-  grid-template-columns: auto 30px;
+  grid-template-columns: auto 58px;
   align-items: center;
   justify-self: center;
   width: auto;
@@ -1591,11 +1974,18 @@
 
 .amteam-tree-am-score-control input {
   box-sizing: border-box;
-  width: 28px;
-  min-width: 28px;
+  width: 56px;
+  min-width: 56px;
   padding-right: 0;
   padding-left: 0;
   text-align: center;
+}
+
+/* The treelist flattens its controls to underlines; the AM Score field is the one
+   the reviewer types into, so give it a real white box while it accepts input. */
+.amteam-defect-treelist .amteam-tree-review-control.amteam-tree-am-score-control input:enabled {
+  border: 1px solid var(--amteam-border-strong);
+  background: var(--amteam-control-bg, #ffffff);
 }
 
 .amteam-tree-review-control input:disabled,

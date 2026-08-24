@@ -18,6 +18,8 @@ USER_FAVORITE_ENTITY_TYPE = "SYS.user_favorite"
 MLO_ENTITY_TYPE = "RPT5W1C0.mlo"
 MEDIA_ENTITY_TYPE = "RPT5W1C0.media"
 MLO_MEDIA_ENTITY_TYPE = "RPT5W1C0.mlo_media"
+CLOSEOUT_PROJECT_ENTITY_TYPE = "SYS.closeout_project"
+CLOSEOUT_ASSET_ENTITY_TYPE = "SYS.closeout_asset"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,12 @@ class PhysicalEntitySpec:
     sequence_columns: tuple[tuple[str, tuple[str, ...]], ...] = ()
     indexes: tuple[tuple[str, tuple[str, ...], bool], ...] = ()
     index_name_prefix: str | None = None
+    # Catalog-only tombstone. A deprecated table stops being validated and stops
+    # counting toward the physical fingerprint, but sync keeps handling it: the
+    # operation log is immutable and replayed forever, so operations naming this
+    # entity type must still materialise. Deprecation retires a table from the
+    # registry's point of view; it does not delete data and does not drop the table.
+    deprecated: bool = False
 
     @property
     def storage_columns(self) -> tuple[str, ...]:
@@ -136,6 +144,7 @@ OBSERVATION_COLUMNS = (
     "defect_role",
     "is_extensive",
     "selected_picture_file_name",
+    "defect_callout",
 )
 REVIEW_EVENT_COLUMNS = (
     "resource_id",
@@ -234,6 +243,39 @@ MEDIA_COLUMNS = (
     "MediaExists",
 )
 MLO_MEDIA_COLUMNS = ("Media_ID", "MLO_ID")
+
+# Design Project Close-Out: column order mirrors the registered catalog release
+# (portal-coordinator-2026-232) so registry-built replicas match the published snapshot.
+CLOSEOUT_PROJECT_COLUMNS = (
+    "project_name",
+    "status",
+    "source_of_analysis",
+    "date_of_analysis",
+    "cityworks_wo_id",
+    "intake_method",
+    "submitted_at",
+    "submitted_by_user_id",
+    "submitted_by",
+    "reviewed_at",
+    "reviewed_by_user_id",
+    "reviewed_by",
+    "review_memo",
+    "updated_at",
+    "updated_by_user_id",
+    "updated_by",
+)
+CLOSEOUT_ASSET_COLUMNS = (
+    "project_global_id",
+    "asset_id",
+    "construction_plan_id",
+    "critical_facility_id",
+    "flooding_design_standards",
+    "flooding_impact",
+    "flooding_service_eligibility",
+    "post_project_asset_condition",
+    "sort_order",
+    "notes",
+)
 
 
 PHYSICAL_ENTITY_SPECS = {
@@ -412,6 +454,27 @@ PHYSICAL_ENTITY_SPECS = {
             ("MLO_ID", ("MLO_ID",), False),
             ("relationship", ("MLO_ID", "Media_ID"), True),
         ),
+    ),
+    CLOSEOUT_PROJECT_ENTITY_TYPE: PhysicalEntitySpec(
+        CLOSEOUT_PROJECT_ENTITY_TYPE,
+        "CLOSEOUT_PROJECTS",
+        CLOSEOUT_PROJECT_COLUMNS,
+        430,
+        datetime_columns=frozenset({
+            "date_of_analysis",
+            "submitted_at",
+            "reviewed_at",
+            "updated_at",
+        }),
+        # The status and cityworks_wo_id indexes are owned by the catalog release, so
+        # the registry declares none to avoid duplicating them under other names.
+    ),
+    CLOSEOUT_ASSET_ENTITY_TYPE: PhysicalEntitySpec(
+        CLOSEOUT_ASSET_ENTITY_TYPE,
+        "CLOSEOUT_ASSETS",
+        CLOSEOUT_ASSET_COLUMNS,
+        440,
+        integer_columns=frozenset({"sort_order"}),
     ),
     HOLIDAY_CALENDAR_ENTITY_TYPE: PhysicalEntitySpec(
         HOLIDAY_CALENDAR_ENTITY_TYPE,
@@ -621,6 +684,7 @@ CREATE TABLE IF NOT EXISTS CCTV_REVIEW_OBSERVATIONS (
     defect_role TEXT NOT NULL DEFAULT 'none' CHECK (defect_role IN ('none', 'major', 'other')),
     is_extensive INTEGER NOT NULL DEFAULT 0 CHECK (is_extensive IN (0, 1)),
     selected_picture_file_name TEXT,
+    defect_callout TEXT,
     record_revision TEXT NOT NULL,
     deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1)),
     conflict_state TEXT NOT NULL DEFAULT 'none',
@@ -927,13 +991,14 @@ def _storage_values(spec: PhysicalEntitySpec, values: Mapping[str, object]) -> l
         raw_sequence = values.get(column)
         sequence = list(raw_sequence) if isinstance(raw_sequence, (list, tuple)) else []
         for index, storage_column in enumerate(storage_columns):
-            result.append(
-                _coerce_value(
-                    spec,
-                    storage_column,
-                    sequence[index] if index < len(sequence) else None,
-                )
-            )
+            element = sequence[index] if index < len(sequence) else None
+            if isinstance(element, Mapping):
+                # A sequence column expands into scalar columns, so a mapping cannot be
+                # stored. Operations are immutable and replayed forever, so one
+                # malformed element must degrade to NULL rather than fail the package
+                # and block every entity type from syncing.
+                element = None
+            result.append(_coerce_value(spec, storage_column, element))
     return result
 
 

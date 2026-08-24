@@ -1727,6 +1727,7 @@ fn validated_file_export(candidate: &str, format: &str) -> Result<(String, &'sta
         "geopackage" => "gpkg",
         "jpg" => "jpg",
         "pdf" => "pdf",
+        "docx" => "docx",
         _ => return Err("The requested export format is not supported.".to_string()),
     };
     if candidate.is_empty() {
@@ -1785,6 +1786,10 @@ fn select_export_path(
         "pdf" => (
             "PDF document (*.pdf)\0*.pdf\0All files (*.*)\0*.*\0\0",
             "Save map PDF",
+        ),
+        "docx" => (
+            "Word document (*.docx)\0*.docx\0All files (*.*)\0*.*\0\0",
+            "Save CCTV review report",
         ),
         _ => (
             "GeoPackage (*.gpkg)\0*.gpkg\0All files (*.*)\0*.*\0\0",

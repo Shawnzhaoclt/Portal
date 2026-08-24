@@ -4,6 +4,7 @@ import HomePage from './HomePage'
 import ProactiveTeamCCTVReview from './dashboards/amteam/ProactiveTeamCCTVReview'
 import ProactiveCCTVReviewHelp from './resources/reports/proactive-team-cctv-review/ProactiveCCTVReviewHelp'
 import CreateAifFromItpipes from './resources/forms/create-aif-from-itpipes/CreateAifFromItpipes'
+import DesignProjectCloseout from './resources/forms/design-project-closeout/DesignProjectCloseout'
 import WeeklyTimeReporting from './resources/reports/weekly-time-reporting/WeeklyTimeReporting'
 import CriticalAssetTrackingDashboard from './dashboards/critical-assets/CriticalAssetTrackingDashboard'
 import CriticalTeamDashboard from './dashboards/critical-team/CriticalTeamDashboard'
@@ -21,6 +22,7 @@ import {
   AIF_OVERVIEW_ROUTE,
   CRITICAL_ASSET_TRACKING_ROUTE,
   CREATE_AIF_FROM_ITPIPES_ROUTE,
+  DESIGN_PROJECT_CLOSEOUT_ROUTE,
   DASHBOARD_LINKS_ROUTE,
   GIS_FACILITY_ROUTE,
   GIS_HISTORY_ROUTE,
@@ -60,6 +62,7 @@ function managedResourcePath(path: string) {
     AIF_OVERVIEW_ROUTE,
     CRITICAL_ASSET_TRACKING_ROUTE,
     CREATE_AIF_FROM_ITPIPES_ROUTE,
+    DESIGN_PROJECT_CLOSEOUT_ROUTE,
     DASHBOARD_LINKS_ROUTE,
     GIS_FACILITY_ROUTE,
     GIS_HISTORY_ROUTE,
@@ -198,6 +201,11 @@ export default function AppRoutes() {
   if (path === CREATE_AIF_FROM_ITPIPES_ROUTE) {
     setPageMeta('Create AIF from ITPipes')
     return <CreateAifFromItpipes />
+  }
+
+  if (path === DESIGN_PROJECT_CLOSEOUT_ROUTE) {
+    setPageMeta('Design Project Close-Out')
+    return <DesignProjectCloseout />
   }
 
   if (path === WEEKLY_TIME_REPORTING_ROUTE) {

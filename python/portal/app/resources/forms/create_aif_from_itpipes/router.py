@@ -93,7 +93,8 @@ REGISTER_SORTS = {
     "date_closed": "date_closed",
 }
 EXPORT_LIMIT = 10_000
-IDENTIFIER_SEQUENCE_LIMIT = 999
+# One digit: an asset is not inspected more than a handful of times in a single day.
+IDENTIFIER_SEQUENCE_LIMIT = 9
 IDENTIFIER_COLLISION_RETRIES = 3
 REVIEWER_PERMISSION_TYPES = {"review", "manage", "admin"}
 CONTROLLED_DICTIONARY_FIELDS = {
@@ -456,16 +457,21 @@ def _next_aif_identity(coordinator: Any, asset_id: str, local_date: str) -> tupl
         values = _entity_values(entity)
         if values is None:
             continue
-        match = re.fullmatch(re.escape(prefix) + r"(\d{3})", str(values.get("inspection_id") or ""))
+        # Reads any width so identifiers issued before the sequence was shortened to one
+        # digit still count; otherwise numbering would restart and reissue a taken number.
+        match = re.fullmatch(re.escape(prefix) + r"(\d+)", str(values.get("inspection_id") or ""))
         if match:
             highest = max(highest, int(match.group(1)))
     sequence = highest + 1
     if sequence > IDENTIFIER_SEQUENCE_LIMIT:
         raise HTTPException(
             status_code=409,
-            detail="All 999 AIF identifiers for this Asset ID and date are already in use.",
+            detail=(
+                f"All {IDENTIFIER_SEQUENCE_LIMIT} AIF identifiers for this Asset ID and date "
+                "are already in use."
+            ),
         )
-    inspection_id = f"{prefix}{sequence:03d}"
+    inspection_id = f"{prefix}{sequence}"
     return inspection_id, stable_global_id("aif", inspection_id)
 
 
@@ -509,12 +515,17 @@ def _cctv_enrichment(db: Session, user: User, mli_id: str, mlo_id: str) -> dict[
     )
     group = _entity_values(group_entity) or {}
     pipe = _entity_values(pipe_entity) or {}
+    # defect_callout moved from the distance group to each observation; fall back to the
+    # legacy group-level comment only for the major observation of a report saved before that.
+    defect_callout = observation.get("defect_callout")
+    if defect_callout is None and observation.get("defect_role") == "major":
+        defect_callout = group.get("defect_comment")
     return {
         "available": True,
         "ambiguous": False,
         "limited_extensive": "Extensive" if bool(observation.get("is_extensive")) else "Limited",
         "defect_severity": _severity_label(db, group.get("am_score")),
-        "defect_callout": group.get("defect_comment"),
+        "defect_callout": defect_callout,
         "clogging_evidence": pipe.get("clogging_percent"),
     }
 
@@ -536,6 +547,34 @@ def _source_selection(db: Session, user: User, asset_id: str, mli_id: str, mlo_i
         raise HTTPException(status_code=404, detail=f"MLO_ID {mlo_id} was not found under MLI_ID {mli_id}.")
     enrichment = _cctv_enrichment(db, user, mli_id, mlo_id)
     return {"source": source, "observation": observation, "enrichment": enrichment}
+
+
+def _event_entities_for_aif(coordinator: Any, global_id: str) -> list[dict[str, Any]]:
+    """Every review event recorded against one AIF, ignoring rows already removed."""
+    return [
+        entity
+        for entity in coordinator.query_entities(
+            REVIEW_EVENT_ENTITY_TYPE,
+            filters={
+                "resource_key": RESOURCE_KEY,
+                "subject_type": SUBJECT_TYPE,
+                "subject_global_id": global_id,
+            },
+        )
+        if not bool(entity.get("deleted"))
+    ]
+
+
+def _event_delete_mutations(entities: list[dict[str, Any]]) -> list[Mutation]:
+    return [
+        Mutation(
+            entity_type=REVIEW_EVENT_ENTITY_TYPE,
+            entity_id=str(entity["entity_id"]),
+            operation_type="delete_entity",
+            base_record_revision=str(entity["record_revision"]),
+        )
+        for entity in entities
+    ]
 
 
 def _event_mutation(
@@ -1026,36 +1065,25 @@ def delete_aif(
             status_code=403,
             detail="Only the draft owner or a user with Delete, Manage, or Admin permission can delete this AIF.",
         )
-    correlation_id = uuid4().hex
-    _commit(
-        current_user,
-        [
-            _event_mutation(
-                coordinator,
-                _resource(db),
-                global_id,
-                str(values["inspection_id"]),
-                "deleted",
-                current_user,
-                "pending",
-                None,
-                None,
-                correlation_id,
-            ),
-            Mutation(
-                entity_type=ENTITY_TYPE,
-                entity_id=global_id,
-                operation_type="delete_entity",
-                base_record_revision=payload.record_revision,
-                unique_lock_keys=(f"aif-active-mlo:{values.get('source_mlo_id')}",),
-            ),
-        ],
+    # Deleting an AIF removes its whole history with it, so no review events are left
+    # referring to a subject that no longer exists.
+    event_entities = _event_entities_for_aif(coordinator, global_id)
+    mutations = _event_delete_mutations(event_entities)
+    mutations.append(
+        Mutation(
+            entity_type=ENTITY_TYPE,
+            entity_id=global_id,
+            operation_type="delete_entity",
+            base_record_revision=payload.record_revision,
+            unique_lock_keys=(f"aif-active-mlo:{values.get('source_mlo_id')}",),
+        )
     )
+    _commit(current_user, mutations)
     return {
         "ok": True,
         "global_id": global_id,
         "inspection_id": str(values["inspection_id"]),
-        "events_retained": True,
+        "deleted": {"aifs": 1, "events": len(event_entities)},
     }
 
 

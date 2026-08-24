@@ -15,20 +15,37 @@ from .failure_consequence import build_failure_consequence
 
 
 RESOURCE_KEY = "stm_risk_map"
+# The CCTV review page embeds the same read-only screening for the pipe being reviewed,
+# so View on either resource is enough to read it.
+CONSEQUENCE_RESOURCE_IDS = ("RPT5W1C0",)
 router = APIRouter(prefix="/api/map/failure-consequence", tags=["STM Risk Map Failure Consequence"])
+
+
+def _consequence_resources(db: Session) -> list[Resource]:
+    resources = [
+        db.scalar(select(Resource).where(Resource.resource_key == RESOURCE_KEY, Resource.is_active == 1))
+    ]
+    resources.extend(
+        db.scalar(select(Resource).where(Resource.resource_id == resource_id, Resource.is_active == 1))
+        for resource_id in CONSEQUENCE_RESOURCE_IDS
+    )
+    return [resource for resource in resources if resource is not None]
 
 
 def _require_view(db: Session, user: User) -> None:
     if selected_user_role(user) in ADMIN_ROLES:
         return
-    resource = db.scalar(
-        select(Resource).where(Resource.resource_key == RESOURCE_KEY, Resource.is_active == 1)
-    )
-    if resource is None:
+    resources = _consequence_resources(db)
+    if not resources:
         raise HTTPException(status_code=503, detail="Storm Water Asset Risk Map is not registered in the Portal catalog.")
-    permission = effective_resource_permission(db, user, resource)
-    if "view" not in set((permission or {}).get("permission_types") or []):
-        raise HTTPException(status_code=403, detail="This map requires View permission.")
+    for resource in resources:
+        permission = effective_resource_permission(db, user, resource)
+        if "view" in set((permission or {}).get("permission_types") or []):
+            return
+    raise HTTPException(
+        status_code=403,
+        detail="Consequence analysis requires View permission on the risk map or the CCTV review.",
+    )
 
 
 @router.post("")

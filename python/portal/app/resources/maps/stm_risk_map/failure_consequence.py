@@ -87,8 +87,23 @@ def build_failure_consequence(payload: dict[str, Any]) -> dict[str, Any]:
         warnings.append("Asset endpoints could not be matched; source geometry order was used for stationing.")
 
     profile = _cover_profile(asset_type, asset, geometry_2264, inventory_path, warnings)
+    # A caller reviewing one specific inspection supplies that inspection's observation
+    # list; those rows replace the latest-scored-inspection lookup so the scene shows
+    # exactly what the reviewer sees, including observations recorded in Portal that the
+    # risk ETL has not scored yet.
+    reviewed_observations = payload.get("observations")
+    if isinstance(reviewed_observations, list) and asset_type == "pipe":
+        itpipes_defects = _reviewed_observation_defects(
+            reviewed_observations,
+            payload.get("inspection_direction"),
+            geometry_2264,
+            profile,
+            warnings,
+        )
+    else:
+        itpipes_defects = _itpipes_defects(asset, asset_type, geometry_2264, profile, warnings)
     observed = [
-        *_itpipes_defects(asset, asset_type, geometry_2264, profile, warnings),
+        *itpipes_defects,
         *_cityworks_defects(config, asset, asset_type, geometry_2264, profile, warnings),
     ]
     structure_scenario = _structure_invert_scenario(asset_type, geometry_2264, profile)
@@ -540,6 +555,70 @@ def _itpipes_defects(
                     "inspection_direction": latest.get("inspection_direction"),
                     "source_distance_feet": station,
                     "is_continuous": row.get("is_continuous"),
+                    "ground_elevation": _rounded(profile_values["ground_elevation"]),
+                    "interpolated_invert_elevation": _rounded(profile_values["invert_elevation"]),
+                    "depth_source": "DEM ground minus interpolated asset invert" if relative_depth is not None else None,
+                },
+            )
+        )
+    return defects
+
+
+def _reviewed_observation_defects(
+    observations: list[Any],
+    inspection_direction: Any,
+    geometry: Any,
+    profile: dict[str, Any] | None,
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Build defect scenarios from the observation list of the inspection under review.
+
+    Each observation is stationed along the pipe from its recorded distance and the
+    inspection direction, and its depth interpolates the same DEM-ground-minus-invert
+    profile the scored lookups use. Rows without a usable distance stay unlocated so
+    the inspector reports them instead of silently dropping them.
+    """
+    if len(observations) > 1000:
+        raise HTTPException(status_code=422, detail="At most 1000 observations can be displayed.")
+    direction = _inspection_direction_code(inspection_direction)
+    if direction is None and observations:
+        warnings.append(
+            "The inspection direction is unknown; observation distances are stationed "
+            "from the pipe's inventory start point."
+        )
+    defects: list[dict[str, Any]] = []
+    seen_mlo_ids: set[str] = set()
+    for row in observations:
+        if not isinstance(row, dict):
+            continue
+        mlo_id = str(row.get("mlo_id") or "").strip()
+        if not mlo_id or mlo_id in seen_mlo_ids:
+            continue
+        seen_mlo_ids.add(mlo_id)
+        label = str(row.get("label") or "").strip() or f"Observation {mlo_id}"
+        station = _finite_number(row.get("distance_feet"))
+        located_geometry = None
+        profile_station = None
+        if station is not None:
+            profile_station = station if direction in (None, 1) else max(0.0, float(geometry.length) - station)
+            profile_station = min(float(geometry.length), max(0.0, profile_station))
+            located_geometry = geometry.interpolate(profile_station)
+        profile_values = _profile_values_at(profile, profile_station)
+        relative_depth = profile_values["cover"]
+        defects.append(
+            _defect(
+                defect_id=f"itpipes:{mlo_id}",
+                source="itpipes",
+                label=label,
+                geometry=located_geometry,
+                relative_depth=relative_depth,
+                condition_risk=_finite_number(row.get("condition_risk")),
+                station=profile_station,
+                metadata={
+                    "mlo_id": mlo_id,
+                    "inspection_direction": inspection_direction,
+                    "source_distance_feet": station,
+                    "recorded_in": "portal" if str(row.get("origin") or "") == "user" else "itpipes",
                     "ground_elevation": _rounded(profile_values["ground_elevation"]),
                     "interpolated_invert_elevation": _rounded(profile_values["invert_elevation"]),
                     "depth_source": "DEM ground minus interpolated asset invert" if relative_depth is not None else None,

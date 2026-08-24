@@ -316,11 +316,21 @@ class SchemaManager:
             expected_tables = catalog.execute(
                 "SELECT table_id, physical_table FROM SYS_SCHEMA_TABLES WHERE release_id = ? AND active = 1 ORDER BY dependency_order", (release_id,)
             ).fetchall()
+            # Scoped to active tables like expected_tables above: a deprecated table's
+            # columns and indexes are no longer required to exist, and the loops below
+            # resolve every table_id through table_map, which only holds active ones.
+            active_table_filter = (
+                "table_id IN (SELECT table_id FROM SYS_SCHEMA_TABLES WHERE release_id = ? AND active = 1)"
+            )
             expected_fields = catalog.execute(
-                "SELECT table_id, physical_column, sqlite_type, nullable FROM SYS_SCHEMA_FIELDS WHERE release_id = ?", (release_id,)
+                "SELECT table_id, physical_column, sqlite_type, nullable FROM SYS_SCHEMA_FIELDS "
+                f"WHERE release_id = ? AND {active_table_filter}",
+                (release_id, release_id),
             ).fetchall()
             expected_indexes = catalog.execute(
-                "SELECT table_id, physical_name FROM SYS_SCHEMA_INDEXES WHERE release_id = ?", (release_id,)
+                "SELECT table_id, physical_name FROM SYS_SCHEMA_INDEXES "
+                f"WHERE release_id = ? AND {active_table_filter}",
+                (release_id, release_id),
             ).fetchall()
         table_map = dict(expected_tables)
         available = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}

@@ -24,6 +24,7 @@ from portal.app.resources.maps.stm_risk_map.terrain_profile_router import router
 from portal.app.resources.maps.stm_risk_map.failure_consequence_router import router as failure_consequence_router
 from portal.app.resources.reports.proactive_team_cctv_review.router import router as cctv_review_report_router
 from portal.app.resources.forms.create_aif_from_itpipes.router import router as create_aif_router
+from portal.app.resources.forms.design_project_closeout.router import router as design_project_closeout_router
 from portal.app.resources.tables.storm_water_asset_history import router as asset_history_router
 from portal.app.holidays import router as holiday_router
 from portal.app.favorites import router as favorites_router
@@ -51,6 +52,7 @@ app.include_router(terrain_profile_router)
 app.include_router(failure_consequence_router)
 app.include_router(cctv_review_report_router)
 app.include_router(create_aif_router)
+app.include_router(design_project_closeout_router)
 app.include_router(asset_history_router)
 app.include_router(holiday_router)
 app.include_router(favorites_router)
