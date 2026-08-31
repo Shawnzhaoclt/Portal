@@ -1269,6 +1269,37 @@ fn configured_shared_data_root(settings: &serde_json::Value) -> Result<PathBuf, 
     Ok(PathBuf::from(expanded))
 }
 
+/// The publication a test computer layers over production data, per channel.
+///
+/// A test computer keeps reading the production tree and lays whatever the test
+/// tree publishes on top of it, one source at a time, mirroring how the update
+/// channel picks its release folder. Publishing a single catalog for
+/// verification therefore never costs the computer the other databases
+/// production publishes, and there is nothing to undo once that catalog is
+/// promoted. Business sync is untouched either way: it carries live
+/// collaborative work rather than published artifacts, so a tester's own
+/// entries still reach the team.
+///
+/// Returns None until the test tree holds its own manifest, which is what makes
+/// enrolling a computer before the first test publication harmless.
+fn publication_overlay_for_channel(
+    shared_root: &Path,
+    manifest: &Path,
+    channel: &str,
+) -> Option<PathBuf> {
+    if channel != "test" {
+        return None;
+    }
+    let relative = manifest.strip_prefix(shared_root).ok()?;
+    let candidate = shared_root.join("test").join(relative);
+    candidate.is_file().then_some(candidate)
+}
+
+pub(crate) fn channel_publication_overlay(shared_root: &Path, manifest: &Path) -> Option<PathBuf> {
+    let channel = configured_update_channel().unwrap_or_else(|_| "production".to_string());
+    publication_overlay_for_channel(shared_root, manifest, &channel)
+}
+
 fn configured_update_release_root(settings: &serde_json::Value) -> Result<Option<PathBuf>, String> {
     let Some(raw_root) = settings
         .pointer("/updates/releaseRoot")
@@ -2341,6 +2372,13 @@ pub fn run() {
         .register_uri_scheme_protocol("portal-data", |_context, request| {
             local_protocol_response(request)
         })
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) && window.label() == "main" {
+                if let Some(login) = window.app_handle().get_webview_window(ITPIPES_LOGIN_WINDOW) {
+                    let _ = login.close();
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             data_cache_startup,
             data_cache_status,
@@ -2353,6 +2391,9 @@ pub fn run() {
             client_settings,
             business_sync_status,
             open_external_url,
+            itpipes_open_login,
+            itpipes_close_login,
+            itpipes_session_cookie,
             save_and_open_excel_export,
             save_export_as,
             open_file_location,
@@ -2368,7 +2409,8 @@ mod tests {
     use super::{
         atomically_save_export, configure_system_database_access, file_response_range,
         is_scheduled_maintenance_hour, manifest_allows_machine, normalize_update_channel,
-        packaged_application_version, release_root_for_channel, save_excel_export,
+        packaged_application_version, publication_overlay_for_channel, release_root_for_channel,
+        save_excel_export,
         validated_excel_export_file_name, validated_file_export, PortalReleaseManifest,
         PortalReleasePayload, INITIAL_MEDIA_CHUNK_BYTES,
     };
@@ -2382,6 +2424,43 @@ mod tests {
         assert!(is_scheduled_maintenance_hour(4));
         assert!(!is_scheduled_maintenance_hour(5));
         assert!(!is_scheduled_maintenance_hour(21));
+    }
+
+    #[test]
+    fn a_test_computer_overlays_the_test_publication_on_production() {
+        let unique = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("test time")
+            .as_nanos();
+        let shared_root = env::temp_dir().join(format!(
+            "portal-publication-channel-{}-{unique}",
+            process::id()
+        ));
+        let relative = std::path::Path::new("databases_local").join("portal-data.current.json");
+        let production = shared_root.join(&relative);
+        let test_manifest = shared_root.join("test").join(&relative);
+        fs::create_dir_all(production.parent().expect("production parent")).expect("production dir");
+        fs::write(&production, b"{}").expect("production manifest");
+
+        // Production never overlays anything.
+        assert_eq!(
+            publication_overlay_for_channel(&shared_root, &production, "production"),
+            None
+        );
+        // A test computer with nothing published for test reads production alone.
+        assert_eq!(
+            publication_overlay_for_channel(&shared_root, &production, "test"),
+            None
+        );
+        // Once the test tree holds a manifest, it layers over production.
+        fs::create_dir_all(test_manifest.parent().expect("test parent")).expect("test dir");
+        fs::write(&test_manifest, b"{}").expect("test manifest");
+        assert_eq!(
+            publication_overlay_for_channel(&shared_root, &production, "test"),
+            Some(test_manifest)
+        );
+
+        fs::remove_dir_all(shared_root).expect("test cleanup");
     }
 
     #[test]
@@ -2563,4 +2642,98 @@ mod tests {
             (200, file_size - 1, 206)
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// ITpipes session
+//
+// The user signs in to ITpipes inside an app window, so the session cookie
+// lands in the WebView2 profile every window of this app shares. The host reads
+// it and hands it to the Python worker, which fetches the presigned S3 URLs
+// ITpipes mints. Portal never stores a credential - this is the "act as the
+// signed-in user" pattern Teams and Slack desktop use.
+// ---------------------------------------------------------------------------
+
+const ITPIPES_ORIGIN: &str = "https://charlottenc.itpipes.com";
+const ITPIPES_LOGIN_WINDOW: &str = "itpipes-login";
+
+/// Async on purpose: on Windows, creating a webview window from a sync command
+/// deadlocks - the command holds the main thread that window creation needs.
+#[tauri::command]
+async fn itpipes_open_login(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(ITPIPES_LOGIN_WINDOW) {
+        let _ = window.show();
+        let _ = window.set_focus();
+        return Ok(());
+    }
+    let url = tauri::Url::parse(ITPIPES_ORIGIN).map_err(|error| error.to_string())?;
+    tauri::WebviewWindowBuilder::new(&app, ITPIPES_LOGIN_WINDOW, tauri::WebviewUrl::External(url))
+        .title("Sign in to ITpipes")
+        .inner_size(1150.0, 840.0)
+        .build()
+        .map_err(|error| format!("The ITpipes window could not be opened: {error}"))?;
+    Ok(())
+}
+
+/// Closes the sign-in window once the session is established. The cookie lives in
+/// the shared profile, not in the window, so closing it costs nothing.
+#[tauri::command]
+async fn itpipes_close_login(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(ITPIPES_LOGIN_WINDOW) {
+        window.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+/// The cookie jar is only reachable from the UI thread, so the read is dispatched
+/// there and awaited over a channel.
+///
+/// This has to be an async command. A sync command runs *on* the main thread, so
+/// waiting there for a closure that also needs the main thread deadlocks the whole
+/// window until the timeout fires.
+#[tauri::command]
+async fn itpipes_session_cookie(app: tauri::AppHandle) -> Result<String, String> {
+    let (sender, receiver) = std::sync::mpsc::channel::<Result<String, String>>();
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let url = match tauri::Url::parse(ITPIPES_ORIGIN) {
+            Ok(url) => url,
+            Err(error) => {
+                let _ = sender.send(Err(error.to_string()));
+                return;
+            }
+        };
+        let mut header = String::new();
+        // Any window answers for the whole profile, but the login window is the
+        // one certain to have the session, so it is preferred when present.
+        let windows = handle.webview_windows();
+        let ordered = windows
+            .get(ITPIPES_LOGIN_WINDOW)
+            .cloned()
+            .into_iter()
+            .chain(windows.values().cloned());
+        for window in ordered {
+            let Ok(cookies) = window.cookies_for_url(url.clone()) else { continue };
+            for cookie in cookies {
+                if !header.is_empty() {
+                    header.push_str("; ");
+                }
+                header.push_str(cookie.name());
+                header.push('=');
+                header.push_str(cookie.value());
+            }
+            if !header.is_empty() {
+                break;
+            }
+        }
+        let _ = sender.send(Ok(header));
+    })
+    .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap_or_else(|_| Ok(String::new()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }

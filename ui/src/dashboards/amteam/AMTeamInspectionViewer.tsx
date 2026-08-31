@@ -23,7 +23,7 @@ import { Input } from '@/components/ui/input'
 import { fuzzyMatchScore } from './fuzzyMatch'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
 import { appConfirm, appPrompt } from '../../components/messageDialogService'
-import { isDesktopRuntime, saveExportAs } from '../../desktop/runtime'
+import { closeItpipesLogin, isDesktopRuntime, openExternalUrl, openItpipesLogin, saveExportAs } from '../../desktop/runtime'
 import {
   fetchAmTeamObservations,
   fetchAmTeamObservationsBatch,
@@ -32,6 +32,9 @@ import {
   fetchPortalDictionaryItems,
   createUserObservation,
   deleteUserObservation,
+  checkItpipesSession,
+  onItpipesMediaError,
+  notifyItpipesMediaError,
   type PortalDictionaryItem,
 } from './api'
 import { AddObservationDialog } from './AddObservationDialog'
@@ -67,21 +70,7 @@ type SearchCandidate = {
   value: string
   detail: string
 }
-type MediaSourceMode = 'api' | 'p-drive'
-type ElectronAwareWindow = Window & {
-  electronAPI?: unknown
-  desktopAPI?: unknown
-  __TAURI_INTERNALS__?: unknown
-  chrome?: {
-    webview?: unknown
-  }
-  process?: {
-    type?: string
-    versions?: {
-      electron?: string
-    }
-  }
-}
+type MediaSourceMode = 'api'
 type ObservationDistanceGroup = {
   key: string
   label: string
@@ -129,6 +118,12 @@ type CctvReviewSaveContext = {
   bindingText: string
   inspectionDateText: string
 }
+// Reviewer-added defects are parked for now: the button stays visible so people
+// know the capability exists, but it is disabled until this stage is over. Flip
+// this to true to bring it back - the dialog, endpoints and identifier
+// allocation behind it all stay in place.
+const ADD_DEFECT_BUTTON_ENABLED = false
+
 type ActiveVideoFrame = {
   videoPath: string
   videoName: string
@@ -553,50 +548,10 @@ function recordId(value: AmTeamCellValue | undefined) {
   return value === null || value === undefined ? '' : String(value)
 }
 
-function isElectronClient() {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined') return false
-  const electronWindow = window as ElectronAwareWindow
-  const launchParameters = new URLSearchParams(window.location.search)
-  const declaredDesktopClient = launchParameters.get('client')?.trim().toLowerCase() === 'desktop'
-    || launchParameters.get('desktop') === '1'
-    || launchParameters.get('media_source')?.trim().toLowerCase() === 'p-drive'
-  return Boolean(
-    navigator.userAgent.toLowerCase().includes(' electron/')
-      || electronWindow.process?.versions?.electron
-      || electronWindow.process?.type === 'renderer'
-      || electronWindow.electronAPI
-      || electronWindow.desktopAPI
-      || electronWindow.chrome?.webview
-      || electronWindow.__TAURI_INTERNALS__
-      || declaredDesktopClient,
-  )
-}
-
-function mediaSourceMode() {
-  return isElectronClient() ? 'p-drive' : 'api'
-}
-
-function encodeFileUrlPath(path: string) {
-  return path
-    .split('/')
-    .filter((segment, index, segments) => segment || index === segments.length - 1)
-    .map((segment, index) => (index === 0 && /^[A-Za-z]:$/.test(segment) ? segment : encodeURIComponent(segment)))
-    .join('/')
-}
-
-function fileUrlFromWindowsPath(path: string) {
-  const normalizedPath = path.replace(/\\/g, '/')
-  if (normalizedPath.startsWith('//')) {
-    return `file://${encodeFileUrlPath(normalizedPath.slice(2))}`
-  }
-  return `file:///${encodeFileUrlPath(normalizedPath.replace(/^\/+/, ''))}`
-}
-
-function localMediaUrl(mediaRoot: string, relativePath: string) {
-  if (!mediaRoot || !relativePath) return ''
-  const cleanRoot = mediaRoot.replace(/[\\/]+$/, '')
-  const cleanRelativePath = relativePath.replace(/^[\\/]+/, '')
-  return fileUrlFromWindowsPath(`${cleanRoot}\\${cleanRelativePath.replace(/\//g, '\\')}`)
+function mediaSourceMode(): MediaSourceMode {
+  // Media comes from ITpipes only; the P-drive share is retired and must never be
+  // read again, so there is exactly one mode.
+  return 'api'
 }
 
 function relativePathFromMediaApiUrl(url: string) {
@@ -609,10 +564,7 @@ function relativePathFromMediaApiUrl(url: string) {
   }
 }
 
-function mediaAssetViewUrl(asset: AmTeamMediaAsset, mode: MediaSourceMode, mediaRoot: string) {
-  if (mode === 'p-drive') {
-    return localMediaUrl(mediaRoot, asset.relative_path) || asset.url
-  }
+function mediaAssetViewUrl(asset: AmTeamMediaAsset, _mode: MediaSourceMode, _mediaRoot: string) {
   return asset.url
 }
 
@@ -627,10 +579,7 @@ function mediaAssetViewUrls(asset: AmTeamMediaAsset, mode: MediaSourceMode, medi
   ])
 }
 
-function mediaViewUrl(url: string, mode: MediaSourceMode, mediaRoot: string) {
-  if (mode === 'p-drive') {
-    return localMediaUrl(mediaRoot, relativePathFromMediaApiUrl(url)) || url
-  }
+function mediaViewUrl(url: string, _mode: MediaSourceMode, _mediaRoot: string) {
   return url
 }
 
@@ -641,9 +590,35 @@ function mediaViewUrls(url: string, mode: MediaSourceMode, mediaRoot: string) {
   ])
 }
 
+/** A picked video frame rides in the same string slot as a snapshot file name,
+ * so the saved report needs no new column: "frame:12.4" means capture the frame
+ * at 12.4 seconds - the same trick the clogging snapshot has always used, just
+ * spelled inline. */
+const VIDEO_FRAME_SELECTION_PREFIX = 'frame:'
+
+function isFrameSelection(value: string | null | undefined): boolean {
+  return Boolean(value && value.startsWith(VIDEO_FRAME_SELECTION_PREFIX))
+}
+
+function frameSelectionSeconds(value: string) {
+  const seconds = Number(value.slice(VIDEO_FRAME_SELECTION_PREFIX.length))
+  return Number.isFinite(seconds) && seconds >= 0 ? seconds : 0
+}
+
 function fileNameFromMediaUrl(url: string) {
   const relativePath = relativePathFromMediaApiUrl(url)
-  const pathText = relativePath || url
+  let pathText = relativePath || url
+  // ITpipes proxy URLs carry the real S3 target in ?u=; without this the last
+  // path segment is literally "media", which then poisons every name match.
+  if (!relativePath && url.includes('/itpipes/media')) {
+    try {
+      const parsed = new URL(url, typeof window === 'undefined' ? 'http://localhost' : window.location.origin)
+      const target = parsed.searchParams.get('u')
+      if (target) pathText = new URL(target).pathname
+    } catch {
+      // Fall through to the generic parsing below.
+    }
+  }
   const cleanPath = pathText.split(/[?#]/)[0] ?? ''
   const segments = cleanPath.split(/[\\/]/).filter(Boolean)
   return decodeURIComponent(segments.at(-1) ?? 'Snapshot')
@@ -657,12 +632,29 @@ function selectedSnapshotFileName(
   mediaRoot: string,
 ) {
   const selectedUrl = snapshotSelections[scopedCardKey]
+  if (isFrameSelection(selectedUrl)) return selectedUrl
   const imageUrls = observationImageUrls(observation)
   const defaultUrl = imageUrls[0]
     ? mediaViewUrl(imageUrls[0], mediaMode, mediaRoot)
     : ''
   const effectiveUrl = selectedUrl || defaultUrl
   return effectiveUrl ? fileNameFromMediaUrl(effectiveUrl) : null
+}
+
+/** The Media ID of the snapshot the reviewer picked, resolved through the
+ * database-provided name list so the report stores an identity, not just a name. */
+function selectedSnapshotMediaId(
+  observation: AmTeamObservation,
+  scopedCardKey: string,
+  snapshotSelections: Record<string, string>,
+  mediaMode: MediaSourceMode,
+  mediaRoot: string,
+) {
+  const fileName = selectedSnapshotFileName(observation, scopedCardKey, snapshotSelections, mediaMode, mediaRoot)
+  if (!fileName || isFrameSelection(fileName)) return null
+  const names = observation.image_names ?? []
+  const index = names.findIndex((name) => name.toLowerCase() === fileName.toLowerCase())
+  return index >= 0 ? observation.image_media_ids?.[index] ?? null : null
 }
 
 function snapshotDisplayName(url: string) {
@@ -1590,15 +1582,27 @@ async function buildReviewReportFile({
       defectNumber += 1
       const scopedMajorCardKey = pipeScopedKey(pipeId, majorEntry.cardKey)
       const selectedSnapshotUrl = snapshotSelections[scopedMajorCardKey]
-      const majorImageUrls = observationImageUrls(majorEntry.observation)
-      const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
-      const selectedApiImageUrl = majorImageUrls.find((imageUrl) => (
-        fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
-      )) ?? majorImageUrls[0]
-      const majorImageCandidates = selectedApiImageUrl
-        ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
-        : uniqueMediaUrls([selectedSnapshotUrl])
-      const majorImage = await fetchReportImageFromCandidates(majorImageCandidates)
+      let majorImage: ReportImage | null = null
+      if (isFrameSelection(selectedSnapshotUrl)) {
+        const frameVideo = cachedPipe?.media.videos[0]
+        const frameVideoUrls = frameVideo
+          ? mediaAssetViewUrls(frameVideo, mediaMode, cachedPipe?.media.media_root ?? '')
+          : []
+        majorImage = await fetchVideoFrameReportImageFromCandidates(
+          frameVideoUrls,
+          frameSelectionSeconds(selectedSnapshotUrl),
+        )
+      } else {
+        const majorImageUrls = observationImageUrls(majorEntry.observation)
+        const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
+        const selectedApiImageUrl = majorImageUrls.find((imageUrl) => (
+          fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
+        )) ?? majorImageUrls[0]
+        const majorImageCandidates = selectedApiImageUrl
+          ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
+          : uniqueMediaUrls([selectedSnapshotUrl])
+        majorImage = await fetchReportImageFromCandidates(majorImageCandidates)
+      }
       const otherEntries = observationEntries.filter((entry) => selection.otherKeys.includes(entry.cardKey))
       const additionalCodes = otherEntries
         .map((entry) => observationReportText(entry.observation, Boolean(extensiveDefectSelections[pipeScopedKey(pipeId, entry.cardKey)])))
@@ -1646,6 +1650,7 @@ function selectedSnapshotUrlFromFileName(
   mediaRoot: string,
 ) {
   if (!observation || !fileName) return ''
+  if (isFrameSelection(fileName)) return fileName
   const normalizedFileName = fileName.toLowerCase()
   const matchedImageUrl = observationImageUrls(observation).find((imageUrl) => (
     fileNameFromMediaUrl(mediaViewUrl(imageUrl, mode, mediaRoot)).toLowerCase() === normalizedFileName
@@ -1737,9 +1742,18 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
             : parseDefectCallouts(savedCallout)
         }
 
+        const savedObservationRow = observationsByCardKey.get(savedObservation.source_observation_key)
+        const mediaIdIndex = savedObservation.selected_picture_media_id
+          ? (savedObservationRow?.image_media_ids ?? []).findIndex(
+              (mediaId) => mediaId === savedObservation.selected_picture_media_id,
+            )
+          : -1
+        const fileNameFromMediaId = mediaIdIndex >= 0
+          ? savedObservationRow?.image_names?.[mediaIdIndex] ?? null
+          : null
         const selectedSnapshotUrl = selectedSnapshotUrlFromFileName(
-          observationsByCardKey.get(savedObservation.source_observation_key),
-          savedObservation.selected_picture_file_name,
+          savedObservationRow,
+          fileNameFromMediaId ?? savedObservation.selected_picture_file_name,
           mediaMode,
           observationResponse.media.media_root,
         )
@@ -1858,6 +1872,7 @@ function ObservationDetailsDialog({
           <div>
             <span>Observation details</span>
             <strong>MLO ID {displayValue(observation.mlo_id)}</strong>
+            <MliLink mliId={observation.mli_id} prefix="MLI " />
           </div>
           <button type="button" aria-label="Close observation details" onClick={onClose}>
             <X size={16} aria-hidden="true" />
@@ -1876,6 +1891,36 @@ function ObservationDetailsDialog({
         </div>
       </div>
     </div>
+  )
+}
+
+const ITPIPES_INSPECTION_URL = 'https://charlottenc.itpipes.com/Asset/SearchByInspId'
+
+function itpipesInspectionUrl(mliId: string) {
+  const url = new URL(ITPIPES_INSPECTION_URL)
+  url.searchParams.set('assetType', 'ML')
+  url.searchParams.set('inspID', mliId)
+  return url.toString()
+}
+
+function MliLink({ mliId, prefix }: { mliId: AmTeamCellValue; prefix?: string }) {
+  const text = displayValue(mliId).trim()
+  if (!text || text === '-') return null
+  const href = itpipesInspectionUrl(text)
+  return (
+    <a
+      className="amteam-mli-link"
+      href={href}
+      title={`Open inspection ${text} in ITpipes`}
+      onClick={(event) => {
+        // The desktop webview cannot navigate away, so hand the URL to the browser.
+        event.preventDefault()
+        event.stopPropagation()
+        void openExternalUrl(href).catch(() => undefined)
+      }}
+    >
+      {prefix ?? ''}{text}
+    </a>
   )
 }
 
@@ -1954,7 +1999,7 @@ function InspectionDetailsDialog({
         <header>
           <div>
             <span>Inspection details</span>
-            <strong>MLI ID {displayValue(inspection.mli_id)}</strong>
+            <strong>MLI ID <MliLink mliId={inspection.mli_id} /></strong>
           </div>
           <button type="button" aria-label="Close inspection details" onClick={onClose}>
             <X size={16} aria-hidden="true" />
@@ -1988,6 +2033,7 @@ function SnapshotImageBox({
   readOnly = false,
   selectedUrl,
   onSelectedUrlChange,
+  currentFrame,
 }: {
   emptyMessage?: string
   imageUrls: string[]
@@ -1996,6 +2042,7 @@ function SnapshotImageBox({
   readOnly?: boolean
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
+  currentFrame?: ActiveVideoFrame | null
 }) {
   const [failedSourceUrls, setFailedSourceUrls] = useState<string[]>([])
   const [sourceCandidateIndexes, setSourceCandidateIndexes] = useState<Record<string, number>>({})
@@ -2030,7 +2077,8 @@ function SnapshotImageBox({
     setIsPickerOpen(false)
   }, [viewUrlKey])
 
-  if (visibleUrls.length === 0) {
+  const frameSelected = isFrameSelection(currentSelectedUrl)
+  if (visibleUrls.length === 0 && !currentFrame && !frameSelected) {
     if (!emptyMessage) return null
 
     return (
@@ -2052,10 +2100,12 @@ function SnapshotImageBox({
         title={`${selectedDisplayName} (${snapshotCountLabel})`}
         onClick={() => setIsPickerOpen(true)}
       >
-        <span>{selectedDisplayName || 'Select snapshot'}</span>
-        <span className="amteam-snapshot-count" title="Current snapshot / total snapshots">
-          ({snapshotCountLabel})
-        </span>
+        <span>{frameSelected ? `Frame ${formatMediaTime(frameSelectionSeconds(currentSelectedUrl ?? ''))}` : 'Snapshot'}</span>
+        {!frameSelected && visibleUrls.length > 0 ? (
+          <span className="amteam-snapshot-count" title="Current snapshot / total snapshots">
+            ({snapshotCountLabel})
+          </span>
+        ) : null}
       </button>
 
       {isPickerOpen && !readOnly ? (
@@ -2077,6 +2127,19 @@ function SnapshotImageBox({
                 <X size={16} aria-hidden="true" />
               </button>
             </header>
+            {currentFrame ? (
+              <button
+                type="button"
+                className={`amteam-snapshot-frame-option${frameSelected ? ' selected' : ''}`}
+                onClick={() => {
+                  updateSelectedUrl(`${VIDEO_FRAME_SELECTION_PREFIX}${currentFrame.timeSeconds}`)
+                  setIsPickerOpen(false)
+                }}
+              >
+                <Camera size={14} aria-hidden="true" />
+                Use current video frame ({formatMediaTime(currentFrame.timeSeconds)})
+              </button>
+            ) : null}
             <div className="amteam-snapshot-picker-grid">
               {visibleSources.map(({ sourceUrl, candidates, viewUrl: imageUrl }, index) => (
                 <button
@@ -2095,6 +2158,7 @@ function SnapshotImageBox({
                     loading="lazy"
                     src={imageUrl}
                     onError={() => {
+                      notifyItpipesMediaError(imageUrl)
                       const currentCandidateIndex = sourceCandidateIndexes[sourceUrl] ?? 0
                       if (currentCandidateIndex + 1 < candidates.length) {
                         setSourceCandidateIndexes((currentIndexes) => ({
@@ -2125,6 +2189,7 @@ function ObservationImage({
   readOnly = false,
   selectedUrl,
   onSelectedUrlChange,
+  currentFrame,
 }: {
   mediaMode: MediaSourceMode
   mediaRoot: string
@@ -2132,6 +2197,7 @@ function ObservationImage({
   readOnly?: boolean
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
+  currentFrame?: ActiveVideoFrame | null
 }) {
   const imageUrls = observationImageUrls(observation)
   return (
@@ -2142,6 +2208,7 @@ function ObservationImage({
       readOnly={readOnly}
       selectedUrl={selectedUrl}
       onSelectedUrlChange={onSelectedUrlChange}
+      currentFrame={currentFrame}
     />
   )
 }
@@ -2400,6 +2467,7 @@ function InspectionVideoPlayer({
         src={selectedVideoUrl}
         onEnded={() => setIsPlaying(false)}
         onError={() => {
+          notifyItpipesMediaError(selectedVideoUrl)
           if (!isUsingApiFallback && selectedVideoUrls.length > 1) {
             setUsingApiFallback(true)
           }
@@ -2476,6 +2544,8 @@ function PipeDefectReviewPanel({
   onPreviousPipe,
   onSelectPipe,
   onShowPipeInfo,
+  itpipesState,
+  onConnectItpipes,
   onNextPipe,
   onGenerateReport,
   generateReportLabel,
@@ -2501,6 +2571,8 @@ function PipeDefectReviewPanel({
   onPreviousPipe: () => void
   onSelectPipe: (pipeId: string) => void
   onShowPipeInfo: () => void
+  itpipesState: { connected: boolean; count: number; reason?: string }
+  onConnectItpipes: () => void
   onNextPipe: () => void
   onGenerateReport: () => void
   generateReportLabel: string
@@ -2557,6 +2629,21 @@ function PipeDefectReviewPanel({
             <FileText size={14} aria-hidden="true" />
           </button>
           <strong className="amteam-review-asset-direction">- {inspectionDirectionLabel}</strong>
+          <MliLink mliId={inspection.mli_id} prefix="MLI " />
+          {itpipesState.connected ? (
+            <span className="amteam-itpipes-chip is-connected" title={`${itpipesState.count} cloud files for this inspection`}>
+              ITpipes cloud
+            </span>
+          ) : (
+            <button
+              type="button"
+              className="amteam-itpipes-chip"
+              title="Media now lives in ITpipes. Sign in once and Portal loads it as you."
+              onClick={onConnectItpipes}
+            >
+              Connect ITpipes
+            </button>
+          )}
         </div>
         <span className="amteam-review-address" title={displayValue(inspection.street)}>{displayValue(inspection.street)}</span>
       </header>
@@ -3070,20 +3157,89 @@ export default function AMTeamInspectionViewer({
     })
   }
 
+  const [itpipesState, setItpipesState] = useState<{ connected: boolean; count: number; reason?: string }>({
+    connected: false,
+    count: 0,
+  })
+  /** Swap in ITpipes cloud media once it arrives - never on the load path.
+   *
+   * The share's copy is outdated, so cloud wins whenever ITpipes answers, but the
+   * page must render without waiting for it: a slow or unreachable ITpipes should
+   * cost nothing more than an unconnected chip.
+   */
+  const itpipesRecovering = useRef(false)
+
+  /** Called when ITpipes media stops loading mid-session.
+   *
+   * Presigned URLs expire on their own schedule, so the first move is a session
+   * check: still signed in means the URLs just need re-minting, silently. Only a
+   * dead session brings the sign-in window back, and the page resumes on its own
+   * once the user has signed in - the same contract as the entry gate.
+   */
+  async function recoverItpipesSession(mliId: string) {
+    if (itpipesRecovering.current || !mliId || !isDesktopRuntime()) return
+    itpipesRecovering.current = true
+    try {
+      const session = await checkItpipesSession().catch(() => ({ connected: false }))
+      if (session.connected) {
+        void reloadInspectionObservations()
+        return
+      }
+      setItpipesState({ connected: false, count: 0, reason: 'signed_out' })
+      await openItpipesLogin().catch(() => undefined)
+      for (let attempt = 0; attempt < 120; attempt += 1) {
+        await new Promise((resolve) => window.setTimeout(resolve, 2500))
+        const retry = await checkItpipesSession().catch(() => ({ connected: false }))
+        if (retry.connected) {
+          void closeItpipesLogin()
+          void reloadInspectionObservations()
+          return
+        }
+      }
+    } finally {
+      itpipesRecovering.current = false
+    }
+  }
+
+  useEffect(() => {
+    if (!selectedInspection) return
+    const mliId = recordId(selectedInspection.mli_id)
+    return onItpipesMediaError(() => {
+      void recoverItpipesSession(mliId)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedInspection])
+
+  /** Media now arrives inside the observation response; this reads the connection
+   * signal off it and starts recovery when the session has lapsed. */
+  function noteItpipesMediaState(media: AmTeamInspectionMedia, mliId: string) {
+    const connected = media.itpipes_connected ?? false
+    setItpipesState({
+      connected,
+      count: media.snapshots.length + media.videos.length + media.reports.length,
+      reason: media.itpipes_reason ?? undefined,
+    })
+    if (!connected && media.itpipes_reason === 'signed_out') {
+      void recoverItpipesSession(mliId)
+    }
+  }
+
   async function reloadInspectionObservations() {
     if (!selectedInspection) return
     const mliId = recordId(selectedInspection.mli_id)
     if (!mliId) return
     const response = await fetchAmTeamObservations(mliId)
+    const media = response.media ?? EMPTY_INSPECTION_MEDIA
+    noteItpipesMediaState(media, mliId)
     setObservations(response.rows)
-    setInspectionMedia(response.media ?? EMPTY_INSPECTION_MEDIA)
+    setInspectionMedia(media)
     setInspectionDistanceLimit(response.distance_limit ?? null)
     setPipeObservationCache((currentCache) => ({
       ...currentCache,
       [recordId(selectedInspection.ml_id)]: {
         inspection: selectedInspection,
         observations: response.rows,
-        media: response.media ?? EMPTY_INSPECTION_MEDIA,
+        media,
       },
     }))
   }
@@ -3417,6 +3573,13 @@ export default function AMTeamInspectionViewer({
                     selectedMediaMode,
                     mediaRoot,
                   ),
+                  selected_picture_media_id: selectedSnapshotMediaId(
+                    observation,
+                    scopedCardKey,
+                    snapshotSelections,
+                    selectedMediaMode,
+                    mediaRoot,
+                  ),
                   defect_callout: defectRole !== 'none' && defectCallout ? defectCallout : null,
                 }
               }),
@@ -3692,15 +3855,17 @@ export default function AMTeamInspectionViewer({
     fetchAmTeamObservations(mliId)
       .then((response) => {
         if (cancelled) return
+        const media = response.media ?? EMPTY_INSPECTION_MEDIA
+        noteItpipesMediaState(media, mliId)
         setObservations(response.rows)
-        setInspectionMedia(response.media ?? EMPTY_INSPECTION_MEDIA)
+        setInspectionMedia(media)
         setInspectionDistanceLimit(response.distance_limit ?? null)
         setPipeObservationCache((currentCache) => ({
           ...currentCache,
           [recordId(selectedInspection.ml_id)]: {
             inspection: selectedInspection,
             observations: response.rows,
-            media: response.media ?? EMPTY_INSPECTION_MEDIA,
+            media,
           },
         }))
         setObservationStatus('ready')
@@ -4032,6 +4197,10 @@ export default function AMTeamInspectionViewer({
                     onPreviousPipe={selectPreviousPipe}
                     onSelectPipe={selectPipeById}
                     onShowPipeInfo={showSelectedPipeInfo}
+                    itpipesState={itpipesState}
+                    onConnectItpipes={() => {
+                      if (selectedInspection) void recoverItpipesSession(recordId(selectedInspection.mli_id))
+                    }}
                     onNextPipe={selectNextPipe}
                     onGenerateReport={reportDraftMode ? saveReviewDraft : generateReviewReport}
                     generateReportLabel={reportDraftMode ? 'Save' : 'Generate report'}
@@ -4054,10 +4223,12 @@ export default function AMTeamInspectionViewer({
                         type="button"
                         className="amteam-add-observation-button"
                         onClick={() => { setAddObservationError(''); setAddObservationOpen(true) }}
-                        disabled={observationCodes.length === 0}
-                        title={observationCodes.length === 0
-                          ? 'The ITPipes observation code dictionary has not been loaded, so no codes are available to choose.'
-                          : 'Record a defect that ITPipes did not capture, at the current video position'}
+                        disabled={!ADD_DEFECT_BUTTON_ENABLED || observationCodes.length === 0}
+                        title={!ADD_DEFECT_BUTTON_ENABLED
+                          ? 'Adding defects is not available at this stage.'
+                          : observationCodes.length === 0
+                            ? 'The ITPipes observation code dictionary has not been loaded, so no codes are available to choose.'
+                            : 'Record a defect that ITPipes did not capture, at the current video position'}
                       >
                         <Plus size={15} aria-hidden="true" />
                         Add defect
@@ -4403,6 +4574,7 @@ export default function AMTeamInspectionViewer({
                                     observation={observation}
                                     selectedUrl={snapshotSelections[scopedCardKey]}
                                     readOnly={readOnly}
+                                    currentFrame={activeVideoFrame}
                                     onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
                                   />
                                 </div>

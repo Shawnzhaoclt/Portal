@@ -20,6 +20,8 @@ export type AmTeamInspectionMedia = {
   videos: AmTeamMediaAsset[]
   reports: AmTeamMediaAsset[]
   warnings: string[]
+  itpipes_connected?: boolean
+  itpipes_reason?: string | null
 }
 
 export type AmTeamPipe = {
@@ -73,6 +75,8 @@ export type AmTeamObservation = {
   full_path: AmTeamCellValue
   image_url: string | null
   image_urls: string[]
+  image_names?: string[]
+  image_media_ids?: Array<string | null>
   image_available: boolean
   /** ITPipes rows are read-only; rows a reviewer added in Portal can be deleted again. */
   origin?: 'itpipes' | 'user'

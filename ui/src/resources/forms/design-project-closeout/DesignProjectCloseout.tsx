@@ -48,6 +48,7 @@ import {
   importWorkorderAttachment,
   reviewCloseoutProject,
   searchCityworksWorkorders,
+  type SpreadsheetFilter,
   updateCloseoutProject,
 } from './api'
 import './DesignProjectCloseout.css'
@@ -201,6 +202,8 @@ export default function DesignProjectCloseout() {
   const [cityworksQuery, setCityworksQuery] = useState('')
   const [cityworksRows, setCityworksRows] = useState<CityworksWorkorder[]>([])
   const [cityworksCutoff, setCityworksCutoff] = useState<string | null>(null)
+  const [cityworksHidden, setCityworksHidden] = useState(0)
+  const [cityworksSpreadsheet, setCityworksSpreadsheet] = useState<SpreadsheetFilter>('with')
   const [cityworksBusy, setCityworksBusy] = useState(false)
   const [attachmentWo, setAttachmentWo] = useState<string | null>(null)
   const [attachmentResult, setAttachmentResult] = useState<CloseoutAttachmentResult | null>(null)
@@ -271,8 +274,10 @@ export default function DesignProjectCloseout() {
         const response = await searchCityworksWorkorders({
           search: query || undefined,
           closed_since: since || undefined,
+          spreadsheet: cityworksSpreadsheet,
         })
         setCityworksRows(response.rows)
+        setCityworksHidden(response.hidden_without_excel)
         setWorkorderUrlTemplate(response.workorder_url_template)
         setCityworksCutoff(response.cutoff)
         // The backlog cutoff becomes the suggested starting date the first time.
@@ -286,7 +291,7 @@ export default function DesignProjectCloseout() {
       }
     }, query ? 250 : 0)
     return () => window.clearTimeout(timer)
-  }, [cityworksOpen, cityworksMode, cityworksQuery, cityworksDate])
+  }, [cityworksOpen, cityworksMode, cityworksQuery, cityworksDate, cityworksSpreadsheet])
 
   useEffect(() => {
     if (view !== 'spreadsheet') return
@@ -1706,6 +1711,17 @@ export default function DesignProjectCloseout() {
                     />
                   </div>
                 )}
+                <label className="closeout-sheet-filter">
+                  <span>Spreadsheet</span>
+                  <select
+                    value={cityworksSpreadsheet}
+                    onChange={(event) => setCityworksSpreadsheet(event.currentTarget.value as SpreadsheetFilter)}
+                  >
+                    <option value="with">Attached</option>
+                    <option value="without">Not attached</option>
+                    <option value="any">Either</option>
+                  </select>
+                </label>
               </div>
               {errorMessage ? <p className="closeout-dialog-error">{errorMessage}</p> : null}
               <p className="closeout-hint">
@@ -1716,6 +1732,9 @@ export default function DesignProjectCloseout() {
                     : cityworksCutoff
                       ? `Design Team Project, Repair, Street Maintenance and Universal work orders finished after the latest analysis in the database (${cityworksCutoff}) and not yet closed out.`
                       : 'All closed Design Team Project work orders.'}
+                {cityworksHidden > 0
+                  ? ` ${cityworksHidden.toLocaleString()} more matched the dates but were filtered out by the storm-asset or spreadsheet rule.`
+                  : ''}
               </p>
               {cityworksBusy ? <p className="closeout-empty"><Loader2 className="spin" size={15} /> Loading…</p> : null}
               {!cityworksBusy ? (

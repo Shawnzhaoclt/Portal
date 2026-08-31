@@ -41,7 +41,7 @@ import {
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ManagerWorkspaceHub from "./ManagerWorkspaceHub";
 import PortalAdministrationPage from "./management/PortalAdministrationPage";
 import { appConfirm } from "./messageDialogService";
@@ -1986,6 +1986,9 @@ export function App() {
   const [status, setStatus] = useState<SyncStatus | null>(null);
   const [repositoryStatus, setRepositoryStatus] = useState<RepositoryStatus | null>(null);
   const [error, setError] = useState("");
+  /** The last failure the background status poll reported, so the poll can
+   * retract its own message without wiping one the user is still reading. */
+  const polledError = useRef("");
   const [busy, setBusy] = useState<SourceDataAction | null>(null);
   const [repositoryBusy, setRepositoryBusy] = useState<"refresh" | "browse" | "inspect" | "validate" | "configure" | "bootstrap" | null>(null);
   const [repositoryNetworkRoot, setRepositoryNetworkRoot] = useState("");
@@ -2059,8 +2062,15 @@ export function App() {
     try {
       const response = await invoke<SyncStatus>("sync_status", { selectedDate });
       setStatus(response);
-      setError("");
+      // The poll may retract only the failure it reported itself. A message a
+      // user action left behind stays until that user starts the next one.
+      if (polledError.current) {
+        const reported = polledError.current;
+        polledError.current = "";
+        setError((current) => (current === reported ? "" : current));
+      }
     } catch (reason) {
+      polledError.current = String(reason);
       setError(String(reason));
     }
   }, [authorization, selectedDate]);
@@ -2631,6 +2641,7 @@ export function App() {
     ))) {
       return;
     }
+    setError("");
     setReleaseSuccess("");
     setReleaseProgress("Preparing the release.");
     setReleaseBusy(true);
@@ -2659,6 +2670,7 @@ export function App() {
       setError("Enter at least one test computer name before saving.");
       return;
     }
+    setError("");
     setReleaseTargetsBusy(true);
     try {
       const response = await invoke<PortalReleaseStatus>("save_portal_release_test_machines", {
@@ -2680,6 +2692,7 @@ export function App() {
       `Promote test release ${releaseStatus?.publishedVersion ?? ""} to production using the exact tested files and checksums?`,
       { title: "Promote tested release", kind: "warning", confirmLabel: "Promote to production" },
     ))) return;
+    setError("");
     setReleaseSuccess("");
     setReleaseProgress("Verifying the tested release artifacts.");
     setReleaseBusy(true);

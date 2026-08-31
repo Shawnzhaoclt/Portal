@@ -1042,6 +1042,34 @@
   line-height: 1.2;
 }
 
+.home-about-publication-source {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  margin-top: 10px;
+  font-size: 0.78rem;
+}
+
+.home-about-publication-source > span {
+  flex: 0 0 auto;
+  color: #5d7186;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.home-about-publication-source.is-test > span,
+.home-about-publication-source.is-test > code {
+  color: #805b00;
+}
+
+.home-about-publication-source > code {
+  min-width: 0;
+  color: #23415c;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .home-about-channel {
   width: fit-content;
   margin-top: 3px;
@@ -1105,10 +1133,21 @@
 
 .home-test-access-dialog label {
   display: grid;
+  min-width: 0;
   gap: 7px;
 }
 
+/* A grid item never shrinks below its content unless it is told to. The user
+   picker lists "name - email - team", so without this the widest option sets
+   the dialog's width and the controls spill past the panel. */
+.home-test-access-dialog > * {
+  min-width: 0;
+}
+
 .home-test-access-dialog select {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
   min-height: 38px;
   border: 1px solid var(--panel-border-strong);
   border-radius: 0;

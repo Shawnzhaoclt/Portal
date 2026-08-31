@@ -22,16 +22,18 @@ from portal.app.management.services import (
     selected_user_role,
 )
 from portal.app.sync.errors import LockTimeout, RevisionChanged, SharedRootUnavailable, SnapshotRequired, SyncError
-from portal.app.sync.models import Identity, Mutation
+from portal.app.sync.models import Mutation
+from portal.app.dashboards.amteam import user_observations
 from portal.app.sync.physical_entities import (
     CCTV_DISTANCE_GROUP_ENTITY_TYPE,
     CCTV_OBSERVATION_ENTITY_TYPE,
     CCTV_PIPE_ENTITY_TYPE,
     CCTV_REPORT_ENTITY_TYPE,
+    MLO_ENTITY_TYPE,
     REVIEW_EVENT_ENTITY_TYPE,
     stable_global_id,
 )
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 
 RESOURCE_ID = "RPT5W1C0"
@@ -52,6 +54,7 @@ class ReportObservationSaveRequest(BaseModel):
     defect_role: Literal["none", "major", "other"] = "none"
     is_extensive: bool = False
     selected_picture_file_name: str | None = None
+    selected_picture_media_id: str | None = None
     defect_callout: str | None = None
 
 
@@ -222,7 +225,7 @@ def _sync_error(error: SyncError) -> None:
 def _coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(user_id=str(user.id), employee_number=str(user.employee_id), email=str(user.email))
+            sync_identity(user)
         )
     except SyncError as error:
         _sync_error(error)
@@ -413,6 +416,7 @@ def _saved_pipes(pipes: list[ReportPipeSaveRequest], report_id: int) -> list[dic
                     "defect_role": observation.defect_role,
                     "is_extensive": observation.is_extensive,
                     "selected_picture_file_name": observation.selected_picture_file_name,
+                    "selected_picture_media_id": observation.selected_picture_media_id,
                     "defect_callout": observation.defect_callout,
                 }
                 for observation_index, observation in enumerate(group.observations, start=1)
@@ -901,6 +905,53 @@ def save_report(
 
 
 @router.delete("/api/reports/proactive-team-cctv-review/reports/{report_id}")
+def _user_defect_mlo_ids(pipes: list[Any]) -> set[str]:
+    """Reviewer-entered MLO ids referenced by a report's saved observation rows."""
+    found: set[str] = set()
+    for pipe in pipes:
+        if not isinstance(pipe, dict):
+            continue
+        for group in pipe.get("distance_groups") or []:
+            if not isinstance(group, dict):
+                continue
+            for observation in group.get("observations") or []:
+                mlo_id = str((observation or {}).get("mlo_id") or "")
+                if mlo_id.split("_", 1)[0] in user_observations.USER_MLO_PREFIXES:
+                    found.add(mlo_id)
+    return found
+
+
+def _user_defect_delete_mutations(
+    coordinator: Any, report_global_id: str, pipes: list[Any]
+) -> list[Mutation]:
+    """Delete the custom defects this report owns, sparing any another report uses.
+
+    A reviewer-entered defect lives in the shared MLO table, not inside the report,
+    so deleting the report alone would leave it behind to resurface in the next
+    report on the same pipe. The guard matters for the same reason in reverse: two
+    reports can cover one inspection, and the first deletion must not take defects
+    the surviving report still shows.
+    """
+    candidates = _user_defect_mlo_ids(pipes)
+    if not candidates:
+        return []
+    for observation_entity in coordinator.query_entities(CCTV_OBSERVATION_ENTITY_TYPE):
+        values = _entity_values(observation_entity) or {}
+        if str(values.get("report_global_id") or "") == report_global_id:
+            continue
+        candidates.discard(str(values.get("mlo_id") or ""))
+        if not candidates:
+            return []
+    entities = []
+    for mlo_id in sorted(candidates):
+        entity = coordinator.get_entity(
+            MLO_ENTITY_TYPE, stable_global_id("mlo", mlo_id)
+        )
+        if entity and not bool(entity.get("deleted")):
+            entities.append(entity)
+    return user_observations.delete_mutations(entities)
+
+
 def delete_report(
     report_id: int,
     current_user: User = Depends(get_current_user),
@@ -937,6 +988,9 @@ def delete_report(
         for mutation in _delete_mutations(coordinator, entity_type, entities)
     ]
     mutations.extend(_delete_mutations(coordinator, REVIEW_EVENT_ENTITY_TYPE, event_entities))
+    pipes = list(values.get("pipes") or [])
+    custom_defect_mutations = _user_defect_delete_mutations(coordinator, report_global_id, pipes)
+    mutations.extend(custom_defect_mutations)
     mutations.append(
         Mutation(
             entity_type=ENTITY_TYPE,
@@ -946,7 +1000,6 @@ def delete_report(
         )
     )
     _commit(current_user, mutations)
-    pipes = list(values.get("pipes") or [])
     return {
         "ok": True,
         "report_id": report_id,
@@ -961,6 +1014,7 @@ def delete_report(
                 if isinstance(group, dict)
             ),
             "events": len(event_entities),
+            "custom_defects": len(custom_defect_mutations),
         },
     }
 

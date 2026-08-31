@@ -106,6 +106,8 @@ export type DataCacheStatus = {
   publicationId: string
   lastCheckedAtEpoch: number
   localManifest: string
+  publicationSource: string
+  publicationOverlay: string
   updating: boolean
   totalCacheBytes: number
   sources: DataCacheSourceStatus[]
@@ -176,6 +178,32 @@ export async function checkPythonWorker() {
 export async function getBusinessSyncStatus() {
   if (!isDesktopRuntime()) throw new Error('Business synchronization is available only inside Tauri.')
   return invoke<BusinessSyncStatus>('business_sync_status')
+}
+
+/** Opens ITpipes in an app window so its session cookie lands in our own profile. */
+export async function openItpipesLogin() {
+  if (!isDesktopRuntime()) throw new Error('ITpipes sign-in is available only inside the desktop app.')
+  return invoke<void>('itpipes_open_login')
+}
+
+/** Closes the ITpipes sign-in window; the session survives in the shared profile. */
+export async function closeItpipesLogin() {
+  if (!isDesktopRuntime()) return
+  try {
+    await invoke<void>('itpipes_close_login')
+  } catch {
+    // Nothing to close is not a failure.
+  }
+}
+
+/** The ITpipes session cookie, or '' when nobody has signed in yet. */
+export async function itpipesSessionCookie() {
+  if (!isDesktopRuntime()) return ''
+  try {
+    return await invoke<string>('itpipes_session_cookie')
+  } catch {
+    return ''
+  }
 }
 
 export async function openExternalUrl(url: string) {

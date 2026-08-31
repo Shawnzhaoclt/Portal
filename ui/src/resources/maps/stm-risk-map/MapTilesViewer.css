@@ -423,7 +423,13 @@ html .theme-light .maplibregl-ctrl-attrib,
 .failure-source-badge.inventory { color: #075985; background: #dbeefe; }
 .failure-source-badge.simulated { color: #6b21a8; background: #f1e5ff; }
 
-.failure-defect-list { max-height: 150px; overflow: auto; border: 1px solid #c7d7e6; border-radius: 8px; }
+/* The list opens at about seven rows and the grip in its corner drags it
+   taller, up to three quarters of the panel. The default height lives on the
+   attribute rather than in a style prop, so a height the user dragged is inline
+   and survives every re-render. A list too short to scroll hugs its rows
+   instead, so the box is never mostly empty. */
+.failure-defect-list { min-height: 84px; max-height: 75vh; overflow: auto; border: 1px solid #c7d7e6; border-radius: 8px; resize: vertical; }
+.failure-defect-list[data-rows="many"] { height: min(32vh, 340px); }
 .failure-defect-row { width: 100%; gap: 8px; padding: 7px 9px; text-align: left; background: white; border: 0; border-bottom: 1px solid #d7e2ec; cursor: pointer; }
 .failure-defect-row:last-child { border-bottom: 0; }
 .failure-defect-row:hover { background: #f1f7fc; }
@@ -444,8 +450,10 @@ html .theme-light .maplibregl-ctrl-attrib,
 .failure-no-scenario span { display: block; }
 .failure-no-scenario strong { font-size: 12px; }
 .failure-no-scenario span { margin-top: 2px; color: #6f6548; font-size: 10px; line-height: 1.4; }
-.failure-simulate { display: grid; grid-template-columns: 138px minmax(0, 1fr); align-items: center; gap: 9px; margin-top: 8px; padding: 0; background: transparent; border: 0; }
-.failure-depth-method { color: #64768a; font-size: 10px; line-height: 1.35; }
+/* The caption reads as one line under the button rather than a three-line
+   paragraph squeezed beside it. */
+.failure-simulate { display: flex; flex-direction: column; align-items: flex-start; gap: 7px; margin-top: 8px; padding: 0; background: transparent; border: 0; }
+.failure-depth-method { max-width: 100%; overflow: hidden; color: #64768a; font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .failure-place-defect { display: inline-flex; min-width: 0; height: 36px; align-items: center; justify-content: center; gap: 7px; padding: 0 12px; color: white; background: #0877b6; border: 1px solid #0877b6; border-radius: 6px; font-size: 12px; font-weight: 800; white-space: nowrap; }
 .failure-place-defect:hover { background: #075f91; border-color: #075f91; }
 .failure-place-defect.cancel { color: #6b2d87; background: #f6ecfc; border-color: #b48aca; }

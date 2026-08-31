@@ -368,7 +368,7 @@
   margin-bottom: 13px;
 }
 
-label,
+.workbook-shell label,
 .boolean-filter > span,
 .range-filter > span,
 .switch-row > span {
@@ -378,8 +378,8 @@ label,
   text-transform: uppercase;
 }
 
-input,
-select {
+.workbook-shell input,
+.workbook-shell select {
   width: 100%;
   min-height: 36px;
   border: 1px solid var(--border);
@@ -390,8 +390,8 @@ select {
   outline: none;
 }
 
-input:focus,
-select:focus {
+.workbook-shell input:focus,
+.workbook-shell select:focus {
   border-color: var(--brand-blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-blue) 12%, transparent);
 }
@@ -716,7 +716,7 @@ summary {
   border-radius: var(--radius);
 }
 
-table {
+.workbook-shell table {
   width: 100%;
   min-width: 1120px;
   border-collapse: collapse;
@@ -883,15 +883,15 @@ table {
   background: #f7fafc;
 }
 
-thead {
+.workbook-shell thead {
   position: sticky;
   top: 0;
   z-index: 1;
   background: #dbe9ee;
 }
 
-th,
-td {
+.workbook-shell th,
+.workbook-shell td {
   border-bottom: 1px solid var(--border);
   padding: 4px 8px;
   line-height: 1.14;
@@ -899,7 +899,7 @@ td {
   white-space: nowrap;
 }
 
-td {
+.workbook-shell td {
   color: #344454;
 }
 
@@ -1646,8 +1646,8 @@ tbody tr:hover {
   color: #687386;
 }
 
-input,
-select,
+.workbook-shell input,
+.workbook-shell select,
 .input-with-icon,
 .search-box,
 .checklist-options,
@@ -1657,8 +1657,8 @@ select,
   background: rgba(255, 255, 255, 0.66);
 }
 
-input:focus,
-select:focus {
+.workbook-shell input:focus,
+.workbook-shell select:focus {
   border-color: var(--brand-blue);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-blue) 16%, transparent);
 }
@@ -1938,16 +1938,16 @@ select:focus {
   box-shadow: none;
 }
 
-thead {
+.workbook-shell thead {
   background: #d6e5f0;
 }
 
-th,
-td {
+.workbook-shell th,
+.workbook-shell td {
   border-bottom-color: rgba(188, 201, 219, 0.68);
 }
 
-td {
+.workbook-shell td {
   color: #334155;
 }
 
@@ -2550,8 +2550,8 @@ html.theme-dark .critical-team-view-content [data-slot='select-item']:focus * {
 .number-filter-input,
 .multi-filter-trigger,
 .page-size-select,
-input,
-select,
+.workbook-shell input,
+.workbook-shell select,
 .input-with-icon,
 .search-box,
 .checklist-options,
@@ -2594,8 +2594,8 @@ select,
   background: var(--panel-active-bg);
 }
 
-input:focus,
-select:focus,
+.workbook-shell input:focus,
+.workbook-shell select:focus,
 .number-filter-input:focus,
 .multi-filter-trigger:focus-visible,
 .date-picker-trigger:focus-visible {

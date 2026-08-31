@@ -23,6 +23,17 @@ class PublicationError(RuntimeError):
     """Raised when a producer output cannot be safely registered."""
 
 
+def _environment_root(shared_root: Path, environment: str) -> Path:
+    """Mirror of the software release channels: test publications live in an
+    isolated subtree so production desktops never see them."""
+    normalized = (environment or "production").strip().lower()
+    if normalized == "production":
+        return shared_root
+    if normalized == "test":
+        return shared_root / "test"
+    raise PublicationError("environment must be production or test.")
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -424,6 +435,7 @@ def publish(
     config_path: Path,
     producer_name: str,
     staged_overrides: dict[str, Path] | None = None,
+    environment: str = "production",
 ) -> dict[str, Any]:
     config_path = config_path.resolve()
     config = _read_json(config_path)
@@ -434,7 +446,10 @@ def publish(
     shared_root_value = str(config.get("sharedDataRoot") or "").strip()
     if not shared_root_value:
         raise PublicationError("sharedDataRoot is required in publication settings.")
-    shared_root = _resolve_path(shared_root_value, base=config_path.parent, variables=variables)
+    shared_root = _environment_root(
+        _resolve_path(shared_root_value, base=config_path.parent, variables=variables),
+        environment,
+    )
     variables["PORTAL_SHARED_DATA_ROOT"] = str(shared_root)
     central_path = _resolve_path(
         str(config.get("centralManifest") or "databases_local/portal-data.current.json"),
@@ -539,7 +554,9 @@ def publish(
     }
 
 
-def _publication_paths(config_path: Path) -> tuple[dict[str, Any], Path, Path, Path, dict[str, dict[str, Any]]]:
+def _publication_paths(
+    config_path: Path, environment: str = "production"
+) -> tuple[dict[str, Any], Path, Path, Path, dict[str, dict[str, Any]]]:
     config_path = config_path.resolve()
     config = _read_json(config_path)
     shared_root_value = str(config.get("sharedDataRoot") or "").strip()
@@ -549,7 +566,10 @@ def _publication_paths(config_path: Path) -> tuple[dict[str, Any], Path, Path, P
         "PORTAL_SHARED_DATA_ROOT": shared_root_value,
         "LOCALAPPDATA": os.environ.get("LOCALAPPDATA", ""),
     }
-    shared_root = _resolve_path(shared_root_value, base=config_path.parent, variables=variables)
+    shared_root = _environment_root(
+        _resolve_path(shared_root_value, base=config_path.parent, variables=variables),
+        environment,
+    )
     variables["PORTAL_SHARED_DATA_ROOT"] = str(shared_root)
     central_path = _resolve_path(
         str(config.get("centralManifest") or "databases_local/portal-data.current.json"),
@@ -575,8 +595,8 @@ def _record_path(record: dict[str, Any], shared_root: Path) -> Path:
     return path
 
 
-def recover_prepared(config_path: Path) -> dict[str, Any]:
-    _, shared_root, central_path, publications_directory, producers = _publication_paths(config_path)
+def recover_prepared(config_path: Path, environment: str = "production") -> dict[str, Any]:
+    _, shared_root, central_path, publications_directory, producers = _publication_paths(config_path, environment)
     recovered: list[str] = []
     for producer_name, definition in producers.items():
         journal_path = publications_directory / f"{producer_name}.transaction.json"
@@ -624,8 +644,8 @@ def recover_prepared(config_path: Path) -> dict[str, Any]:
     return {"status": "succeeded", "recovered": recovered, "recovered_count": len(recovered)}
 
 
-def check_publication(config_path: Path) -> dict[str, Any]:
-    _, shared_root, central_path, publications_directory, producers = _publication_paths(config_path)
+def check_publication(config_path: Path, environment: str = "production") -> dict[str, Any]:
+    _, shared_root, central_path, publications_directory, producers = _publication_paths(config_path, environment)
     prepared = []
     for producer_name in producers:
         journal_path = publications_directory / f"{producer_name}.transaction.json"
@@ -671,17 +691,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--producer")
     parser.add_argument("--stage-source", action="append", default=[], metavar="LOGICAL_ID=PATH")
     parser.add_argument("--recover-prepared", action="store_true")
+    parser.add_argument(
+        "--environment",
+        default="production",
+        choices=["production", "test"],
+        help="Publish into the production tree or the isolated test subtree.",
+    )
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.recover_prepared:
-            result = recover_prepared(args.config)
+            result = recover_prepared(args.config, args.environment)
         elif args.check:
-            result = check_publication(args.config)
+            result = check_publication(args.config, args.environment)
         else:
             if not args.producer:
                 raise PublicationError("--producer is required when publishing data versions.")
-            result = publish(args.config, args.producer, _parse_staged_overrides(args.stage_source))
+            result = publish(
+                args.config,
+                args.producer,
+                _parse_staged_overrides(args.stage_source),
+                args.environment,
+            )
     except Exception as exc:
         print(json.dumps({"status": "failed", "error": str(exc)}))
         return 1

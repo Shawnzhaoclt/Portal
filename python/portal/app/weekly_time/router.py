@@ -31,8 +31,8 @@ from portal.app.sync.errors import (
     SnapshotRequired,
     SyncError,
 )
-from portal.app.sync.models import Identity, Mutation
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.models import Mutation
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 
 RESOURCE_ID = "RPT7K2M9"
@@ -54,6 +54,10 @@ DEFAULT_DAILY_HOURS = (8.0, 8.0, 8.0, 8.0, 8.0, 0.0, 0.0)
 EDITABLE_STATUSES = {"draft", "returned"}
 REVIEWABLE_STATUS = "submitted"
 REOPENABLE_STATUS = "approved"
+# Any request the owner can still undo. Approved counts: its effect is the leave it
+# wrote, and withdrawing takes that back too, so long as the week is still open.
+WITHDRAWABLE_TIME_OFF_STATUSES = {"pending", "returned"}
+TIME_OFF_ENTRY_NOTE_PREFIX = "Approved time off:"
 LOCKED_WEEK_DETAIL = (
     "This week is locked. A manager or administrator must reopen it before it can be edited."
 )
@@ -181,11 +185,7 @@ def _sync_error(error: SyncError) -> None:
 def _coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(
-                user_id=str(user.id),
-                employee_number=str(user.employee_id),
-                email=str(user.email),
-            )
+            sync_identity(user)
         )
     except SyncError as error:
         _sync_error(error)
@@ -399,11 +399,16 @@ def _visible_user_ids(user: User, db: Session) -> set[int] | None:
 
 
 def _can_decide_for_owner(user: User, owner: User, db: Session) -> bool:
-    """Whether this reviewer may approve, return, or reopen that person's week."""
+    """Whether this reviewer may approve, return, or reopen that person's week.
+
+    Deciding your own week is restricted to Manage and Admin: a team reviewer
+    approves the team, not themselves, or the review step means nothing for the
+    person doing the reviewing.
+    """
     if _sees_every_employee(user):
         return True
     if owner.id == user.id:
-        return True
+        return bool(_resource_permission_types(db, user) & {"manage", "admin"})
     return owner.team_id is not None and owner.team_id in managed_team_scope_ids(db, user)
 
 
@@ -513,21 +518,23 @@ def _approved_time_off_days(user: User, owner_id: int, week_start: date) -> set[
     return result
 
 
-def ensure_entry_type_allowed_on_day(
-    work_date: date,
-    entry_type: str,
-    time_off_days: set[str],
+def ensure_time_off_day_holds_only_leave(
+    user: User, owner_id: int, week_start: date, work_date: date, entry_type_key: str
 ) -> None:
-    """A day taken off holds leave and nothing else.
+    """A day covered by approved time off holds only leave.
 
-    The eight-hour cap already leaves no room once the approved leave is written, but
-    that is arithmetic rather than intent: this says plainly that the day is off, so
-    the refusal reads as a rule instead of a full-day error.
+    The leave hours on such a day were written by the approval itself; recording
+    field or office work on top of them would double-book the day.
     """
-    if work_date.isoformat() in time_off_days and entry_type != "leave":
+    if entry_type_key == "leave":
+        return
+    if work_date.isoformat() in _approved_time_off_days(user, owner_id, week_start):
         raise HTTPException(
             status_code=409,
-            detail=f"{work_date.isoformat()} is approved time off; only leave can be recorded on it.",
+            detail=(
+                f"{work_date.isoformat()} is an approved day off - only leave can be"
+                " recorded on it."
+            ),
         )
 
 
@@ -536,13 +543,17 @@ def ensure_work_date_is_enterable(
     holidays: list[dict[str, Any]],
     scheduled_hours: float | None = None,
 ) -> None:
-    """Reject dates no time may be recorded on: weekends and fully-observed holidays."""
+    """Reject dates no time may be recorded on: weekends.
+
+    Holidays stopped blocking entry: they reduce the week's target, but people do
+    get called in on a holiday, and the eight-hour cap already bounds what a day
+    can hold. Only the weekend stays closed.
+    """
+    del holidays, scheduled_hours
     if work_date.weekday() >= 5:
         raise HTTPException(
             status_code=409, detail="Time entries cannot be added on Saturdays or Sundays."
         )
-    if day_hours_allowance(work_date, holidays, scheduled_hours) <= 0:
-        raise HTTPException(status_code=409, detail="Time entries cannot be added on a holiday.")
 
 
 def ensure_daily_hours_within_limit(
@@ -1009,6 +1020,396 @@ def export_weekly_insights(
     )
 
 
+STATISTICS_BUCKETS = ("total", "day", "week", "month", "quarter", "year")
+
+
+def _statistics_bucket_key(work_date: date, bucket: str) -> str:
+    if bucket == "day":
+        return work_date.isoformat()
+    if bucket == "week":
+        return (work_date - timedelta(days=work_date.weekday())).isoformat()
+    if bucket == "month":
+        return f"{work_date.year:04d}-{work_date.month:02d}"
+    if bucket == "quarter":
+        return f"{work_date.year:04d}-Q{(work_date.month - 1) // 3 + 1}"
+    return f"{work_date.year:04d}"
+
+
+def _statistics_buckets(window_start: date, counted_through: date, bucket: str) -> list[dict[str, str]]:
+    """Ordered, gap-free periods covering the counted window."""
+    buckets: list[dict[str, str]] = []
+    seen: set[str] = set()
+    cursor = window_start
+    while cursor <= counted_through:
+        key = _statistics_bucket_key(cursor, bucket)
+        if key not in seen:
+            seen.add(key)
+            if bucket == "day":
+                label = f"{cursor.month}/{cursor.day}"
+            elif bucket == "week":
+                monday = cursor - timedelta(days=cursor.weekday())
+                label = f"Wk {monday.month}/{monday.day}"
+            elif bucket == "month":
+                label = cursor.strftime("%b %Y")
+            elif bucket == "quarter":
+                label = f"Q{(cursor.month - 1) // 3 + 1} {cursor.year}"
+            else:
+                label = str(cursor.year)
+            buckets.append({"key": key, "label": label})
+        cursor += timedelta(days=1)
+    return buckets
+
+
+
+@router.get("/api/reports/weekly-time/statistics")
+def weekly_statistics(
+    start: str,
+    end: str,
+    bucket: str = "total",
+    entry_type: str | None = None,
+    team: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Per-person summary figures for a chosen range, one card per visible user.
+
+    Visibility follows the review scope: a plain user sees only themselves, a
+    manager sees their team, and admins see everyone. Other people's hours count
+    only submitted and approved weeks; your own card includes drafts, since its
+    point is spotting the day you forgot to fill in.
+    """
+    _require_resource_permission(db, current_user, *PERMISSION_TYPES)
+    try:
+        window_start, window_end = date.fromisoformat(start), date.fromisoformat(end)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail="Dates must use YYYY-MM-DD format.") from error
+    if window_end < window_start:
+        raise HTTPException(status_code=400, detail="The end date must not precede the start date.")
+    if (window_end - window_start).days > 800:
+        raise HTTPException(status_code=400, detail="Summarize at most about two years at a time.")
+    bucket = str(bucket or "total").lower()
+    if bucket not in STATISTICS_BUCKETS:
+        raise HTTPException(status_code=400, detail="Group by day, week, month, quarter, year, or total.")
+    counted_through = min(window_end, date.today())
+    type_filter = (entry_type or "").strip().lower() or None
+    self_bucket_kind = bucket
+    period_buckets = (
+        _statistics_buckets(window_start, counted_through, bucket) if bucket != "total" else []
+    )
+    if len(period_buckets) > 200:
+        raise HTTPException(
+            status_code=400,
+            detail="That grouping makes too many periods - pick a coarser grouping or a shorter range.",
+        )
+
+    people, _everyone = _reviewable_people(current_user, db)
+    # The team list stays whole while a filter is applied, so the picker keeps
+    # every choice it started with.
+    teams = sorted({person.team.name for person in people if person.team})
+    team_filter = (team or "").strip() or None
+    if team_filter:
+        people = [
+            person for person in people
+            if (person.team.name if person.team else None) == team_filter
+        ]
+    ids = {person.id for person in people}
+
+    holidays: set[str] = set()
+    week_cursor = window_start - timedelta(days=window_start.weekday())
+    while week_cursor <= counted_through:
+        for item in _holidays_for_week(current_user, week_cursor):
+            holidays.add(str(item["date"]))
+        week_cursor += timedelta(days=7)
+    working_days = 0
+    cursor = window_start
+    while cursor <= counted_through:
+        if cursor.weekday() < 5 and cursor.isoformat() not in holidays:
+            working_days += 1
+        cursor += timedelta(days=1)
+
+    status_by: dict[tuple[int, str], str] = {}
+    for _, values in _entities(current_user, SUBMISSION_ENTITY_TYPE):
+        user_id = int(values.get("user_id") or 0)
+        if user_id in ids:
+            status_by[(user_id, str(values.get("week_start")))] = str(values.get("status") or "draft")
+
+    per: dict[int, dict[str, Any]] = {
+        person.id: {"total": 0.0, "types": {}, "days": set(), "periods": {}} for person in people
+    }
+    for _, values in _entities(current_user, ENTRY_ENTITY_TYPE):
+        user_id = int(values.get("user_id") or 0)
+        if user_id not in per:
+            continue
+        try:
+            work_date = date.fromisoformat(str(values.get("work_date")))
+        except ValueError:
+            continue
+        if not window_start <= work_date <= counted_through:
+            continue
+        if user_id != current_user.id:
+            week_key = (work_date - timedelta(days=work_date.weekday())).isoformat()
+            if status_by.get((user_id, week_key), "draft") not in INSIGHTS_COUNTED_STATUSES:
+                continue
+        type_key = str(values.get("entry_type") or "other")
+        if type_filter and type_key != type_filter:
+            continue
+        hours = float(values.get("hours") or 0)
+        bucket = per[user_id]
+        bucket["total"] = round(bucket["total"] + hours, 2)
+        bucket["types"][type_key] = round(bucket["types"].get(type_key, 0.0) + hours, 2)
+        if period_buckets:
+            period_key = _statistics_bucket_key(work_date, self_bucket_kind)
+            bucket["periods"][period_key] = round(bucket["periods"].get(period_key, 0.0) + hours, 2)
+        if hours > 0 and work_date.weekday() < 5 and work_date.isoformat() not in holidays:
+            bucket["days"].add(work_date.isoformat())
+
+    cards = [
+        {
+            "user_id": person.id,
+            "name": _display_name(person),
+            "team_name": person.team.name if person.team else None,
+            "own": person.id == current_user.id,
+            "total_hours": per[person.id]["total"],
+            "logged_days": len(per[person.id]["days"]),
+            "missing_days": max(0, working_days - len(per[person.id]["days"])),
+            "leave_hours": per[person.id]["types"].get("leave", 0.0),
+            "types": per[person.id]["types"],
+            "bucket_hours": per[person.id]["periods"],
+        }
+        for person in people
+    ]
+    cards.sort(key=lambda card: (not card["own"], str(card["name"]).lower()))
+    return {
+        "start": window_start.isoformat(),
+        "end": window_end.isoformat(),
+        "counted_through": counted_through.isoformat(),
+        "working_days": working_days,
+        "entry_type": type_filter,
+        "team": team_filter,
+        "teams": teams,
+        "bucket": self_bucket_kind,
+        "buckets": period_buckets,
+        "cards": cards,
+    }
+
+
+@router.get("/api/reports/weekly-time/statistics/export")
+def export_weekly_statistics(
+    start: str,
+    end: str,
+    bucket: str = "total",
+    entry_type: str | None = None,
+    team: str | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    """The statistics cards as a workbook, one row per visible person."""
+    report = weekly_statistics(
+        start=start, end=end, bucket=bucket, entry_type=entry_type, team=team,
+        current_user=current_user, db=db,
+    )
+    entry_types = [_serialize_entry_type(item) for item in _entry_types(db, include_inactive=True)]
+    used_keys = {key for card in report["cards"] for key in card["types"]}
+    type_columns = [
+        item for item in entry_types
+        if item["is_active"] or item["type_key"] in used_keys
+    ]
+
+    columns = [
+        ExcelColumn("name", "Person", 26),
+        ExcelColumn("team", "Team", 22),
+        ExcelColumn("total", "Total hours", 13, "number"),
+        ExcelColumn("avg_week", "Avg hours/week", 15, "number"),
+        ExcelColumn("logged", "Days logged", 13, "number"),
+        ExcelColumn("working", "Working days", 13, "number"),
+        ExcelColumn("missing", "Days missing", 13, "number"),
+        *(
+            (ExcelColumn(f"period_{item['key']}", str(item["label"]), 12, "number") for item in report["buckets"])
+            if report["buckets"]
+            else (ExcelColumn(f"type_{item['type_key']}", str(item["label"]), 14, "number") for item in type_columns)
+        ),
+    ]
+    working_days = int(report["working_days"])
+    rows = [
+        {
+            "name": card["name"],
+            "team": card["team_name"],
+            "total": float(card["total_hours"]),
+            "avg_week": round(float(card["total_hours"]) / (working_days / 5), 2) if working_days else None,
+            "logged": int(card["logged_days"]),
+            "working": working_days,
+            "missing": int(card["missing_days"]),
+            **(
+                {
+                    f"period_{item['key']}": float(card["bucket_hours"].get(item["key"], 0) or 0) or None
+                    for item in report["buckets"]
+                }
+                if report["buckets"]
+                else {
+                    f"type_{item['type_key']}": float(card["types"].get(item["type_key"], 0) or 0) or None
+                    for item in type_columns
+                }
+            ),
+        }
+        for card in report["cards"]
+    ]
+    sheets = [
+        ExcelSheet(
+            name="Statistics",
+            title="Weekly time statistics",
+            columns=columns,
+            rows=rows,
+            filters={
+                "Range": f"{report['start']} to {report['end']}",
+                "Grouped by": str(report["bucket"]).title(),
+                "Work type": report["entry_type"] or "All",
+                "Team": report["team"] or "All",
+                "Counted through": report["counted_through"],
+                "Included": "Own card includes drafts; others count submitted and approved weeks only",
+            },
+        )
+    ]
+    content = build_portal_excel_workbook(
+        report_title="Weekly Time Statistics",
+        sheets=sheets,
+        exported_by=f"{_display_name(current_user)} ({current_user.employee_id})",
+    )
+    filename = f"Weekly-Time-Statistics-{report['start']}-to-{report['end']}.xlsx"
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/api/reports/weekly-time/heatmap")
+def weekly_heatmap(
+    year: int | None = None,
+    mode: str = "calendar",
+    start: str | None = None,
+    end: str | None = None,
+    user_id: int | None = None,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """A year of recorded hours, one value per day, for the calendar heatmap.
+
+    Your own calendar includes drafts - its point is spotting the day you forgot
+    to fill in, which a submitted-only view would hide. Someone else's calendar
+    shows only what reached review, like every other cross-person surface here.
+    """
+    _require_resource_permission(db, current_user, *PERMISSION_TYPES)
+    owner = get_user_or_404(db, user_id) if user_id else current_user
+    if owner.id != current_user.id:
+        visible = _visible_user_ids(current_user, db)
+        if visible is not None and owner.id not in visible:
+            raise HTTPException(status_code=403, detail="You cannot view this employee's calendar.")
+    own_calendar = owner.id == current_user.id
+
+    status_by_week: dict[str, str] = {}
+    for _, values in _entities(current_user, SUBMISSION_ENTITY_TYPE):
+        if int(values.get("user_id") or 0) == owner.id:
+            status_by_week[str(values.get("week_start"))] = str(values.get("status") or "draft")
+
+    fiscal = str(mode).lower() == "fiscal"
+    today = date.today()
+    if year:
+        chosen = int(year)
+    elif fiscal:
+        # The fiscal year is named by its STARTING July: before July 1 we are
+        # still inside the fiscal year that began last July.
+        chosen = today.year if today.month >= 7 else today.year - 1
+    else:
+        chosen = today.year
+    mode_label = "fiscal" if fiscal else "calendar"
+    if start and end:
+        # An explicit range overrides the year window - the statistics tab lets
+        # people summarize any period they like.
+        try:
+            window_start, window_end = date.fromisoformat(start), date.fromisoformat(end)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail="Dates must use YYYY-MM-DD format.") from error
+        if window_end < window_start:
+            raise HTTPException(status_code=400, detail="The end date must not precede the start date.")
+        if (window_end - window_start).days > 800:
+            raise HTTPException(status_code=400, detail="Summarize at most about two years at a time.")
+        chosen = window_start.year
+        mode_label = "custom"
+    elif fiscal:
+        window_start, window_end = date(chosen, 7, 1), date(chosen + 1, 6, 30)
+    else:
+        window_start, window_end = date(chosen, 1, 1), date(chosen, 12, 31)
+
+    # Every year with a published holiday calendar in system.db is selectable,
+    # not just years that already hold entries.
+    calendar_entity_type = HOLIDAY_ENTITY_TYPE.rsplit(".", 1)[0] + ".holiday_calendar"
+    available_years: set[int] = {today.year}
+    for _, calendar_values in _entities(current_user, calendar_entity_type):
+        calendar_year = int(calendar_values.get("calendar_year") or 0)
+        if calendar_year:
+            available_years.add(calendar_year)
+
+    days: dict[str, dict[str, Any]] = {}
+    for _, values in _entities(current_user, ENTRY_ENTITY_TYPE):
+        if int(values.get("user_id") or 0) != owner.id:
+            continue
+        try:
+            work_date = date.fromisoformat(str(values.get("work_date")))
+        except ValueError:
+            continue
+        available_years.add(work_date.year)
+        if not window_start <= work_date <= window_end:
+            continue
+        week_start = (work_date - timedelta(days=work_date.weekday())).isoformat()
+        status = status_by_week.get(week_start, "draft")
+        if not own_calendar and status not in INSIGHTS_COUNTED_STATUSES:
+            continue
+        entry_type = str(values.get("entry_type") or "other")
+        hours = float(values.get("hours") or 0)
+        day = days.setdefault(
+            str(values.get("work_date")), {"hours": 0.0, "types": {}, "status": status}
+        )
+        day["hours"] = round(day["hours"] + hours, 2)
+        day["types"][entry_type] = round(day["types"].get(entry_type, 0.0) + hours, 2)
+
+    if fiscal:
+        # A calendar year overlaps two fiscal windows, so its predecessor is a
+        # valid fiscal start year too.
+        available_years |= {value - 1 for value in set(available_years)}
+
+    holidays = []
+    week_cursor = window_start - timedelta(days=window_start.weekday())
+    while week_cursor <= window_end:
+        for item in _holidays_for_week(current_user, week_cursor):
+            item_date = date.fromisoformat(str(item["date"]))
+            if window_start <= item_date <= window_end:
+                holidays.append({"date": item["date"], "name": item["name"]})
+        week_cursor += timedelta(days=7)
+    unique_holidays = list({str(item["date"]): item for item in holidays}.values())
+
+    people = (
+        [
+            {"user_id": person.id, "name": _display_name(person)}
+            for person in _reviewable_people(current_user, db)[0]
+        ]
+        if _can_review(current_user, db)
+        else []
+    )
+    return {
+        "year": chosen,
+        "mode": mode_label,
+        "window_start": window_start.isoformat(),
+        "window_end": window_end.isoformat(),
+        "available_years": sorted(available_years, reverse=True),
+        "owner": {"user_id": owner.id, "name": _display_name(owner)},
+        "own_calendar": own_calendar,
+        "people": people,
+        "days": [{"date": key, **value} for key, value in sorted(days.items())],
+        "holidays": sorted(unique_holidays, key=lambda item: str(item["date"])),
+        "max_daily": MAX_DAILY_HOURS,
+    }
+
+
 @router.get("/api/reports/weekly-time/context")
 def weekly_context(
     week_start: str = Query(...),
@@ -1043,10 +1444,8 @@ def create_entry(
     schedule = _schedule_for_week(current_user, current_user.id, week_start)
     scheduled_today = schedule[work_date.weekday()]
     ensure_work_date_is_enterable(work_date, holidays, scheduled_today)
-    ensure_entry_type_allowed_on_day(
-        work_date,
-        entry_type.item_code,
-        _approved_time_off_days(current_user, current_user.id, week_start),
+    ensure_time_off_day_holds_only_leave(
+        current_user, current_user.id, week_start, work_date, payload.entry_type.strip().lower()
     )
     found = _find_submission(current_user, owner_user_id=current_user.id, week_start=week_start)
     submission_entity, submission = found if found else (None, _submission_values(current_user, week_start))
@@ -1054,11 +1453,7 @@ def create_entry(
         raise HTTPException(status_code=409, detail=LOCKED_WEEK_DETAIL)
     entry_hours = calculate_entry_hours(payload.hours, payload.start_time, payload.end_time)
     ensure_daily_hours_within_limit(
-        current_user,
-        str(submission["submission_id"]),
-        work_date,
-        entry_hours,
-        allowance=day_hours_allowance(work_date, holidays, scheduled_today),
+        current_user, str(submission["submission_id"]), work_date, entry_hours
     )
     now = utc_now_text()
     submission["updated_at"] = now
@@ -1100,67 +1495,6 @@ def create_entry(
     return _context_for(current_user, current_user, week_start, db)
 
 
-@router.put("/api/reports/weekly-time/entries/{entry_id}")
-def update_entry(
-    entry_id: str,
-    payload: EntrySaveRequest,
-    current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> dict[str, Any]:
-    _require_resource_permission(db, current_user, "edit", "manage", "admin")
-    week_start = parse_week_start(payload.week_start)
-    work_date = parse_work_date(payload.work_date, week_start)
-    holidays = _holidays_for_week(current_user, week_start)
-    schedule = _schedule_for_week(current_user, current_user.id, week_start)
-    scheduled_today = schedule[work_date.weekday()]
-    ensure_work_date_is_enterable(work_date, holidays, scheduled_today)
-    time_off_days = _approved_time_off_days(current_user, current_user.id, week_start)
-    entity = _coordinator(current_user).get_entity(ENTRY_ENTITY_TYPE, entry_id)
-    values = _entity_values(entity)
-    if not entity or not values or int(values.get("user_id") or 0) != current_user.id:
-        raise HTTPException(status_code=404, detail="Time entry was not found.")
-    found = _find_submission(current_user, submission_id=str(values.get("submission_id")))
-    if not found or str(found[1].get("status")) not in EDITABLE_STATUSES:
-        raise HTTPException(status_code=409, detail=LOCKED_WEEK_DETAIL)
-    requested_entry_type = payload.entry_type.strip().lower()
-    ensure_entry_type_allowed_on_day(work_date, requested_entry_type, time_off_days)
-    if requested_entry_type != str(values.get("entry_type") or ""):
-        _require_active_entry_type(db, requested_entry_type)
-    entry_hours = calculate_entry_hours(payload.hours, payload.start_time, payload.end_time)
-    ensure_daily_hours_within_limit(
-        current_user,
-        str(values.get("submission_id")),
-        work_date,
-        entry_hours,
-        exclude_entry_id=entry_id,
-        allowance=day_hours_allowance(work_date, holidays, scheduled_today),
-    )
-    values.update(
-        {
-            "entry_type": requested_entry_type,
-            "work_date": work_date.isoformat(),
-            "hours": entry_hours,
-            "start_time": (payload.start_time or "").strip() or None,
-            "end_time": (payload.end_time or "").strip() or None,
-            "notes": (payload.notes or "").strip() or None,
-            "updated_at": utc_now_text(),
-        }
-    )
-    _commit(
-        current_user,
-        [
-            Mutation(
-                entity_type=ENTRY_ENTITY_TYPE,
-                entity_id=entry_id,
-                operation_type="update_entity",
-                base_record_revision=str(entity["record_revision"]),
-                values=values,
-            )
-        ],
-    )
-    return _context_for(current_user, current_user, week_start, db)
-
-
 class GridCell(BaseModel):
     work_date: str
     entry_type: str
@@ -1195,8 +1529,6 @@ def save_week_grid(
     submission_id = str(submission["submission_id"])
     holidays = _holidays_for_week(current_user, week_start)
     schedule = _schedule_for_week(current_user, current_user.id, week_start)
-    time_off_days = _approved_time_off_days(current_user, current_user.id, week_start)
-
     existing: dict[tuple[str, str], list[tuple[dict[str, Any], dict[str, Any]]]] = {}
     for entity, values in _entities(current_user, ENTRY_ENTITY_TYPE):
         if str(values.get("submission_id")) != submission_id:
@@ -1213,8 +1545,10 @@ def save_week_grid(
             raise HTTPException(status_code=400, detail="Hours cannot be negative.")
         if hours:
             ensure_work_date_is_enterable(work_date, holidays, schedule[work_date.weekday()])
-            ensure_entry_type_allowed_on_day(work_date, entry_type, time_off_days)
             _require_active_entry_type(db, entry_type)
+            ensure_time_off_day_holds_only_leave(
+                current_user, current_user.id, week_start, work_date, entry_type
+            )
         requested[(work_date.isoformat(), entry_type)] = hours
 
     daily_totals: dict[str, float] = {}
@@ -1230,12 +1564,10 @@ def save_week_grid(
             2,
         )
     for work_date_text, total in daily_totals.items():
-        day = date.fromisoformat(work_date_text)
-        limit = day_hours_allowance(day, holidays, schedule[day.weekday()])
-        if total > limit:
+        if total > MAX_DAILY_HOURS:
             raise HTTPException(
                 status_code=409,
-                detail=f"{work_date_text} totals {total:g} hours; a day can hold at most {limit:g}.",
+                detail=f"{work_date_text} totals {total:g} hours; a day can hold at most {MAX_DAILY_HOURS:g}.",
             )
 
     now = utc_now_text()
@@ -1335,6 +1667,67 @@ def save_week_grid(
         "updated": updated,
         "removed": removed,
     }
+
+
+@router.put("/api/reports/weekly-time/entries/{entry_id}")
+def update_entry(
+    entry_id: str,
+    payload: EntrySaveRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _require_resource_permission(db, current_user, "edit", "manage", "admin")
+    week_start = parse_week_start(payload.week_start)
+    work_date = parse_work_date(payload.work_date, week_start)
+    holidays = _holidays_for_week(current_user, week_start)
+    schedule = _schedule_for_week(current_user, current_user.id, week_start)
+    scheduled_today = schedule[work_date.weekday()]
+    ensure_work_date_is_enterable(work_date, holidays, scheduled_today)
+    entity = _coordinator(current_user).get_entity(ENTRY_ENTITY_TYPE, entry_id)
+    values = _entity_values(entity)
+    if not entity or not values or int(values.get("user_id") or 0) != current_user.id:
+        raise HTTPException(status_code=404, detail="Time entry was not found.")
+    found = _find_submission(current_user, submission_id=str(values.get("submission_id")))
+    if not found or str(found[1].get("status")) not in EDITABLE_STATUSES:
+        raise HTTPException(status_code=409, detail=LOCKED_WEEK_DETAIL)
+    requested_entry_type = payload.entry_type.strip().lower()
+    if requested_entry_type != str(values.get("entry_type") or ""):
+        _require_active_entry_type(db, requested_entry_type)
+    ensure_time_off_day_holds_only_leave(
+        current_user, current_user.id, week_start, work_date, requested_entry_type
+    )
+    entry_hours = calculate_entry_hours(payload.hours, payload.start_time, payload.end_time)
+    ensure_daily_hours_within_limit(
+        current_user,
+        str(values.get("submission_id")),
+        work_date,
+        entry_hours,
+        exclude_entry_id=entry_id,
+    )
+    values.update(
+        {
+            "entry_type": requested_entry_type,
+            "work_date": work_date.isoformat(),
+            "hours": entry_hours,
+            "start_time": (payload.start_time or "").strip() or None,
+            "end_time": (payload.end_time or "").strip() or None,
+            "notes": (payload.notes or "").strip() or None,
+            "updated_at": utc_now_text(),
+        }
+    )
+    _commit(
+        current_user,
+        [
+            Mutation(
+                entity_type=ENTRY_ENTITY_TYPE,
+                entity_id=entry_id,
+                operation_type="update_entity",
+                base_record_revision=str(entity["record_revision"]),
+                values=values,
+            )
+        ],
+    )
+    return _context_for(current_user, current_user, week_start, db)
 
 
 @router.post("/api/reports/weekly-time/copy-previous-week")
@@ -1603,15 +1996,42 @@ def review_queue(
         reverse=True,
     )
     time_off_requests = []
+    approved_horizon = (date.today() - timedelta(days=60)).isoformat()
     for _, values in _entities(current_user, TIME_OFF_ENTITY_TYPE):
-        if str(values.get("status")) != "pending":
+        row_status = str(values.get("status"))
+        if row_status == "approved":
+            # Recent approvals stay visible so a reviewer can return one, which
+            # is now the only way an owner regains the right to withdraw it.
+            if str(values.get("week_end")) < approved_horizon:
+                continue
+        elif row_status != "pending":
             continue
         if visible is None or int(values.get("user_id") or 0) in visible:
-            time_off_requests.append(dict(values))
+            row = dict(values)
+            # Approving writes leave onto the week, which only works while the week is
+            # open. Sending its status along lets the page say so before the click
+            # instead of after a refusal.
+            found = _find_submission(
+                current_user,
+                owner_user_id=int(values.get("user_id") or 0),
+                week_start=parse_week_start(str(values.get("week_start"))),
+            )
+            row["week_status"] = str(found[1].get("status")) if found else "draft"
+            time_off_requests.append(row)
     time_off_requests.sort(key=lambda item: str(item.get("created_at")), reverse=True)
+    # Recently decided weeks stay reachable so an approval can be reopened
+    # without the old matrix - e.g. to let a late time-off withdrawal through.
+    recent = [
+        dict(values)
+        for _, values in _entities(current_user, SUBMISSION_ENTITY_TYPE)
+        if str(values.get("status")) in ("approved", "returned")
+        and (visible is None or int(values.get("user_id") or 0) in visible)
+    ]
+    recent.sort(key=lambda item: str(item.get("reviewed_at") or ""), reverse=True)
     return {
         "submissions": submissions,
         "time_off_requests": time_off_requests,
+        "recent": recent[:20],
         "can_reopen": _can_reopen(current_user, db),
     }
 
@@ -1726,7 +2146,12 @@ def review_matrix(
     for row in rows:
         for cell in row["cells"].values():
             counts[cell["status"]] = counts.get(cell["status"], 0) + 1
-    missing = sum(len(window) - len(row["cells"]) for row in rows)
+    # Only weeks that have fully ended count as missing: the running week is not
+    # overdue, it is simply not finished.
+    completed_weeks = {
+        week.isoformat() for week in week_starts if week + timedelta(days=7) <= today
+    }
+    missing = sum(len(completed_weeks - set(row["cells"])) for row in rows)
 
     teams: dict[int, str] = {}
     for person in roster:
@@ -1738,6 +2163,7 @@ def review_matrix(
             {
                 "week_start": week.isoformat(),
                 "week_end": (week + timedelta(days=6)).isoformat(),
+                "current": week == today - timedelta(days=today.weekday()),
             }
             for week in week_starts
         ],
@@ -1919,8 +2345,39 @@ def review_submission(
     return _context_for(current_user, owner, parse_week_start(str(submission["week_start"])), db)
 
 
-def _time_off_row(owner: User, week_start: date, daily_hours: list[float], reason: str) -> dict[str, Any]:
-    now = utc_now_text()
+def _time_off_siblings(
+    user: User, anchor: dict[str, Any], statuses: set[str]
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """Every row belonging to the same multi-week request as the anchor.
+
+    One request for a range is stored as one row per covered week; the rows share
+    the owner, the reason and the creation instant. Decisions and withdrawals act
+    on the whole set so a long vacation is never left half-approved.
+    """
+
+    def moment(text: object) -> float:
+        try:
+            return datetime.fromisoformat(str(text).replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return 0.0
+
+    anchor_at = moment(anchor.get("created_at"))
+    rows = [
+        (entity, values)
+        for entity, values in _entities(user, TIME_OFF_ENTITY_TYPE)
+        if int(values.get("user_id") or 0) == int(anchor.get("user_id") or 0)
+        and str(values.get("reason") or "") == str(anchor.get("reason") or "")
+        and str(values.get("status")) in statuses
+        and abs(moment(values.get("created_at")) - anchor_at) < 5.0
+    ]
+    rows.sort(key=lambda item: str(item[1].get("week_start")))
+    return rows
+
+
+def _time_off_row(
+    owner: User, week_start: date, daily_hours: list[float], reason: str, now: str | None = None
+) -> dict[str, Any]:
+    now = now or utc_now_text()
     return {
         "request_id": str(uuid.uuid4()),
         "user_id": owner.id,
@@ -1989,6 +2446,39 @@ def request_time_off(
             detail="That range has no working days - it is all weekends and holidays.",
         )
 
+    # A day that already holds non-leave work cannot be requested off: once the
+    # approval writes the leave, that day would be double-booked. The person
+    # removes the work (or shortens the range) first.
+    conflicts: set[str] = set()
+    for week_start, daily_hours in by_week.items():
+        found = _find_submission(current_user, owner_user_id=current_user.id, week_start=week_start)
+        if not found:
+            continue
+        submission_id = str(found[1].get("submission_id"))
+        covered = {
+            (week_start + timedelta(days=index)).isoformat()
+            for index, hours in enumerate(daily_hours)
+            if hours > 0
+        }
+        for _, entry in _entities(current_user, ENTRY_ENTITY_TYPE):
+            if str(entry.get("submission_id")) != submission_id:
+                continue
+            if str(entry.get("entry_type")) == "leave":
+                continue
+            if float(entry.get("hours") or 0) <= 0:
+                continue
+            if str(entry.get("work_date")) in covered:
+                conflicts.add(str(entry.get("work_date")))
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Work is already recorded on: " + ", ".join(sorted(conflicts))
+                + ". Remove that work or shorten the range - a day off cannot hold"
+                " other work."
+            ),
+        )
+
     existing_weeks = {
         str(values.get("week_start"))
         for _, values in _entities(current_user, TIME_OFF_ENTITY_TYPE)
@@ -1996,6 +2486,7 @@ def request_time_off(
         and str(values.get("status")) in ("pending", "approved")
     }
     mutations: list[Mutation] = []
+    batch_now = utc_now_text()
     for week_start, daily_hours in sorted(by_week.items()):
         if week_start.isoformat() in existing_weeks:
             raise HTTPException(
@@ -2005,7 +2496,7 @@ def request_time_off(
                     f"{week_start.isoformat()}. Withdraw it before asking again."
                 ),
             )
-        row = _time_off_row(current_user, week_start, daily_hours, reason)
+        row = _time_off_row(current_user, week_start, daily_hours, reason, batch_now)
         mutations.append(
             Mutation(
                 entity_type=TIME_OFF_ENTITY_TYPE,
@@ -2042,37 +2533,102 @@ def withdraw_time_off(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """Take back a request that has not been decided yet."""
+    """Take back a time-off request, including one already approved.
+
+    An approved request is not just a row: it wrote leave onto the week, so withdrawing
+    removes those entries as well. That is only safe while the week is still open -
+    once it has gone to a reviewer the leave is part of what they saw, and the week has
+    to be reopened first.
+    """
     _require_resource_permission(db, current_user, "create", "edit", "manage", "admin")
     entity = _coordinator(current_user).get_entity(TIME_OFF_ENTITY_TYPE, request_id)
     values = _entity_values(entity)
     if not entity or not values or int(values.get("user_id") or 0) != current_user.id:
         raise HTTPException(status_code=404, detail="Time-off request was not found.")
-    if str(values.get("status")) != "pending":
-        raise HTTPException(status_code=409, detail="Only a pending request can be withdrawn.")
-    week_start = parse_week_start(str(values["week_start"]))
-    _commit(
-        current_user,
-        [
+    from_status = str(values.get("status") or "")
+    if from_status == "approved":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Approved time off can no longer be withdrawn - ask a reviewer to"
+                " return it first."
+            ),
+        )
+    if from_status not in WITHDRAWABLE_TIME_OFF_STATUSES:
+        raise HTTPException(status_code=409, detail="This request can no longer be withdrawn.")
+
+    # The whole multi-week request goes together: withdrawing one week of a
+    # vacation while its siblings stay pending would leave a half-request.
+    group = _time_off_siblings(current_user, values, WITHDRAWABLE_TIME_OFF_STATUSES)
+    if not any(str(v.get("request_id")) == request_id for _, v in group):
+        group.insert(0, (entity, values))
+    mutations: list[Mutation] = []
+    for row_entity, row_values in group:
+        week_start = parse_week_start(str(row_values["week_start"]))
+        row_status = str(row_values.get("status") or "")
+        removed_leave: list[Mutation] = []
+        if row_status == "approved":
+            found = _find_submission(current_user, owner_user_id=current_user.id, week_start=week_start)
+            if found and str(found[1].get("status")) not in EDITABLE_STATUSES:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"The week of {week_start.isoformat()} has already been submitted. "
+                        "Ask a manager to reopen it before withdrawing the approved time off."
+                    ),
+                )
+            submission_id = str(found[1]["submission_id"]) if found else None
+            covered = {
+                (week_start + timedelta(days=index)).isoformat()
+                for index, hours in enumerate(row_values.get("daily_hours") or [])
+                if float(hours or 0) > 0
+            }
+            for entry_entity, entry in _entities(current_user, ENTRY_ENTITY_TYPE):
+                # Only the leave this approval wrote: matched on the day, the type
+                # and the note it stamped, so hand-entered leave is left alone.
+                if submission_id and str(entry.get("submission_id")) != submission_id:
+                    continue
+                if str(entry.get("entry_type")) != "leave":
+                    continue
+                if str(entry.get("work_date")) not in covered:
+                    continue
+                if not str(entry.get("notes") or "").startswith(TIME_OFF_ENTRY_NOTE_PREFIX):
+                    continue
+                removed_leave.append(
+                    Mutation(
+                        entity_type=ENTRY_ENTITY_TYPE,
+                        entity_id=str(entry_entity["entity_id"]),
+                        operation_type="delete_entity",
+                        base_record_revision=str(entry_entity["record_revision"]),
+                    )
+                )
+        mutations.extend(removed_leave)
+        mutations.append(
             Mutation(
                 entity_type=TIME_OFF_ENTITY_TYPE,
-                entity_id=request_id,
+                entity_id=str(row_values["request_id"]),
                 operation_type="delete_entity",
-                base_record_revision=str(entity["record_revision"]),
-            ),
+                base_record_revision=str(row_entity["record_revision"]),
+            )
+        )
+        mutations.append(
             _event_mutation(
                 current_user,
                 subject_user_id=current_user.id,
                 submission_id=None,
                 event_type="time_off_withdrawn",
                 week_start=week_start,
-                from_status="pending",
+                from_status=row_status,
                 to_status=None,
-                memo=None,
-            ),
-        ],
-    )
-    return _context_for(current_user, current_user, week_start, db)
+                memo=(
+                    f"{len(removed_leave)} leave entries removed with the request."
+                    if removed_leave
+                    else None
+                ),
+            )
+        )
+    _commit(current_user, mutations)
+    return _context_for(current_user, current_user, parse_week_start(str(values["week_start"])), db)
 
 
 @router.post("/api/reports/weekly-time/time-off/{request_id}/review")
@@ -2098,115 +2654,164 @@ def review_time_off(
     owner = get_user_or_404(db, int(values["user_id"]))
     if not _can_decide_for_owner(current_user, owner, db):
         raise HTTPException(status_code=403, detail="You cannot review this employee's time off.")
-    if str(values.get("status")) != "pending":
-        raise HTTPException(status_code=409, detail="Only a pending request can be reviewed.")
+    anchor_status = str(values.get("status"))
+    if anchor_status not in ("pending", "approved"):
+        raise HTTPException(status_code=409, detail="Only a pending or approved request can be reviewed.")
     if payload.action not in ("approve", "return"):
         raise HTTPException(status_code=400, detail="A time-off request is approved or returned.")
+    if anchor_status == "approved" and payload.action != "return":
+        raise HTTPException(status_code=409, detail="An approved request can only be returned.")
     comments = (payload.comments or "").strip()
     if payload.action == "return" and not comments:
         raise HTTPException(status_code=400, detail="Comments are required when returning a request.")
 
-    week_start = parse_week_start(str(values["week_start"]))
-    daily_hours = [float(item or 0) for item in (values.get("daily_hours") or [0] * 7)]
+    # The anchor row stands for its whole multi-week request: every sibling week
+    # is decided here in one atomic commit, so a long vacation is never left
+    # half-approved.
+    group = _time_off_siblings(current_user, values, {anchor_status})
+    if not any(str(v.get("request_id")) == request_id for _, v in group):
+        group.insert(0, (entity, values))
     to_status = "approved" if payload.action == "approve" else "returned"
     now = utc_now_text()
-    values.update(
-        {
-            "status": to_status,
-            "updated_at": now,
-            "reviewed_at": now,
-            "reviewed_by_user_id": current_user.id,
-            "reviewed_by_name": _display_name(current_user),
-            "review_comments": comments or None,
-        }
-    )
-    mutations: list[Mutation] = [
-        Mutation(
-            entity_type=TIME_OFF_ENTITY_TYPE,
-            entity_id=request_id,
-            operation_type="update_entity",
-            base_record_revision=str(entity["record_revision"]),
-            values=values,
-        )
-    ]
-
+    mutations: list[Mutation] = []
     created = 0
-    if to_status == "approved":
-        found = _find_submission(current_user, owner_user_id=owner.id, week_start=week_start)
-        submission_entity, submission = found if found else (None, _submission_values(owner, week_start))
-        if str(submission.get("status")) not in EDITABLE_STATUSES:
-            raise HTTPException(
-                status_code=409,
-                detail=(
-                    f"{_display_name(owner)}'s week of {week_start.isoformat()} is already "
-                    "submitted. Reopen it before approving this time off."
-                ),
+    amended_weeks: list[str] = []
+    for row_entity, row_values in group:
+        week_start = parse_week_start(str(row_values["week_start"]))
+        daily_hours = [float(item or 0) for item in (row_values.get("daily_hours") or [0] * 7)]
+        row_values.update(
+            {
+                "status": to_status,
+                "updated_at": now,
+                "reviewed_at": now,
+                "reviewed_by_user_id": current_user.id,
+                "reviewed_by_name": _display_name(current_user),
+                "review_comments": comments or None,
+            }
+        )
+        mutations.append(
+            Mutation(
+                entity_type=TIME_OFF_ENTITY_TYPE,
+                entity_id=str(row_values["request_id"]),
+                operation_type="update_entity",
+                base_record_revision=str(row_entity["record_revision"]),
+                values=row_values,
             )
-        submission_id = str(submission["submission_id"])
-        recorded: dict[str, float] = {}
-        for _, entry in _entities(current_user, ENTRY_ENTITY_TYPE):
-            if str(entry.get("submission_id")) != submission_id:
-                continue
-            key = str(entry.get("work_date"))
-            recorded[key] = recorded.get(key, 0.0) + float(entry.get("hours") or 0)
-        holidays = _holidays_for_week(current_user, week_start)
-        for index, hours in enumerate(daily_hours):
-            if hours <= 0:
-                continue
-            work_date = week_start + timedelta(days=index)
-            allowance = day_hours_allowance(work_date, holidays, DEFAULT_DAILY_HOURS[index])
-            room = round(allowance - recorded.get(work_date.isoformat(), 0.0), 2)
-            grant = min(round(hours, 2), room)
-            if grant <= 0:
-                continue
-            entry_id = str(uuid.uuid4())
+        )
+        week_memo = f"{round(sum(daily_hours), 2):g}h of time off {to_status}"
+        if anchor_status == "approved" and to_status == "returned":
+            found = _find_submission(current_user, owner_user_id=owner.id, week_start=week_start)
+            submission_id = str(found[1]["submission_id"]) if found else None
+            covered = {
+                (week_start + timedelta(days=index)).isoformat()
+                for index, hours in enumerate(daily_hours)
+                if hours > 0
+            }
+            removed = 0
+            for entry_entity, entry in _entities(current_user, ENTRY_ENTITY_TYPE):
+                if submission_id and str(entry.get("submission_id")) != submission_id:
+                    continue
+                if str(entry.get("entry_type")) != "leave":
+                    continue
+                if str(entry.get("work_date")) not in covered:
+                    continue
+                if not str(entry.get("notes") or "").startswith(TIME_OFF_ENTRY_NOTE_PREFIX):
+                    continue
+                mutations.append(
+                    Mutation(
+                        entity_type=ENTRY_ENTITY_TYPE,
+                        entity_id=str(entry_entity["entity_id"]),
+                        operation_type="delete_entity",
+                        base_record_revision=str(entry_entity["record_revision"]),
+                    )
+                )
+                removed += 1
+            if removed:
+                week_memo += f" - {removed} approved leave entr{'y' if removed == 1 else 'ies'} removed"
+        if to_status == "approved":
+            found = _find_submission(current_user, owner_user_id=owner.id, week_start=week_start)
+            submission_entity, submission = found if found else (None, _submission_values(owner, week_start))
+            # A submitted or approved week is amended in place: the reviewer
+            # approving this time off is the same authority who reviews weeks,
+            # so their approval doubles as consent to add the leave.
+            week_locked = str(submission.get("status")) not in EDITABLE_STATUSES
+            submission_id = str(submission["submission_id"])
+            recorded: dict[str, float] = {}
+            for _, entry in _entities(current_user, ENTRY_ENTITY_TYPE):
+                if str(entry.get("submission_id")) != submission_id:
+                    continue
+                key = str(entry.get("work_date"))
+                recorded[key] = recorded.get(key, 0.0) + float(entry.get("hours") or 0)
+            holidays = _holidays_for_week(current_user, week_start)
+            wrote = 0
+            for index, hours in enumerate(daily_hours):
+                if hours <= 0:
+                    continue
+                work_date = week_start + timedelta(days=index)
+                allowance = day_hours_allowance(work_date, holidays, DEFAULT_DAILY_HOURS[index])
+                room = round(allowance - recorded.get(work_date.isoformat(), 0.0), 2)
+                grant = min(round(hours, 2), room)
+                if grant <= 0:
+                    continue
+                entry_id = str(uuid.uuid4())
+                mutations.append(
+                    Mutation(
+                        entity_type=ENTRY_ENTITY_TYPE,
+                        entity_id=entry_id,
+                        operation_type="insert_entity",
+                        base_record_revision=None,
+                        values={
+                            "entry_id": entry_id,
+                            "submission_id": submission_id,
+                            "user_id": owner.id,
+                            "employee_id": owner.employee_id,
+                            "entry_type": "leave",
+                            "work_date": work_date.isoformat(),
+                            "hours": grant,
+                            "start_time": None,
+                            "end_time": None,
+                            "notes": f"{TIME_OFF_ENTRY_NOTE_PREFIX} {row_values.get('reason')}",
+                            "created_at": now,
+                            "updated_at": now,
+                        },
+                    )
+                )
+                created += 1
+                wrote += 1
+            submission["updated_at"] = now
             mutations.append(
                 Mutation(
-                    entity_type=ENTRY_ENTITY_TYPE,
-                    entity_id=entry_id,
-                    operation_type="insert_entity",
-                    base_record_revision=None,
-                    values={
-                        "entry_id": entry_id,
-                        "submission_id": submission_id,
-                        "user_id": owner.id,
-                        "employee_id": owner.employee_id,
-                        "entry_type": "leave",
-                        "work_date": work_date.isoformat(),
-                        "hours": grant,
-                        "start_time": None,
-                        "end_time": None,
-                        "notes": f"Approved time off: {values.get('reason')}",
-                        "created_at": now,
-                        "updated_at": now,
-                    },
+                    entity_type=SUBMISSION_ENTITY_TYPE,
+                    entity_id=submission_id,
+                    operation_type="update_entity" if submission_entity else "insert_entity",
+                    base_record_revision=str(submission_entity["record_revision"]) if submission_entity else None,
+                    values=submission,
                 )
             )
-            created += 1
-        submission["updated_at"] = now
-        mutations.insert(
-            0,
-            Mutation(
-                entity_type=SUBMISSION_ENTITY_TYPE,
-                entity_id=submission_id,
-                operation_type="update_entity" if submission_entity else "insert_entity",
-                base_record_revision=str(submission_entity["record_revision"]) if submission_entity else None,
-                values=submission,
-                unique_lock_keys=(f"weekly:{owner.id}:{week_start.isoformat()}",),
-            ),
+            if week_locked and wrote:
+                amended_weeks.append(week_start.isoformat())
+                week_memo += (
+                    f" - leave written into the already {submission.get('status')} week"
+                    f" by {_display_name(current_user)}"
+                )
+        mutations.append(
+            _event_mutation(
+                current_user,
+                subject_user_id=owner.id,
+                submission_id=None,
+                event_type=f"time_off_{to_status}",
+                week_start=week_start,
+                from_status="pending",
+                to_status=to_status,
+                memo=(comments + " - " if comments else "") + week_memo,
+            )
         )
-
-    mutations.append(
-        _event_mutation(
-            current_user,
-            subject_user_id=owner.id,
-            submission_id=None,
-            event_type="time_off_approved" if to_status == "approved" else "time_off_returned",
-            week_start=week_start,
-            from_status="pending",
-            to_status=to_status,
-            memo=comments or (f"{created} leave entries added." if created else None),
-        )
-    )
     _commit(current_user, mutations)
-    return {"status": to_status, "leave_entries": created}
+    return {
+        "status": to_status,
+        "leave_entries": created,
+        "weeks": len(group),
+        "amended_weeks": amended_weeks,
+    }
+
+

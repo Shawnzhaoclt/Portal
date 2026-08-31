@@ -8,22 +8,22 @@ from functools import lru_cache
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+import urllib.parse
 from urllib.parse import quote
 
 import duckdb
 
 from pydantic import BaseModel, Field
 
-from portal.runtime.transport import APIRouter, Depends, FileResponse, HTTPException, Query
+from portal.runtime.transport import APIRouter, Depends, FileResponse, HTTPException, Query, StreamingResponse
 
 from portal.app.core.records import clean_record
-from portal.app.dashboards.amteam import user_observations
+from portal.app.dashboards.amteam import itpipes_cloud, user_observations
 from portal.app.management.models import User
 from portal.app.management.router import get_current_user
 from portal.app.sync.errors import RevisionChanged, SyncError
-from portal.app.sync.models import Identity
 from portal.app.sync.physical_entities import MLO_ENTITY_TYPE
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 router = APIRouter(prefix="/api/amteam", tags=["am-team"])
 
@@ -73,13 +73,6 @@ def amteam_merged_database_path() -> Path:
 
 def quote_sql_literal(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
-
-
-def amteam_media_root() -> Path:
-    configured = str(os.getenv("PORTAL_AMTEAM_MEDIA_ROOT") or "").strip()
-    if not configured:
-        raise HTTPException(status_code=503, detail="ITPipes media root is not configured in portal.settings.json.")
-    return Path(configured)
 
 
 def connect_amteam_database() -> duckdb.DuckDBPyConnection:
@@ -319,24 +312,6 @@ def inspection_date_prefix(value: Any) -> str:
         return ""
 
 
-def media_subdirectory(parent: Path, name: str) -> Path | None:
-    if not parent.exists() or not parent.is_dir():
-        return None
-    for child in parent.iterdir():
-        if child.is_dir() and child.name.lower() == name.lower():
-            return child
-    return None
-
-
-def files_with_extensions(directory: Path | None, extensions: set[str]) -> list[Path]:
-    if directory is None or not directory.exists() or not directory.is_dir():
-        return []
-    return sorted(
-        (path for path in directory.iterdir() if path.is_file() and path.suffix.lower() in extensions),
-        key=lambda path: path.name.lower(),
-    )
-
-
 def read_uint32_be(file_obj: Any) -> int:
     data = file_obj.read(4)
     if len(data) != 4:
@@ -444,122 +419,6 @@ def mp4_video_metadata(path: Path) -> dict[str, Any]:
     return {}
 
 
-def media_url(path: Path) -> str:
-    relative_path = media_relative_path(path)
-    return f"/api/amteam/media?path={quote(relative_path, safe='/')}"
-
-
-def media_relative_path(path: Path) -> str:
-    """Return a media-root-relative path without resolving every network file."""
-    root = amteam_media_root()
-    try:
-        return path.relative_to(root).as_posix()
-    except ValueError:
-        # Callers normally pass paths derived from the configured root. Keep a
-        # defensive fallback for equivalent absolute paths with different forms.
-        return path.absolute().relative_to(root.absolute()).as_posix()
-
-
-def media_asset(path: Path, kind: str) -> dict[str, Any]:
-    media_type, _ = mimetypes.guess_type(path)
-    return {
-        "name": path.name,
-        "kind": kind,
-        "relative_path": media_relative_path(path),
-        "url": media_url(path),
-        "media_type": media_type,
-    }
-
-
-def inspection_media_directory(us_mh: Any, ds_mh: Any, inspection_date: Any) -> tuple[Path | None, list[str], dict[str, Any]]:
-    warnings: list[str] = []
-    root = amteam_media_root()
-    metadata = {
-        "media_root": str(root),
-        "pipe_folder": None,
-        "inspection_folder": None,
-        "date_prefix": inspection_date_prefix(inspection_date),
-    }
-
-    if not root.exists() or not root.is_dir():
-        warnings.append(f"AM Team media root was not found: {root}")
-        return None, warnings, metadata
-
-    upstream = compact_structure_id(us_mh)
-    downstream = compact_structure_id(ds_mh)
-    if not upstream or not downstream:
-        warnings.append("US_MH or DS_MH is missing, so the media folder cannot be resolved.")
-        return None, warnings, metadata
-
-    pipe_folder_names = [f"{upstream}{downstream}", f"{downstream}{upstream}"]
-    pipe_folder = next((root / name for name in pipe_folder_names if (root / name).is_dir()), None)
-    if pipe_folder is None:
-        warnings.append(f"Pipe media folder was not found. Tried: {', '.join(pipe_folder_names)}")
-        return None, warnings, metadata
-    metadata["pipe_folder"] = str(pipe_folder)
-
-    date_prefix = metadata["date_prefix"]
-    if not date_prefix:
-        warnings.append("Inspection date is missing or could not be parsed, so the inspection media folder cannot be resolved.")
-        return None, warnings, metadata
-
-    matches = sorted(
-        (child for child in pipe_folder.iterdir() if child.is_dir() and child.name.startswith(str(date_prefix))),
-        key=lambda path: path.name,
-        reverse=True,
-    )
-    if not matches:
-        warnings.append(f"No inspection media folder starts with {date_prefix} under {pipe_folder}.")
-        return None, warnings, metadata
-
-    metadata["inspection_folder"] = str(matches[0])
-    return matches[0], warnings, metadata
-
-
-@lru_cache(maxsize=256)
-def _inspection_media_assets_cached(
-    media_root: str,
-    us_mh: str,
-    ds_mh: str,
-    inspection_date_text: str,
-) -> dict[str, Any]:
-    # The CCTV media folders are read-only while the desktop app is running.
-    # Caching avoids repeated SMB directory enumeration for the same inspection.
-    media_directory, warnings, metadata = inspection_media_directory(us_mh, ds_mh, inspection_date_text)
-    snapshots_dir = media_subdirectory(media_directory, "SnapShots") if media_directory else None
-    videos_dir = media_subdirectory(media_directory, "Videos") if media_directory else None
-    reports_dir = media_subdirectory(media_directory, "Reports") if media_directory else None
-
-    snapshots = [media_asset(path, "snapshot") for path in files_with_extensions(snapshots_dir, SNAPSHOT_EXTENSIONS)]
-    videos = [media_asset(path, "video") for path in files_with_extensions(videos_dir, VIDEO_EXTENSIONS)]
-    reports = [media_asset(path, "report") for path in files_with_extensions(reports_dir, REPORT_EXTENSIONS)]
-
-    if media_directory is not None:
-        if snapshots_dir is None:
-            warnings.append(f"SnapShots folder was not found under {media_directory}.")
-        if videos_dir is None:
-            warnings.append(f"Videos folder was not found under {media_directory}.")
-        if reports_dir is None:
-            warnings.append(f"Reports folder was not found under {media_directory}.")
-
-    return {
-        **metadata,
-        "snapshots": snapshots,
-        "videos": videos,
-        "reports": reports,
-        "warnings": warnings,
-    }
-
-
-def inspection_media_assets(us_mh: Any, ds_mh: Any, inspection_date: Any) -> dict[str, Any]:
-    return _inspection_media_assets_cached(
-        str(amteam_media_root()),
-        str(us_mh or ""),
-        str(ds_mh or ""),
-        str(inspection_date or ""),
-    )
-
-
 def normalized_file_token(value: Any) -> str:
     return normalized_column_key(str(value or ""))
 
@@ -629,6 +488,184 @@ def matching_snapshot_assets(
         if snapshot_name and any(token in snapshot_name for token in fallback_tokens):
             matches.append(snapshot)
     return matches
+
+
+def observation_media_records(
+    connection: duckdb.DuckDBPyConnection, mli_id: str
+) -> dict[str, list[dict[str, Any]]]:
+    """Each observation's media, straight from the ITpipes tables.
+
+    MLO_Media maps observations to media ids and Media holds the file facts, so the
+    link between an observation and its snapshots is exact - no name-prefix
+    guessing. Keyed by MLO_ID; an empty answer means the tables are unavailable and
+    the caller falls back to name matching.
+    """
+    try:
+        rows = fetch_dicts(
+            connection,
+            """
+            select cast(o.MLO_ID as varchar) as mlo_id,
+                   cast(m.Media_ID as varchar) as media_id,
+                   m.File_Name as file_name,
+                   m.File_Path as file_path,
+                   m.File_Type as file_type
+            from MLO o
+            join MLO_Media mm on mm.MLO_ID = o.MLO_ID
+            join Media m on m.Media_ID = mm.Media_ID
+            where cast(o.MLI_ID as varchar) = ?
+            order by o.MLO_ID, m.Media_ID
+            """,
+            [str(mli_id)],
+        )
+    except Exception:
+        return {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row["mlo_id"]), []).append(row)
+    return grouped
+
+
+def mli_media_records(connection: duckdb.DuckDBPyConnection, mli_id: str) -> list[dict[str, Any]]:
+    """Pipe-level media (the videos, mainly) from MLI_Media.
+
+    Empty when the mirror predates MLI_Media being cloned - the caller degrades to
+    whatever the manifest alone offers rather than failing the inspection.
+    """
+    try:
+        return fetch_dicts(
+            connection,
+            """
+            select cast(m.Media_ID as varchar) as media_id,
+                   m.File_Name as file_name,
+                   m.File_Path as file_path,
+                   m.File_Type as file_type
+            from MLI_Media im
+            join Media m on m.Media_ID = im.Media_ID
+            where cast(im.MLI_ID as varchar) = ?
+            order by m.Media_ID
+            """,
+            [str(mli_id)],
+        )
+    except Exception:
+        return []
+
+
+def inspection_cloud_media(
+    connection: duckdb.DuckDBPyConnection,
+    mli_id: str,
+    mlo_records: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any]:
+    """The inspection's media, inventoried by the database and served by ITpipes.
+
+    MLI_Media and MLO_Media name every file this inspection owns - exact names,
+    paths, and Media IDs. The web manifest cannot be the inventory (it is whatever
+    the page happened to render) but it is the only source of authorized URLs, since
+    the S3 bucket only answers ITpipes' presigned links. So the database decides
+    WHAT exists and the manifest is matched to it by file name, with the database's
+    File_Path breaking ties when two inspections reuse a name.
+    """
+    manifest = itpipes_cloud.inspection_media(mli_id, itpipes_cloud.current_cookie())
+    by_name: dict[str, list[dict[str, str]]] = {}
+    for entry in manifest.get("media") or []:
+        parsed = urllib.parse.urlsplit(str(entry.get("source_url") or ""))
+        by_name.setdefault(str(entry.get("name") or "").casefold(), []).append(
+            {
+                "url": str(entry.get("url") or ""),
+                "path": urllib.parse.unquote(parsed.path).casefold(),
+            }
+        )
+
+    def cloud_url(name: str, file_path: str) -> str | None:
+        candidates = by_name.get(str(name or "").casefold()) or []
+        if not candidates:
+            return None
+        if len(candidates) > 1 and file_path:
+            segments = [part for part in str(file_path).replace("\\", "/").casefold().split("/") if part][-3:]
+            for candidate in candidates:
+                if segments and all(segment in candidate["path"] for segment in segments):
+                    return candidate["url"]
+        return candidates[0]["url"]
+
+    inventory: list[dict[str, Any]] = list(mli_media_records(connection, mli_id))
+    for records in mlo_records.values():
+        inventory.extend(records)
+    seen_media_ids: set[str] = set()
+    kind_map = {"snapshot": ("snapshots", "snapshot"), "video": ("videos", "video"), "report": ("reports", "report")}
+    buckets: dict[str, list[dict[str, Any]]] = {"snapshots": [], "videos": [], "reports": []}
+    unresolved: list[str] = []
+    for record in inventory:
+        media_id = str(record.get("media_id") or "")
+        if not media_id or media_id in seen_media_ids:
+            continue
+        seen_media_ids.add(media_id)
+        target = kind_map.get(str(record.get("file_type") or "").casefold())
+        if target is None:
+            continue
+        bucket, kind = target
+        name = str(record.get("file_name") or "")
+        url = cloud_url(name, str(record.get("file_path") or ""))
+        if not url:
+            unresolved.append(name)
+            continue
+        media_type, _ = mimetypes.guess_type(name)
+        buckets[bucket].append(
+            {
+                "name": name,
+                "kind": kind,
+                "relative_path": name,
+                "url": url,
+                "media_type": media_type,
+                "media_id": media_id,
+            }
+        )
+
+    if not inventory:
+        # No database inventory at all: fall back to the manifest-shaped answer.
+        return itpipes_cloud.cloud_media_assets(mli_id)
+
+    # Until MLI_Media reaches the mirror, the inventory only knows what MLO_Media
+    # names - snapshots. A kind the database says nothing about is completed from
+    # the manifest rather than shown empty, so the video player keeps working.
+    manifest_kind_map = {"video": ("videos", "video"), "report": ("reports", "report")}
+    for entry in manifest.get("media") or []:
+        target = manifest_kind_map.get(str(entry.get("kind") or ""))
+        if target is None:
+            continue
+        bucket, kind = target
+        if buckets[bucket]:
+            continue
+        name = str(entry.get("name") or "")
+        media_type, _ = mimetypes.guess_type(name)
+        buckets[bucket] = [
+            {
+                "name": str(item.get("name") or ""),
+                "kind": kind,
+                "relative_path": str(item.get("name") or ""),
+                "url": str(item.get("url") or ""),
+                "media_type": mimetypes.guess_type(str(item.get("name") or ""))[0],
+                "media_id": None,
+            }
+            for item in manifest.get("media") or []
+            if str(item.get("kind") or "") == entry.get("kind")
+        ]
+
+    warnings: list[str] = []
+    if not manifest.get("connected"):
+        warnings.append("ITpipes is not signed in, so inspection media could not be loaded.")
+    elif unresolved:
+        warnings.append(
+            f"{len(unresolved)} file(s) named in the ITpipes database were not offered by ITpipes web."
+        )
+    return {
+        "media_root": "ITpipes cloud",
+        "pipe_folder": None,
+        "inspection_folder": None,
+        "date_prefix": None,
+        **buckets,
+        "warnings": warnings,
+        "itpipes_connected": bool(manifest.get("connected")),
+        "itpipes_reason": manifest.get("reason"),
+    }
 
 
 def dedupe_observation_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1017,20 +1054,10 @@ def inspection_observation_payload(
 ) -> dict[str, Any]:
     """Load one inspection using indexed keys and one reusable source connection."""
     context = inspection_context(connection, mli_id)
-    media = inspection_media_assets(
-        context.get("us_mh"),
-        context.get("ds_mh"),
-        context.get("inspection_date"),
-    ) if context else {
-        "media_root": str(amteam_media_root()),
-        "pipe_folder": None,
-        "inspection_folder": None,
-        "date_prefix": None,
-        "snapshots": [],
-        "videos": [],
-        "reports": [],
-        "warnings": ["Inspection record was not found, so media could not be resolved."],
-    }
+    observation_media = observation_media_records(connection, mli_id)
+    media = inspection_cloud_media(connection, mli_id, observation_media)
+    if not context:
+        media["warnings"] = [*media.get("warnings", []), "Inspection record was not found."]
     columns = columns or observation_columns(available_column_lookup(connection, OBSERVATION_TABLE))
     select_sql = ", ".join(select_expression(column, alias) for alias, column in columns.items())
     mli_id_column = str(columns["mli_id"])
@@ -1054,15 +1081,45 @@ def inspection_observation_payload(
         [mli_id, *[f"%{pattern}%" for pattern in EXCLUDED_OBSERVATION_TEXT], limit],
     )
     rows = dedupe_observation_rows(rows)
+    media_records = observation_media
+    # The database names the files; the ITpipes manifest supplies the bytes.
+    cloud_url_by_name = {
+        str(asset.get("name") or "").casefold(): asset["url"]
+        for group in ("snapshots", "videos", "reports")
+        for asset in media[group]
+    }
     for row in rows:
-        matched_snapshots = matching_snapshot_assets(
-            row,
-            media["snapshots"],
-            context.get("us_mh") if context else None,
-            context.get("ds_mh") if context else None,
-        )
-        row["image_urls"] = [snapshot["url"] for snapshot in matched_snapshots]
-        row["image_available"] = len(matched_snapshots) > 0
+        records = media_records.get(str(row.get("mlo_id") or "")) or []
+        snapshot_records = [
+            record for record in records
+            if str(record.get("file_type") or "").casefold() == "snapshot"
+        ]
+        if snapshot_records:
+            entries = [
+                {
+                    "media_id": record["media_id"],
+                    "name": record["file_name"],
+                    "url": cloud_url_by_name.get(str(record["file_name"]).casefold()),
+                }
+                for record in snapshot_records
+            ]
+            visible = [entry for entry in entries if entry["url"]]
+            row["image_urls"] = [entry["url"] for entry in visible]
+            row["image_names"] = [entry["name"] for entry in visible]
+            row["image_media_ids"] = [entry["media_id"] for entry in visible]
+        else:
+            # Reviewer-added observations have no MLO row, so the historical
+            # name-prefix match still covers them.
+            matched_snapshots = matching_snapshot_assets(
+                row,
+                media["snapshots"],
+                context.get("us_mh") if context else None,
+                context.get("ds_mh") if context else None,
+            )
+            row["image_urls"] = [snapshot["url"] for snapshot in matched_snapshots]
+            row["image_names"] = [snapshot["name"] for snapshot in matched_snapshots]
+            row["image_media_ids"] = [None] * len(matched_snapshots)
+        row["image_available"] = len(row["image_urls"]) > 0
         row["image_url"] = row["image_urls"][0] if row["image_urls"] else None
         row["origin"] = "itpipes"
 
@@ -1131,17 +1188,71 @@ def inspection_observations_batch(
         connection.close()
 
 
+class ItpipesManifestRequest(BaseModel):
+    mli_id: str = ""
+    cookie: str = ""
+
+
+@router.post("/itpipes/session")
+def itpipes_session(payload: ItpipesManifestRequest):
+    """Is the signed-in ITpipes session still good? Drives the sign-in gate."""
+    itpipes_cloud.remember_cookie(payload.cookie)
+    return itpipes_cloud.session_state(payload.cookie.strip())
+
+
+@router.post("/itpipes/manifest")
+def itpipes_manifest(payload: ItpipesManifestRequest):
+    """Presigned ITpipes media for one inspection, fetched as the signed-in user.
+
+    The cookie comes from the ITpipes window the user signed in to; Portal holds no
+    credential of its own and stores nothing.
+    """
+    mli_id = payload.mli_id.strip()
+    if not mli_id:
+        raise HTTPException(status_code=400, detail={"message": "An MLI ID is required."})
+    itpipes_cloud.remember_cookie(payload.cookie)
+    return itpipes_cloud.inspection_media(mli_id, payload.cookie.strip())
+
+
+@router.get("/itpipes/media")
+def itpipes_media(u: str = Query(..., min_length=1), request: Any = None):
+    """Stream one ITpipes S3 object through Portal's origin.
+
+    Same-origin bytes are what let the viewer draw a video frame onto a canvas, and
+    routing through here means an expired presigned link fails in one place instead
+    of leaving a broken <video> in the page.
+    """
+    if not itpipes_cloud.is_itpipes_media_url(u):
+        raise HTTPException(status_code=403, detail={"message": "Only ITpipes media can be proxied."})
+    range_header = None
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        range_header = headers.get("range") or headers.get("Range")
+    try:
+        status, response_headers, stream = itpipes_cloud.open_media(u, range_header)
+    except Exception as error:  # noqa: BLE001 - surfaced to the page as a 502
+        raise HTTPException(
+            status_code=502,
+            detail={"message": "The ITpipes media could not be retrieved.", "error": str(error)},
+        ) from error
+    return StreamingResponse(
+        stream,
+        status_code=status,
+        headers=response_headers,
+        media_type=response_headers.get("Content-Type", "application/octet-stream"),
+    )
+
+
 @router.get("/media")
 def amteam_media(path: str = Query(..., min_length=1)):
-    root = amteam_media_root().resolve()
-    candidate = (root / path).resolve()
-    if not candidate.is_relative_to(root):
-        raise HTTPException(status_code=403, detail={"message": "Media path is outside the AM Team media root."})
-    if not candidate.exists() or not candidate.is_file():
-        raise HTTPException(status_code=404, detail={"message": "AM Team media file was not found.", "path": path})
-
-    media_type, _ = mimetypes.guess_type(candidate)
-    return FileResponse(candidate, media_type=media_type or "application/octet-stream", filename=candidate.name)
+    raise HTTPException(
+        status_code=410,
+        detail={
+            "message": "Share-based media paths are no longer served. Inspection media "
+            "comes from ITpipes via /api/amteam/itpipes/media.",
+            "path": path,
+        },
+    )
 
 
 @router.get("/observations/{mlo_id}/media")
@@ -1182,11 +1293,7 @@ class UserObservationRequest(BaseModel):
 def _amteam_coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(
-                user_id=str(user.id),
-                employee_number=str(user.employee_id or "").strip(),
-                email=str(user.email),
-            )
+            sync_identity(user)
         )
     except SyncError as error:
         _amteam_sync_error(error)

@@ -78,7 +78,7 @@ export default function ConsequenceInspector({
           {active ? <span className={`failure-source-badge ${active.source}`}>{SOURCE_LABELS[active.source]}</span> : null}
         </div>
         {located.length ? (
-          <div className="failure-defect-list">
+          <div className="failure-defect-list" data-rows={located.length > 6 ? "many" : "few"}>
             {located.map((defect) => (
               <button
                 type="button"
@@ -113,7 +113,7 @@ export default function ConsequenceInspector({
               <Crosshair size={17} /> {simulation.simulating ? "Cancel placement" : "Place on map"}
             </button>
           ) : null}
-          <span className="failure-depth-method">Depth is calculated from DEM ground and interpolated asset invert.</span>
+          <span className="failure-depth-method" title="Depth is calculated from DEM ground and interpolated asset invert.">Depth from DEM ground and interpolated asset invert.</span>
         </div>
       </section>
 

@@ -61,13 +61,34 @@ def _coerce_scalar(value: Any, annotation: Any) -> Any:
     return value
 
 
+def _validate_body(validate: Any, body: Any, annotation: Any) -> Any:
+    """Validate a request body, reporting failures as a 422.
+
+    A raw validation error would travel past the dispatcher and reach the desktop
+    app as an unnamed command failure, which tells nobody which field was wrong.
+    """
+    from pydantic import ValidationError
+
+    try:
+        return validate(body)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(str(part) for part in item.get('loc') or ()) or 'body'}: {item.get('msg')}"
+            for item in error.errors()[:3]
+        )
+        raise HTTPException(
+            status_code=422,
+            detail=f"{getattr(annotation, '__name__', 'The request')} rejected this request: {problems}.",
+        ) from error
+
+
 def _body_value(body: Any, annotation: Any) -> Any:
     if annotation in (Any, inspect.Parameter.empty) or body is None:
         return body
     if isinstance(annotation, type) and hasattr(annotation, "model_validate"):
-        return annotation.model_validate(body)
+        return _validate_body(annotation.model_validate, body, annotation)
     if isinstance(annotation, type) and hasattr(annotation, "parse_obj"):
-        return annotation.parse_obj(body)
+        return _validate_body(annotation.parse_obj, body, annotation)
     return body
 
 
@@ -215,7 +236,10 @@ def dispatch_request(request: dict[str, Any]) -> dict[str, Any]:
         test_access = str(next((value for key, value in headers.items() if key.lower() == "x-portal-test-access"), "")).strip().lower()
         test_mode = str(next((value for key, value in headers.items() if key.lower() == "x-portal-test-mode"), "read_only")).strip().lower()
         if test_access in {"1", "true", "yes"} and test_mode != "read_write" and method not in {"GET", "HEAD", "OPTIONS"}:
-            raise HTTPException(status_code=403, detail="Changes are disabled while running a read-only user simulation.")
+            from portal.app.core.access_preview import is_preview_safe
+
+            if not is_preview_safe(path):
+                raise HTTPException(status_code=403, detail="Changes are disabled while running a read-only user simulation.")
         route, path_values = _find_route(method, path)
         result, generators = _resolve_callable(
             route.endpoint,

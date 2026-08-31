@@ -96,7 +96,7 @@ type ManagementPageProps = {
   showRoleSelector?: boolean
   showSignOutAction?: boolean
   showSystemCatalogPublication?: boolean
-  onPublishSystemCatalog?: () => Promise<string | void>
+  onPublishSystemCatalog?: (environment: 'production' | 'test') => Promise<string | void>
 }
 
 type TabKey = 'profile' | 'featured' | 'users' | 'teams' | 'resources' | 'permissions' | 'holidays' | 'dictionaries' | 'audit' | 'system-catalog'
@@ -419,12 +419,12 @@ export default function ManagementPage({
     [accountOnly, canManage, currentUser?.selected_role, showSystemCatalogPublication],
   )
 
-  async function publishSystemCatalog() {
+  async function publishSystemCatalog(environment: 'production' | 'test') {
     if (!onPublishSystemCatalog || currentUser?.selected_role !== 'system_admin') return
     setPublishingSystemCatalog(true)
     setError('')
     try {
-      const message = await onPublishSystemCatalog()
+      const message = await onPublishSystemCatalog(environment)
       if (message) setStatus(message)
       setCatalogPublicationPending(false)
     } catch (publishError) {
@@ -1053,7 +1053,7 @@ export default function ManagementPage({
           {canManage && currentUser.selected_role === 'system_admin' && activeTab === 'system-catalog' ? (
             <SystemCatalogPanel
               publishing={publishingSystemCatalog}
-              onPublish={() => void publishSystemCatalog()}
+              onPublish={(environment) => void publishSystemCatalog(environment)}
             />
           ) : null}
         </section>
@@ -1064,8 +1064,9 @@ export default function ManagementPage({
 
 function SystemCatalogPanel({ publishing, onPublish }: {
   publishing: boolean
-  onPublish: () => void
+  onPublish: (environment: 'production' | 'test') => void
 }) {
+  const [environment, setEnvironment] = useState<'production' | 'test'>('production')
   return (
     <section className="management-panel management-system-catalog-panel">
       <div className="management-panel-heading">
@@ -1073,10 +1074,24 @@ function SystemCatalogPanel({ publishing, onPublish }: {
           <h2>System Catalog</h2>
           <p>Publish the authoritative Manager catalog as versioned Portal data. Desktop encrypts it during local activation.</p>
         </div>
-        <button className="management-primary-button" type="button" disabled={publishing} onClick={onPublish}>
-          <Save size={16} />
-          {publishing ? 'Publishing...' : 'Publish system catalog'}
-        </button>
+        <div className="management-system-catalog-actions">
+          <label className="management-system-catalog-environment">
+            <span>Target</span>
+            <select
+              value={environment}
+              onChange={(event) => setEnvironment(event.currentTarget.value as 'production' | 'test')}
+            >
+              <option value="production">Production</option>
+              <option value="test">Test environment</option>
+            </select>
+          </label>
+          <button className="management-primary-button" type="button" disabled={publishing} onClick={() => onPublish(environment)}>
+            <Save size={16} />
+            {publishing
+              ? 'Publishing...'
+              : environment === 'test' ? 'Publish to test' : 'Publish system catalog'}
+          </button>
+        </div>
       </div>
       <div className="management-system-catalog-summary">
         <div><span>Source</span><strong>Manager config/system.db</strong></div>

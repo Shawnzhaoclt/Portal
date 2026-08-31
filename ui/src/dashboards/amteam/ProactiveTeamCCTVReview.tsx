@@ -46,6 +46,7 @@ import {
   fetchAmTeamPipes,
 } from './api'
 import AMTeamInspectionViewer, { downloadSavedCctvReviewReport } from './AMTeamInspectionViewer'
+import { ItpipesGate } from './ItpipesGate'
 import type {
   AmTeamCellValue,
   AmTeamPipe,
@@ -527,7 +528,7 @@ function ReportDownloadProgress({ reportName }: { reportName: string }) {
   )
 }
 
-export default function ProactiveTeamCCTVReview() {
+function ProactiveTeamCCTVReviewContent() {
   const [reports, setReports] = useState<CctvReviewReport[]>([])
   const [currentUser, setCurrentUser] = useState<PortalUser | null>(null)
   const [loading, setLoading] = useState(false)
@@ -1154,5 +1155,15 @@ export default function ProactiveTeamCCTVReview() {
         <ReportDownloadProgress reportName={downloadingReport ? reportDisplayKey(downloadingReport) : ''} />
       ) : null}
     </div>
+  )
+}
+
+export default function ProactiveTeamCCTVReview() {
+  // Media comes from ITpipes, so the sign-in gate wraps the whole resource -
+  // the report list and the editor alike - before anything renders.
+  return (
+    <ItpipesGate>
+      <ProactiveTeamCCTVReviewContent />
+    </ItpipesGate>
   )
 }

@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowLeft,
+  Download,
   ArrowRight,
   CalendarClock,
   Check,
   ClipboardCheck,
   Copy,
   Pencil,
-  Plus,
   RefreshCw,
   RotateCcw,
   Send,
@@ -19,30 +20,6 @@ import { toast } from 'sonner'
 import { portalRequestBinary, portalRequestJson } from '../../../desktop/request'
 import { saveExportAs } from '../../../desktop/runtime'
 
-type InsightsWindow = '12w' | '6m' | 'ytd' | 'year' | 'all' | 'custom'
-
-type WeeklyInsights = {
-  scope: 'self' | 'all'
-  window: InsightsWindow
-  bucket: 'week' | 'month' | 'year'
-  year: number
-  start: string
-  end: string
-  available_years: number[]
-  can_view_all: boolean
-  entry_types: { key: string; label: string }[]
-  buckets: { key: string; label: string; totals: Record<string, number>; total: number }[]
-  people: { name: string; team: string | null; totals: Record<string, number>; total: number }[]
-}
-
-const INSIGHTS_WINDOW_LABELS: Record<InsightsWindow, string> = {
-  '12w': 'Last 12 weeks',
-  '6m': 'Last 6 months',
-  ytd: 'Year to date',
-  year: 'Specific year',
-  all: 'All years',
-  custom: 'Custom range',
-}
 import { formatDateOnly, formatDateTime } from '../../../lib/dateTime'
 import { appConfirm, appPrompt } from '../../../components/messageDialogService'
 import './WeeklyTimeReporting.css'
@@ -77,6 +54,7 @@ type ScheduleDay = {
 }
 
 type TimeOffRequestRecord = {
+  week_status?: string
   request_id: string
   user_id: number
   employee_name: string
@@ -88,6 +66,68 @@ type TimeOffRequestRecord = {
   status: string
   created_at: string
   review_comments: string | null
+}
+
+type SubmissionQueueRecord = {
+  submission_id: string
+  user_id: number
+  employee_name: string
+  team_name: string | null
+  week_start: string
+  week_end: string
+  status: string
+  submitted_at: string | null
+  reviewed_at: string | null
+  reviewed_by_name: string | null
+  review_comments: string | null
+}
+
+type ReviewQueue = {
+  submissions: SubmissionQueueRecord[]
+  time_off_requests: TimeOffRequestRecord[]
+  recent: SubmissionQueueRecord[]
+  can_reopen: boolean
+}
+
+type StatisticsCard = {
+  user_id: number
+  name: string
+  team_name: string | null
+  own: boolean
+  total_hours: number
+  logged_days: number
+  missing_days: number
+  leave_hours: number
+  types: Record<string, number>
+  bucket_hours: Record<string, number>
+}
+
+type StatisticsReport = {
+  start: string
+  end: string
+  counted_through: string
+  working_days: number
+  bucket: string
+  buckets: { key: string; label: string }[]
+  team: string | null
+  teams: string[]
+  cards: StatisticsCard[]
+}
+
+/** Buckets per-week time-off rows back into the requests that created them.
+ * One request spanning weeks is stored week by week; rows of the same request
+ * share the owner, the reason and the creation instant. */
+function groupTimeOff<T extends TimeOffRequestRecord>(rows: T[]): T[][] {
+  const groups: T[][] = []
+  for (const row of rows) {
+    const bucket = groups.find((candidate) => candidate[0].user_id === row.user_id
+      && candidate[0].reason === row.reason
+      && Math.abs(Date.parse(candidate[0].created_at) - Date.parse(row.created_at)) < 5000)
+    if (bucket) bucket.push(row)
+    else groups.push([row])
+  }
+  for (const bucket of groups) bucket.sort((a, b) => a.week_start.localeCompare(b.week_start))
+  return groups
 }
 
 const EMPTY_TIME_OFF = { start_date: '', end_date: '', reason: '' }
@@ -148,45 +188,62 @@ type WeeklyContext = {
   }
 }
 
-type MatrixCell = {
-  submission_id: string
-  status: SubmissionStatus
-  hours: number | null
-  target_hours: number | null
-  submitted_at: string | null
+type HeatmapDay = { date: string; hours: number; status: string; types: Record<string, number> }
+type WeeklyHeatmap = {
+  year: number
+  mode: string
+  window_start: string
+  window_end: string
+  available_years: number[]
+  owner: { user_id: number; name: string }
+  own_calendar: boolean
+  people: { user_id: number; name: string }[]
+  days: HeatmapDay[]
+  holidays: { date: string; name: string }[]
+  max_daily: number
 }
 
-type ReviewMatrix = {
-  weeks: { week_start: string; week_end: string }[]
-  rows: {
-    user_id: number
-    name: string
-    employee_id: string
-    team_id: number | null
-    team_name: string | null
-    cells: Record<string, MatrixCell>
-  }[]
-  counts: Record<string, number>
-  teams: { team_id: number; name: string }[]
-  people: { user_id: number; name: string; team_id: number | null }[]
-  end_week: string
-  weeks_shown: number
-  max_weeks: number
-  can_reopen: boolean
+// Five intensity steps over the 8-hour day, in the resource's own blue rather
+// than a borrowed green, so the calendar reads as part of this page.
+function heatmapLevel(hours: number) {
+  if (hours <= 0) return 0
+  if (hours <= 2) return 1
+  if (hours <= 4) return 2
+  if (hours <= 6) return 3
+  return 4
 }
 
-const MATRIX_SPANS = [8, 12, 16, 26]
+const MONTH_LABELS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+
+/** Monday-start week columns covering the whole year. */
+function heatmapWeeks(startIso: string, endIso: string) {
+  const start = new Date(`${startIso}T00:00:00Z`)
+  start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 6) % 7))
+  const end = new Date(`${endIso}T00:00:00Z`)
+  const weeks: string[][] = []
+  const cursor = new Date(start)
+  while (cursor <= end) {
+    const week: string[] = []
+    for (let day = 0; day < 7; day += 1) {
+      week.push(cursor.toISOString().slice(0, 10))
+      cursor.setUTCDate(cursor.getUTCDate() + 1)
+    }
+    weeks.push(week)
+  }
+  return weeks
+}
+
+function round1(value: number) {
+  return Math.round(value * 10) / 10
+}
+
+/** Fiscal years start July 1 and are named by their starting year. */
+function fiscalYearLabel(startYear: number) {
+  return `FY ${startYear}-${String((startYear + 1) % 100).padStart(2, '0')}`
+}
 
 // Glyph plus label, never colour alone: the cell has to read for someone who cannot
 // tell the green from the amber.
-const MATRIX_LEGEND: { status: string; mark: string; label: string }[] = [
-  { status: 'approved', mark: '\u2713', label: 'Approved' },
-  { status: 'submitted', mark: '\u25cf', label: 'Waiting on review' },
-  { status: 'returned', mark: '\u26a0', label: 'Returned' },
-  { status: 'draft', mark: '\u25cb', label: 'Draft' },
-  { status: 'missing', mark: '\u2014', label: 'Not submitted' },
-]
-
 type CopyPreviousWeekResponse = {
   context: WeeklyContext
   copied: number
@@ -299,12 +356,28 @@ function shiftWeek(value: string, amount: number) {
   return isoDate(date)
 }
 
+/** Renders a modal at document.body, exactly like the app's own message dialog.
+ *
+ * Inline rendering left the dialog inside the resource's layout tree, where any
+ * ancestor quirk (a transform, a scroll container, an embedding wrapper) can
+ * defeat position: fixed and let the dialog overflow the window. A portal makes
+ * the viewport the one and only containing block. */
+function ModalBackdrop({ children }: { children: ReactNode }) {
+  return createPortal(
+    <div className="weekly-time__modal-backdrop" role="presentation">{children}</div>,
+    document.body,
+  )
+}
+
 function shortDate(value: string) {
   return formatDateOnly(value, value)
 }
 
-function fullDate(value: string) {
-  return formatDateOnly(value, value)
+/** Month/day only: inside one week's grid the year is redundant, and it costs
+ * each day column roughly 40px it does not have to spare. */
+function compactDate(value: string) {
+  const [, month, day] = value.split('-')
+  return `${Number(month)}/${Number(day)}`
 }
 
 function weekdayName(value: string) {
@@ -335,62 +408,55 @@ function errorText(error: unknown) {
 export default function WeeklyTimeReporting() {
   const [weekStart, setWeekStart] = useState(currentMonday)
   const [context, setContext] = useState<WeeklyContext | null>(null)
-  const [tab, setTab] = useState<'week' | 'review' | 'insights'>('week')
-  const [insights, setInsights] = useState<WeeklyInsights | null>(null)
-  const [insightsScope, setInsightsScope] = useState<'self' | 'all'>('self')
-  const [insightsWindow, setInsightsWindow] = useState<InsightsWindow>('12w')
-  const [insightsYear, setInsightsYear] = useState<number | null>(null)
-  const [weekView, setWeekView] = useState<'cards' | 'grid'>('cards')
+  const [tab, setTab] = useState<'week' | 'stats' | 'review'>('week')
   const [gridDraft, setGridDraft] = useState<Record<string, number> | null>(null)
   const [gridBusy, setGridBusy] = useState(false)
-  const [insightsStart, setInsightsStart] = useState('')
-  const [insightsEnd, setInsightsEnd] = useState('')
-  const [insightsLoading, setInsightsLoading] = useState(false)
-
-  useEffect(() => {
-    if (tab !== 'insights' || !context) return
-    if (insightsWindow === 'custom' && !(insightsStart && insightsEnd)) return
-    let cancelled = false
-    setInsightsLoading(true)
-    portalRequestJson<WeeklyInsights>(
-      `/api/reports/weekly-time/insights?week_start=${context.week_start}&scope=${insightsScope}`
-      + `&window=${insightsWindow}${insightsYear ? `&year=${insightsYear}` : ''}`
-      + (insightsWindow === 'custom' ? `&start=${insightsStart}&end=${insightsEnd}` : ''),
-    )
-      .then((response) => {
-        if (!cancelled) setInsights(response)
-      })
-      .catch((requestError) => {
-        if (!cancelled) toast.error(requestError instanceof Error ? requestError.message : 'The insights could not be loaded.')
-      })
-      .finally(() => {
-        if (!cancelled) setInsightsLoading(false)
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [tab, insightsScope, insightsWindow, insightsYear, insightsStart, insightsEnd, context?.week_start])
 
   const [busy, setBusy] = useState(false)
   const [entryModal, setEntryModal] = useState(false)
   const [editingEntry, setEditingEntry] = useState<TimeEntry | null>(null)
   const [entryForm, setEntryForm] = useState(EMPTY_ENTRY)
   const linkedTimeDrivers = useRef<LinkedTimeField[]>(['hours'])
-  const [matrix, setMatrix] = useState<ReviewMatrix | null>(null)
-  const [matrixSpan, setMatrixSpan] = useState(12)
-  const [matrixEndWeek, setMatrixEndWeek] = useState<string | null>(null)
-  const [matrixPerson, setMatrixPerson] = useState<number | null>(null)
-  const [matrixTeam, setMatrixTeam] = useState<number | null>(null)
-  const [matrixStatus, setMatrixStatus] = useState<string>('')
-  const [matrixBusy, setMatrixBusy] = useState(false)
-  const [selected, setSelected] = useState<Record<string, true>>({})
-  const [bulkModal, setBulkModal] = useState<'approve' | 'return' | 'reopen' | null>(null)
-  const [bulkComments, setBulkComments] = useState('')
+  const [queueSubmissions, setQueueSubmissions] = useState<SubmissionQueueRecord[]>([])
+  const [queueRecent, setQueueRecent] = useState<SubmissionQueueRecord[]>([])
+  const [queueCanReopen, setQueueCanReopen] = useState(false)
+  // The waiting list shows the current and previous week by default.
+  const [queueFrom, setQueueFrom] = useState(() => {
+    const monday = new Date()
+    monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7) - 7)
+    return isoDate(monday)
+  })
+  const [queueTo, setQueueTo] = useState(isoDate(new Date()))
+  const [queuePage, setQueuePage] = useState(0)
+  const [queueName, setQueueName] = useState('')
+  const [queueTeam, setQueueTeam] = useState('')
   const [timeOffModal, setTimeOffModal] = useState(false)
   const [timeOffForm, setTimeOffForm] = useState(EMPTY_TIME_OFF)
   const [timeOffQueue, setTimeOffQueue] = useState<TimeOffRequestRecord[]>([])
+  const [queueWaiting, setQueueWaiting] = useState(0)
+  const [heatmap, setHeatmap] = useState<WeeklyHeatmap | null>(null)
+  const [heatmapYear, setHeatmapYear] = useState<number | null>(null)
+  const [heatmapPerson, setHeatmapPerson] = useState<number | null>(null)
+  // Work-type filter for the calendar: '' colors cells by total hours, a type
+  // key colors them by that type's hours alone. Purely client-side - the
+  // heatmap payload already carries per-day hours by type.
+  const [heatmapType, setHeatmapType] = useState('')
+  // 'calendar' = January to December; 'fiscal' = July 1 to June 30.
+  const [heatmapMode, setHeatmapMode] = useState<'calendar' | 'fiscal'>('calendar')
+  // The statistics tab summarizes its own user-defined range, defaulting to
+  // the current year to date, with data fetched separately from the calendar.
+  const [statsStart, setStatsStart] = useState(`${new Date().getFullYear()}-01-01`)
+  const [statsEnd, setStatsEnd] = useState(isoDate(new Date()))
+  const [statsData, setStatsData] = useState<StatisticsReport | null>(null)
+  // 'total' shows hours by work type; a period shows hours over time.
+  const [statsBucket, setStatsBucket] = useState('total')
+  // '' summarizes every work type; a key narrows the figures to that type.
+  const [statsType, setStatsType] = useState('')
+  const [statsTeam, setStatsTeam] = useState('')
+  // The day highlighted in the week panel's day details; null falls back to
+  // today when the current week is shown, otherwise Monday.
+  const [selectedDay, setSelectedDay] = useState<string | null>(null)
   const [timeOffReview, setTimeOffReview] = useState<{ id: string; action: 'approve' | 'return' } | null>(null)
-  const selectedIds = useMemo(() => Object.keys(selected), [selected])
   const [reviewModal, setReviewModal] = useState<{
     id: string
     action: 'approve' | 'return' | 'reopen'
@@ -398,6 +464,27 @@ export default function WeeklyTimeReporting() {
   const [reviewComments, setReviewComments] = useState('')
 
   const isViewingAnotherUser = Boolean(context && context.user.id !== context.viewer.id)
+  /** Days holding more than one entry of a single work type. The grid shows one
+   * number per work type and day, so it cannot rewrite those without throwing a
+   * note away - they stay editable entry by entry until one of them is gone. */
+  const splitEntryDays = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const entry of context?.entries ?? []) {
+      const key = `${entry.work_date}|${entry.entry_type}`
+      counts.set(key, (counts.get(key) ?? 0) + 1)
+    }
+    const days = new Set<string>()
+    for (const [key, count] of counts) {
+      if (count > 1) days.add(key.slice(0, key.indexOf('|')))
+    }
+    return [...days].sort()
+  }, [context])
+  /** The day whose entries show below the grid: the picked one when it still
+   * needs untangling, else the first that does. */
+  const activeDay = selectedDay && splitEntryDays.includes(selectedDay)
+    ? selectedDay
+    : splitEntryDays[0] ?? null
+
   const groupedEntries = useMemo(() => {
     const map = new Map<string, TimeEntry[]>()
     for (const entry of context?.entries ?? []) {
@@ -518,34 +605,25 @@ export default function WeeklyTimeReporting() {
   }
 
   async function loadQueue() {
-    const parameters = new URLSearchParams({ weeks: String(matrixSpan) })
-    if (matrixEndWeek) parameters.set('end_week', matrixEndWeek)
-    if (matrixPerson) parameters.set('people', String(matrixPerson))
-    if (matrixTeam) parameters.set('team_id', String(matrixTeam))
-    if (matrixStatus) parameters.set('status', matrixStatus)
-    setMatrixBusy(true)
-    try {
-      const response = await portalRequestJson<ReviewMatrix>(
-        `/api/reports/weekly-time/review-matrix?${parameters.toString()}`,
-      )
-      setMatrix(response)
-      const pending = await portalRequestJson<{ time_off_requests: TimeOffRequestRecord[] }>(
-        '/api/reports/weekly-time/review-queue?status=submitted',
-      )
-      setTimeOffQueue(pending.time_off_requests)
-      // Anything no longer on screen must leave the selection, or a bulk action
-      // would act on weeks the manager can no longer see.
-      const visible = new Set(response.rows.flatMap((row) => Object.values(row.cells).map((cell) => cell.submission_id)))
-      setSelected((current) => Object.fromEntries(
-        Object.keys(current).filter((id) => visible.has(id)).map((id) => [id, true as const]),
-      ))
-    } finally {
-      setMatrixBusy(false)
-    }
+    const pending = await portalRequestJson<ReviewQueue>('/api/reports/weekly-time/review-queue?status=submitted')
+    setQueueSubmissions(pending.submissions)
+    setTimeOffQueue(pending.time_off_requests)
+    setQueueRecent(pending.recent)
+    setQueueCanReopen(pending.can_reopen)
+    // The badge counts only items truly awaiting a decision; approved time off
+    // rides in the payload merely so it can be returned.
+    setQueueWaiting(
+      pending.submissions.length
+      + pending.time_off_requests.filter((row) => row.status === 'pending').length,
+    )
   }
 
   async function submitTimeOff(event: FormEvent) {
     event.preventDefault()
+    if (timeOffForm.end_date < timeOffForm.start_date) {
+      toast.error('The last day cannot be earlier than the first day.')
+      return
+    }
     setBusy(true)
     try {
       const response = await portalRequestJson<{ weeks: number; working_days: number; context: WeeklyContext }>(
@@ -571,9 +649,13 @@ export default function WeeklyTimeReporting() {
   }
 
   async function withdrawTimeOff(requestId: string) {
-    if (!(await appConfirm('Withdraw this time-off request?', {
-      title: 'Withdraw request', kind: 'warning', confirmLabel: 'Withdraw',
-    }))) return
+    const approved = context?.time_off_requests.find((item) => item.request_id === requestId)?.status === 'approved'
+    if (!(await appConfirm(
+      approved
+        ? 'Withdraw this approved time off? The leave hours it added to this week will be removed too.'
+        : 'Withdraw this time-off request?',
+      { title: 'Withdraw request', kind: 'warning', confirmLabel: 'Withdraw' },
+    ))) return
     setBusy(true)
     try {
       const response = await portalRequestJson<WeeklyContext>(
@@ -593,7 +675,7 @@ export default function WeeklyTimeReporting() {
     if (!timeOffReview) return
     setBusy(true)
     try {
-      const response = await portalRequestJson<{ status: string; leave_entries: number }>(
+      const response = await portalRequestJson<{ status: string; leave_entries: number; weeks: number; amended_weeks?: string[] }>(
         `/api/reports/weekly-time/time-off/${timeOffReview.id}/review`,
         {
           method: 'POST',
@@ -606,7 +688,11 @@ export default function WeeklyTimeReporting() {
       await loadQueue()
       toast.success(
         response.status === 'approved'
-          ? `Approved - ${response.leave_entries} leave entr${response.leave_entries === 1 ? 'y' : 'ies'} added.`
+          ? `Approved${response.weeks > 1 ? ` across ${response.weeks} weeks` : ''} - `
+            + `${response.leave_entries} leave entr${response.leave_entries === 1 ? 'y' : 'ies'} added`
+            + (response.amended_weeks?.length
+              ? ` (written into ${response.amended_weeks.length} already-reviewed week${response.amended_weeks.length === 1 ? '' : 's'}).`
+              : '.')
           : 'Returned to the employee.',
       )
     } catch (error) {
@@ -616,28 +702,147 @@ export default function WeeklyTimeReporting() {
     }
   }
 
-  async function runBulkReview() {
-    if (!bulkModal) return
-    const ids = Object.keys(selected)
+  const queueTeams = useMemo(() => (
+    [...new Set([...queueSubmissions, ...queueRecent]
+      .map((row) => row.team_name)
+      .filter((value): value is string => Boolean(value)))].sort()
+  ), [queueSubmissions, queueRecent])
+
+  const queueFiltered = useMemo(() => {
+    const name = queueName.trim().toLowerCase()
+    const rows = queueSubmissions.filter((row) => (
+      (!queueFrom || row.week_start >= queueFrom)
+      && (!queueTo || row.week_start <= queueTo)
+      && (!name || row.employee_name.toLowerCase().includes(name))
+      && (!queueTeam || row.team_name === queueTeam)
+    ))
+    rows.sort((a, b) => String(b.submitted_at ?? '').localeCompare(String(a.submitted_at ?? '')))
+    return rows
+  }, [queueSubmissions, queueFrom, queueTo, queueName, queueTeam])
+
+  const recentFiltered = useMemo(() => {
+    const name = queueName.trim().toLowerCase()
+    return queueRecent.filter((row) => (
+      (!name || row.employee_name.toLowerCase().includes(name))
+      && (!queueTeam || row.team_name === queueTeam)
+    ))
+  }, [queueRecent, queueName, queueTeam])
+
+  type ReviewItem = {
+    key: string
+    kind: 'week' | 'timeoff'
+    employee: string
+    team: string | null
+    periodStart: string
+    periodEnd: string
+    status: string
+    when: string
+    decidedBy: string | null
+    hours: number | null
+    reason: string | null
+    weekCount: number
+    lockedWeeks: number
+    submissionId: string | null
+    requestId: string | null
+    userId: number
+  }
+
+  /** Every decision item as one list: weeks and time off together, items still
+   * waiting first (newest submission on top), decided items after. */
+  const reviewItems = useMemo(() => {
+    const name = queueName.trim().toLowerCase()
+    const items: ReviewItem[] = []
+    for (const row of queueFiltered) {
+      items.push({
+        key: `week-${row.submission_id}`,
+        kind: 'week',
+        employee: row.employee_name,
+        team: row.team_name,
+        periodStart: row.week_start,
+        periodEnd: row.week_end,
+        status: row.status,
+        when: row.submitted_at ?? '',
+        decidedBy: null,
+        hours: null,
+        reason: null,
+        weekCount: 1,
+        lockedWeeks: 0,
+        submissionId: row.submission_id,
+        requestId: null,
+        userId: row.user_id,
+      })
+    }
+    for (const row of recentFiltered) {
+      items.push({
+        key: `decided-${row.submission_id}`,
+        kind: 'week',
+        employee: row.employee_name,
+        team: row.team_name,
+        periodStart: row.week_start,
+        periodEnd: row.week_end,
+        status: row.status,
+        when: row.reviewed_at ?? '',
+        decidedBy: row.reviewed_by_name,
+        hours: null,
+        reason: null,
+        weekCount: 1,
+        lockedWeeks: 0,
+        submissionId: row.submission_id,
+        requestId: null,
+        userId: row.user_id,
+      })
+    }
+    for (const request of groupTimeOff(timeOffQueue)) {
+      const first = request[0]
+      const last = request[request.length - 1]
+      if (name && !first.employee_name.toLowerCase().includes(name)) continue
+      if (queueTeam && first.team_name !== queueTeam) continue
+      if (queueFrom && last.week_end < queueFrom) continue
+      if (queueTo && first.week_start > queueTo) continue
+      items.push({
+        key: `timeoff-${first.request_id}`,
+        kind: 'timeoff',
+        employee: first.employee_name,
+        team: first.team_name,
+        periodStart: first.week_start,
+        periodEnd: last.week_end,
+        status: first.status,
+        when: first.created_at,
+        decidedBy: null,
+        hours: request.reduce((sum, row) => sum + row.daily_hours.reduce((s, v) => s + Number(v || 0), 0), 0),
+        reason: first.reason,
+        weekCount: request.length,
+        lockedWeeks: request.filter((row) => row.week_status && row.week_status !== 'draft' && row.week_status !== 'returned').length,
+        submissionId: null,
+        requestId: first.request_id,
+        userId: first.user_id,
+      })
+    }
+    const waiting = (item: ReviewItem) => item.status === 'submitted' || item.status === 'pending'
+    items.sort((a, b) => {
+      if (waiting(a) !== waiting(b)) return waiting(a) ? -1 : 1
+      return b.when.localeCompare(a.when)
+    })
+    return items
+  }, [queueFiltered, recentFiltered, timeOffQueue, queueName, queueTeam, queueFrom, queueTo])
+
+  async function approveAllPending() {
+    const ids = queueFiltered.map((row) => row.submission_id)
+    if (ids.length === 0) return
+    const ok = await appConfirm(
+      `Approve all ${ids.length} waiting week${ids.length === 1 ? '' : 's'}?`,
+      { title: 'Approve all', confirmLabel: 'Approve all' },
+    )
+    if (!ok) return
     setBusy(true)
     try {
-      const response = await portalRequestJson<{ changed: number; skipped: string[] }>(
-        '/api/reports/weekly-time/submissions/bulk-review',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ submission_ids: ids, action: bulkModal, comments: bulkComments }),
-        },
-      )
-      setBulkModal(null)
-      setBulkComments('')
-      setSelected({})
+      await portalRequestJson('/api/reports/weekly-time/submissions/bulk-review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ submission_ids: ids, action: 'approve', comments: '' }),
+      })
       await loadQueue()
-      if (response.skipped.length) {
-        toast.warning(`${response.changed} updated, ${response.skipped.length} skipped: ${response.skipped.join('; ')}`)
-      } else {
-        toast.success(`${response.changed} week${response.changed === 1 ? '' : 's'} updated.`)
-      }
+      toast.success(`${ids.length} week${ids.length === 1 ? '' : 's'} approved.`)
     } catch (error) {
       toast.error(errorText(error))
     } finally {
@@ -662,10 +867,34 @@ export default function WeeklyTimeReporting() {
   }, [])
 
   useEffect(() => {
+    const parameters = new URLSearchParams()
+    if (heatmapYear) parameters.set('year', String(heatmapYear))
+    if (heatmapPerson) parameters.set('user_id', String(heatmapPerson))
+    parameters.set('mode', heatmapMode)
+    portalRequestJson<WeeklyHeatmap>(`/api/reports/weekly-time/heatmap?${parameters}`)
+      .then(setHeatmap)
+      .catch(() => setHeatmap(null))
+    // context.entries changes with every save, so the calendar repaints itself.
+  }, [heatmapYear, heatmapPerson, heatmapMode, context?.entries])
+
+  useEffect(() => {
+    if (tab !== 'stats' || !statsStart || !statsEnd || statsEnd < statsStart) return
+    const parameters = new URLSearchParams()
+    parameters.set('start', statsStart)
+    parameters.set('end', statsEnd)
+    parameters.set('bucket', statsBucket)
+    if (statsType) parameters.set('entry_type', statsType)
+    if (statsTeam) parameters.set('team', statsTeam)
+    portalRequestJson<StatisticsReport>(`/api/reports/weekly-time/statistics?${parameters}`)
+      .then(setStatsData)
+      .catch(() => setStatsData(null))
+  }, [tab, statsStart, statsEnd, statsBucket, statsType, statsTeam, context?.entries])
+
+  useEffect(() => {
     if (tab !== 'review' || !context?.viewer.can_review) return
     void loadQueue().catch((error) => toast.error(errorText(error)))
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, matrixSpan, matrixEndWeek, matrixPerson, matrixTeam, matrixStatus, context?.viewer.can_review])
+  }, [tab, context?.viewer.can_review])
 
   async function changeWeek(nextWeek: string) {
     setBusy(true)
@@ -707,6 +936,11 @@ export default function WeeklyTimeReporting() {
     }
   }
 
+  /** True when this date sits inside the viewed week and is approved time off. */
+  function isTimeOffDay(dateText: string) {
+    return context?.schedule_days.some((d) => d.date === dateText && d.time_off) ?? false
+  }
+
   function openEntry(day: string, entry?: TimeEntry) {
     setEditingEntry(entry ?? null)
     linkedTimeDrivers.current = entry?.start_time && entry?.end_time
@@ -722,7 +956,7 @@ export default function WeeklyTimeReporting() {
             end_time: entry.end_time ?? '',
             notes: entry.notes ?? '',
           }
-        : { ...EMPTY_ENTRY, work_date: day },
+        : { ...EMPTY_ENTRY, work_date: day, ...(isTimeOffDay(day) ? { entry_type: 'leave' } : {}) },
     )
     setEntryModal(true)
   }
@@ -786,6 +1020,41 @@ export default function WeeklyTimeReporting() {
       toast.success('Time entry deleted.')
     } catch (error) {
       toast.error(errorText(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Select the week containing this day, loading it into the week panel. */
+  async function openWeekFromCalendar(dateText: string) {
+    const parsed = new Date(`${dateText}T00:00:00`)
+    parsed.setDate(parsed.getDate() - ((parsed.getDay() + 6) % 7))
+    const monday = isoDate(parsed)
+    if (context && context.week_start !== monday) {
+      await changeWeek(monday)
+    }
+    setGridDraft(null)
+    setTab('week')
+    // A weekend day still opens its week; the details land on Monday.
+    const weekday = (new Date(`${dateText}T00:00:00`).getDay() + 6) % 7
+    setSelectedDay(weekday >= 5 ? monday : dateText)
+    document.getElementById('wt-week-panel')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
+  async function exportStatistics() {
+    if (!statsStart || !statsEnd) return
+    setBusy(true)
+    try {
+      const file = await portalRequestBinary(
+        `/api/reports/weekly-time/statistics/export?start=${statsStart}&end=${statsEnd}&bucket=${statsBucket}`
+          + (statsType ? `&entry_type=${encodeURIComponent(statsType)}` : '')
+          + (statsTeam ? `&team=${encodeURIComponent(statsTeam)}` : ''),
+      )
+      const name = `Weekly-Time-Statistics-${statsStart}-to-${statsEnd}.xlsx`
+      await saveExportAs(name, file.bytes, 'excel')
+      toast.success(`Exported ${name}.`)
+    } catch (error) {
+      if (!(error instanceof Error && /cancel/i.test(error.message))) toast.error(errorText(error))
     } finally {
       setBusy(false)
     }
@@ -869,8 +1138,6 @@ export default function WeeklyTimeReporting() {
     <main className="weekly-time">
       <header className="weekly-time__header">
         <div>
-          <span className="weekly-time__eyebrow">Operations</span>
-          <h1>Weekly Time Reporting</h1>
           <p>
             {isViewingAnotherUser
               ? `${context.user.display_name} - ${context.user.team_name ?? 'No team'}`
@@ -890,55 +1157,170 @@ export default function WeeklyTimeReporting() {
         </div>
       </header>
 
-      <section className="weekly-time__controlbar">
-        <div className="weekly-time__week-picker">
-          <button type="button" className="icon-button" title="Previous week" onClick={() => void changeWeek(shiftWeek(weekStart, -1))}>
-            <ArrowLeft size={18} />
-          </button>
-          <button type="button" className="button button--secondary" onClick={() => void changeWeek(currentMonday())}>
-            Current week
-          </button>
-          <label>
-            <span>Week of</span>
-            <input type="date" value={weekStart} onChange={(event) => void changeWeek(event.target.value)} />
-          </label>
-          <strong>{shortDate(context.week_start)} - {shortDate(context.week_end)}</strong>
-          <button type="button" className="icon-button" title="Next week" onClick={() => void changeWeek(shiftWeek(weekStart, 1))}>
-            <ArrowRight size={18} />
-          </button>
-          {context.permissions.can_create && !isViewingAnotherUser && (
-            <button type="button" className="button button--secondary" onClick={() => void copyPreviousWeek()} disabled={busy}>
-              <Copy size={17} />
-              Copy previous week
-            </button>
-          )}
-        </div>
-        <span className={`weekly-time__status weekly-time__status--${status}`}>{statusLabel(status)}</span>
-      </section>
-
-      {categoryTotals.length > 0 && (
-        <section className="weekly-time__metrics" aria-label="Hours by category">
-          {categoryTotals.map((category) => (
-            <div key={category.entryType}>
-              <span>{category.label}</span>
-              <strong>{category.hours}</strong>
-              <small>hours</small>
+      {heatmap && (
+        <div className="weekly-time__heatmap">
+          <div className="weekly-time__heatmap-head">
+            <h3>
+              Year calendar
+              {heatmap.own_calendar ? '' : ` - ${heatmap.owner.name}`}
+            </h3>
+            <div className="weekly-time__heatmap-controls">
+              <select
+                aria-label="Calendar mode"
+                value={heatmapMode}
+                onChange={(event) => {
+                  setHeatmapMode(event.currentTarget.value as 'calendar' | 'fiscal')
+                  // Year numbering changes meaning between modes; let the server
+                  // pick the current period again.
+                  setHeatmapYear(null)
+                }}
+              >
+                <option value="calendar">Calendar year</option>
+                <option value="fiscal">Fiscal year (Jul-Jun)</option>
+              </select>
+              <select
+                aria-label="Work type filter"
+                value={heatmapType}
+                onChange={(event) => setHeatmapType(event.currentTarget.value)}
+              >
+                <option value="">All work types</option>
+                {gridRowTypes.map((entryType) => (
+                  <option key={entryType.type_key} value={entryType.type_key}>{entryType.label}</option>
+                ))}
+              </select>
+              {heatmap.people.length > 1 && (
+                <select
+                  aria-label="Whose calendar"
+                  value={heatmapPerson ?? ''}
+                  onChange={(event) => setHeatmapPerson(Number(event.currentTarget.value) || null)}
+                >
+                  <option value="">My calendar</option>
+                  {heatmap.people.map((person) => (
+                    <option key={person.user_id} value={person.user_id}>{person.name}</option>
+                  ))}
+                </select>
+              )}
+              <select
+                aria-label="Calendar year"
+                value={heatmapYear ?? heatmap.year}
+                onChange={(event) => setHeatmapYear(Number(event.currentTarget.value))}
+              >
+                {heatmap.available_years.map((value) => (
+                  <option key={value} value={value}>
+                    {heatmap.mode === 'fiscal' ? fiscalYearLabel(value) : value}
+                  </option>
+                ))}
+              </select>
             </div>
-          ))}
-        </section>
+          </div>
+          {(() => {
+            const byDate = new Map(heatmap.days.map((day) => [day.date, day]))
+            const holidayByDate = new Map(heatmap.holidays.map((item) => [item.date, item.name]))
+            const weeks = heatmapWeeks(heatmap.window_start, heatmap.window_end)
+            const today = isoDate(new Date())
+            return (
+              <div className="weekly-time__heatmap-scroll">
+                <div className="weekly-time__heatmap-months">
+                  <span className="weekly-time__heatmap-gutter" />
+                  {weeks.map((week, index) => {
+                    // The first column may begin before the window (the week
+                    // holding Jan 1 or Jul 1); anchor its label to the window.
+                    const monthOf = (w: string[], i: number) => {
+                      const anchor = i === 0 && w[0] < heatmap.window_start ? heatmap.window_start : w[0]
+                      return Number(anchor.slice(5, 7)) - 1
+                    }
+                    const month = monthOf(week, index)
+                    const previous = index > 0 ? monthOf(weeks[index - 1], index - 1) : -1
+                    return (
+                      <span key={week[0]}>
+                        {month !== previous && week[0] <= heatmap.window_end ? MONTH_LABELS[month] : ''}
+                      </span>
+                    )
+                  })}
+                </div>
+                <div className="weekly-time__heatmap-grid">
+                  {/* Weekdays only: weekends cannot hold time, so two rows of
+                      permanently empty cells would be noise. */}
+                  {[0, 1, 2, 3, 4].map((row) => (
+                    <div className="weekly-time__heatmap-row" key={row}>
+                      <span className="weekly-time__heatmap-gutter">
+                        {row === 0 ? 'Mon' : row === 2 ? 'Wed' : row === 4 ? 'Fri' : ''}
+                      </span>
+                      {weeks.map((week) => {
+                        const dateText = week[row]
+                        const inWindow = dateText >= heatmap.window_start && dateText <= heatmap.window_end
+                        const day = byDate.get(dateText)
+                        const holiday = holidayByDate.get(dateText)
+                        const future = dateText > today
+                        const shownHours = day ? (heatmapType ? day.types[heatmapType] ?? 0 : day.hours) : 0
+                        const parts = day && !heatmapType
+                          ? Object.entries(day.types)
+                              .map(([key, value]) => `${entryTypeLabels.get(key) ?? fallbackEntryTypeLabel(key)} ${value}h`)
+                              .join('; ')
+                          : ''
+                        const filterLabel = heatmapType
+                          ? entryTypeLabels.get(heatmapType) ?? fallbackEntryTypeLabel(heatmapType)
+                          : ''
+                        const tooltip = [
+                          `${weekdayName(dateText)} ${shortDate(dateText)}`,
+                          day
+                            ? heatmapType
+                              ? `${filterLabel} ${shownHours}h (of ${day.hours}h)`
+                              : `${day.hours}h${parts ? ` (${parts})` : ''}`
+                            : 'No time recorded',
+                          holiday ? `Holiday: ${holiday}` : '',
+                          day && day.status !== 'approved' ? statusLabel(day.status) : '',
+                        ].filter(Boolean).join(' - ')
+                        const clickable = heatmap.own_calendar && inWindow
+                        return (
+                          <span
+                            key={dateText}
+                            role={clickable ? 'button' : undefined}
+                            tabIndex={clickable ? 0 : undefined}
+                            className={[
+                              'weekly-time__heatmap-cell',
+                              `level-${heatmapLevel(shownHours)}`,
+                              inWindow ? '' : 'is-outside',
+                              holiday ? 'is-holiday' : '',
+                              future ? 'is-future' : '',
+                              clickable ? 'is-clickable' : '',
+                            ].filter(Boolean).join(' ')}
+                            title={tooltip}
+                            onClick={clickable ? () => void openWeekFromCalendar(dateText) : undefined}
+                            onKeyDown={clickable ? (event) => {
+                              if (event.key === 'Enter' || event.key === ' ') void openWeekFromCalendar(dateText)
+                            } : undefined}
+                          />
+                        )
+                      })}
+                    </div>
+                  ))}
+                </div>
+                <div className="weekly-time__heatmap-legend">
+                  <em>Amber outline marks a holiday.</em>
+                  <span>Less</span>
+                  {[0, 1, 2, 3, 4].map((level) => (
+                    <span key={level} className={`weekly-time__heatmap-cell level-${level}`} />
+                  ))}
+                  <span>More</span>
+                </div>
+              </div>
+            )
+          })()}
+        </div>
       )}
 
       <nav className="weekly-time__tabs" aria-label="Weekly time views">
         <button type="button" className={tab === 'week' ? 'is-active' : ''} onClick={() => setTab('week')}>
           <CalendarClock size={17} /> My week
         </button>
-        <button type="button" className={tab === 'insights' ? 'is-active' : ''} onClick={() => setTab('insights')}>
-          <CalendarClock size={17} /> Insights
+        <button type="button" className={tab === 'stats' ? 'is-active' : ''} onClick={() => setTab('stats')}>
+          <CalendarClock size={17} /> Statistics
         </button>
         {context.viewer.can_review && (
           <button type="button" className={tab === 'review' ? 'is-active' : ''} onClick={() => { setTab('review'); void loadQueue() }}>
             <ClipboardCheck size={17} /> Manager review
-            {(matrix?.counts.submitted ?? 0) > 0 && <span>{matrix?.counts.submitted}</span>}
+            {queueWaiting > 0 && <span>{queueWaiting}</span>}
           </button>
         )}
       </nav>
@@ -951,31 +1333,57 @@ export default function WeeklyTimeReporting() {
               <span>{context.submission.review_comments}</span>
             </div>
           )}
-          <div className="weekly-time__week-summary">
-            <div>
-              <span>Recorded</span>
-              <b>{context.summary.reported_hours}h</b>
+          <section className="weekly-time__controlbar">
+            <div className="weekly-time__week-picker">
+              <button type="button" className="icon-button" title="Previous week" onClick={() => void changeWeek(shiftWeek(weekStart, -1))}>
+                <ArrowLeft size={18} />
+              </button>
+              <button type="button" className="button button--secondary" onClick={() => void changeWeek(currentMonday())}>
+                Current week
+              </button>
+              <label>
+                <span>Week of</span>
+                <input type="date" value={weekStart} onChange={(event) => void changeWeek(event.target.value)} />
+              </label>
+              <strong>{shortDate(context.week_start)} - {shortDate(context.week_end)}</strong>
+              <button type="button" className="icon-button" title="Next week" onClick={() => void changeWeek(shiftWeek(weekStart, 1))}>
+                <ArrowRight size={18} />
+              </button>
+              {context.permissions.can_create && !isViewingAnotherUser && (
+                <button type="button" className="button button--secondary" onClick={() => void copyPreviousWeek()} disabled={busy}>
+                  <Copy size={17} />
+                  Copy previous week
+                </button>
+              )}
             </div>
-            <div>
-              <span>Scheduled target</span>
-              <b>{context.summary.target_hours}h</b>
+            <div className="weekly-time__week-summary">
+              <div>
+                <span>Recorded</span>
+                <b>{context.summary.reported_hours}h</b>
+              </div>
+              <div>
+                <span>Scheduled target</span>
+                <b>{context.summary.target_hours}h</b>
+              </div>
+              <div>
+                <span>Remaining</span>
+                <b className={context.summary.remaining_hours < 0 ? 'is-over' : undefined}>
+                  {context.summary.remaining_hours}h
+                </b>
+              </div>
+              {categoryTotals.map((category) => (
+                <div key={category.entryType} className="weekly-time__week-summary-type">
+                  <span>{category.label}</span>
+                  <b>{category.hours}h</b>
+                </div>
+              ))}
             </div>
-            <div>
-              <span>Remaining</span>
-              <b className={context.summary.remaining_hours < 0 ? 'is-over' : undefined}>
-                {context.summary.remaining_hours}h
-              </b>
-            </div>
-          </div>
+            <span className={`weekly-time__status weekly-time__status--${status}`}>{statusLabel(status)}</span>
+          </section>
           <div className="weekly-time__view-bar">
-            <div className="weekly-time__view-toggle" role="group" aria-label="Week view">
-              <button type="button" className={weekView === 'cards' ? 'is-active' : ''} onClick={() => setWeekView('cards')}>
-                Day cards
-              </button>
-              <button type="button" className={weekView === 'grid' ? 'is-active' : ''} onClick={() => { setWeekView('grid'); setGridDraft(null) }}>
-                Grid edit
-              </button>
-            </div>
+            <span className="weekly-time__grid-hint">
+              Click a day on the calendar to open that week for editing.
+            </span>
             {context.permissions.can_request_schedule_change && (
               <button
                 type="button"
@@ -991,207 +1399,219 @@ export default function WeeklyTimeReporting() {
           </div>
           {context.time_off_requests.length > 0 && (
             <div className="weekly-time__timeoff-strip">
-              {context.time_off_requests.map((request) => (
-                <div key={request.request_id}>
-                  <span className={`weekly-time__status weekly-time__status--${request.status}`}>
-                    {statusLabel(request.status)}
-                  </span>
-                  <strong>{request.daily_hours.reduce((sum, value) => sum + Number(value || 0), 0)}h time off</strong>
-                  <span>{request.reason}</span>
-                  {request.review_comments && <em>{request.review_comments}</em>}
-                  {request.status === 'pending' && (
-                    <button type="button" className="table-link" onClick={() => void withdrawTimeOff(request.request_id)}>
-                      Withdraw
-                    </button>
-                  )}
-                </div>
-              ))}
+              {groupTimeOff(context.time_off_requests).map((request) => {
+                const first = request[0]
+                const last = request[request.length - 1]
+                const total = request.reduce((sum, row) => sum + row.daily_hours.reduce((s, v) => s + Number(v || 0), 0), 0)
+                return (
+                  <div key={first.request_id}>
+                    <span className={`weekly-time__status weekly-time__status--${first.status}`}>
+                      {statusLabel(first.status)}
+                    </span>
+                    <strong>
+                      {total}h time off
+                      {request.length > 1 ? ` · ${shortDate(first.week_start)} - ${shortDate(last.week_end)}` : ''}
+                    </strong>
+                    <span>{first.reason}</span>
+                    {first.review_comments && <em>{first.review_comments}</em>}
+                    {(first.status === 'pending' || first.status === 'returned') ? (
+                      <button type="button" className="table-link" onClick={() => void withdrawTimeOff(first.request_id)}>
+                        Withdraw{request.length > 1 ? ' all' : ''}
+                      </button>
+                    ) : first.status === 'approved' ? (
+                      <em className="weekly-time__timeoff-locked">Ask a reviewer to return it before withdrawing.</em>
+                    ) : null}
+                  </div>
+                )
+              })}
             </div>
           )}
-          {weekView === 'grid' ? (
-            <div className="weekly-time__grid-wrap">
-              <table className="weekly-time__grid">
-                <thead>
-                  <tr>
-                    <th>Work type</th>
-                    {context.schedule_days.filter((day) => !isWeekendDate(day.date)).map((day) => (
-                      <th key={day.date}>
-                        {weekdayName(day.date).slice(0, 3)}
-                        <span>{shortDate(day.date)}</span>
-                      </th>
-                    ))}
-                    <th>Total</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {gridRowTypes.map((entryType) => {
-                    const weekdays = context.schedule_days.filter((day) => !isWeekendDate(day.date))
-                    const rowTotal = weekdays.reduce((sum, day) => {
-                      const key = `${day.date}|${entryType.type_key}`
-                      const draft = gridDraft?.[key]
-                      return sum + (draft ?? gridCells.get(key)?.hours ?? 0)
-                    }, 0)
-                    return (
-                      <tr key={entryType.type_key}>
-                        <th>{entryType.label}</th>
-                        {weekdays.map((day) => {
+
+          <section id="wt-week-panel" className="weekly-time__week-card" aria-label="Selected week detail">
+                <div className="weekly-time__grid-wrap">
+                  <table className="weekly-time__grid">
+                    <thead>
+                      <tr>
+                        <th>Work type</th>
+                        {context.schedule_days.filter((day) => !isWeekendDate(day.date)).map((day) => (
+                          <th
+                            key={day.date}
+                            className={day.holiday ? 'is-holiday' : undefined}
+                            title={`${weekdayName(day.date)} ${shortDate(day.date)} · target ${day.target_hours}h${day.holiday ? ` · ${day.holiday.name}` : ''}`}
+                          >
+                            {weekdayName(day.date).slice(0, 3)} {compactDate(day.date)}
+                            <span>{day.target_hours}h{day.holiday ? ` · ${day.holiday.name}` : ''}</span>
+                          </th>
+                        ))}
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {gridRowTypes.map((entryType) => {
+                        const weekdays = context.schedule_days.filter((day) => !isWeekendDate(day.date))
+                        const rowTotal = weekdays.reduce((sum, day) => {
                           const key = `${day.date}|${entryType.type_key}`
-                          const cell = gridCells.get(key)
-                          const locked = (cell?.count ?? 0) > 1
-                          const value = gridDraft?.[key] ?? cell?.hours ?? 0
+                          const draft = gridDraft?.[key]
+                          return sum + (draft ?? gridCells.get(key)?.hours ?? 0)
+                        }, 0)
+                        return (
+                          <tr key={entryType.type_key}>
+                            <th>{entryType.label}</th>
+                            {weekdays.map((day, columnIndex) => {
+                              const key = `${day.date}|${entryType.type_key}`
+                              const cell = gridCells.get(key)
+                              const locked = (cell?.count ?? 0) > 1
+                              const value = gridDraft?.[key] ?? cell?.hours ?? 0
+                              const rowIndex = gridRowTypes.indexOf(entryType)
+                              return (
+                                <td key={key}>
+                                  <input
+                                    id={`wt-cell-${rowIndex}-${columnIndex}`}
+                                    type="number"
+                                    min="0"
+                                    max="8"
+                                    step="0.5"
+                                    disabled={gridBusy || locked
+                                      || (day.time_off && entryType.type_key !== 'leave')
+                                      || !context.permissions.can_edit}
+                                    title={locked
+                                      ? 'Several entries share this day and work type - edit them individually below.'
+                                      : day.time_off
+                                        ? 'Approved time off - only leave can be recorded'
+                                        : day.holiday
+                                          ? `${day.holiday.name} - the day still caps at 8 hours`
+                                          : undefined}
+                                    value={value || ''}
+                                    placeholder="0"
+                                    onFocus={(event) => event.currentTarget.select()}
+                                    onKeyDown={(event) => {
+                                      const moves: Record<string, [number, number]> = {
+                                        Enter: [1, 0],
+                                        ArrowDown: [1, 0],
+                                        ArrowUp: [-1, 0],
+                                        ArrowRight: [0, 1],
+                                        ArrowLeft: [0, -1],
+                                      }
+                                      const move = moves[event.key]
+                                      if (!move) return
+                                      event.preventDefault()
+                                      const target = document.getElementById(
+                                        `wt-cell-${rowIndex + move[0]}-${columnIndex + move[1]}`,
+                                      ) as HTMLInputElement | null
+                                      if (target && !target.disabled) target.select()
+                                      target?.focus()
+                                    }}
+                                    onChange={(event) => {
+                                      const next = { ...(gridDraft ?? {}) }
+                                      next[key] = Number(event.currentTarget.value || 0)
+                                      setGridDraft(next)
+                                    }}
+                                  />
+                                </td>
+                              )
+                            })}
+                            <td className="weekly-time__grid-total">{rowTotal ? rowTotal.toFixed(1) : '\u2014'}</td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                    <tfoot>
+                      <tr>
+                        <th>Day total</th>
+                        {context.schedule_days.filter((day) => !isWeekendDate(day.date)).map((day) => {
+                          const dayTotal = gridRowTypes.reduce((sum, entryType) => {
+                            const key = `${day.date}|${entryType.type_key}`
+                            return sum + (gridDraft?.[key] ?? gridCells.get(key)?.hours ?? 0)
+                          }, 0)
                           return (
-                            <td key={key}>
-                              <input
-                                type="number"
-                                min="0"
-                                max="8"
-                                step="0.5"
-                                disabled={gridBusy || locked || day.target_hours <= 0
-                                  || (day.time_off && entryType.type_key !== 'leave')
-                                  || !context.permissions.can_edit}
-                                title={locked
-                                  ? 'Several entries share this day and work type - edit them on the day cards.'
-                                  : day.time_off
-                                    ? 'Approved time off - only leave can be recorded'
-                                    : day.holiday
-                                      ? `${day.holiday.name} - ${day.target_hours}h can still be recorded`
-                                      : undefined}
-                                value={value || ''}
-                                placeholder="0"
-                                onChange={(event) => {
-                                  const next = { ...(gridDraft ?? {}) }
-                                  next[key] = Number(event.currentTarget.value || 0)
-                                  setGridDraft(next)
-                                }}
-                              />
+                            <td key={day.date} className={dayTotal > 8 ? 'is-over' : undefined}>
+                              {dayTotal ? dayTotal.toFixed(1) : '\u2014'}
                             </td>
                           )
                         })}
-                        <td className="weekly-time__grid-total">{rowTotal ? rowTotal.toFixed(1) : '\u2014'}</td>
-                      </tr>
-                    )
-                  })}
-                </tbody>
-                <tfoot>
-                  <tr>
-                    <th>Day total</th>
-                    {context.schedule_days.filter((day) => !isWeekendDate(day.date)).map((day) => {
-                      const dayTotal = gridRowTypes.reduce((sum, entryType) => {
-                        const key = `${day.date}|${entryType.type_key}`
-                        return sum + (gridDraft?.[key] ?? gridCells.get(key)?.hours ?? 0)
-                      }, 0)
-                      return (
-                        <td key={day.date} className={dayTotal > 8 ? 'is-over' : undefined}>
-                          {dayTotal ? dayTotal.toFixed(1) : '\u2014'}
+                        <td className="weekly-time__grid-total">
+                          {context.schedule_days
+                            .filter((day) => !isWeekendDate(day.date))
+                            .reduce((sum, day) => sum + gridRowTypes.reduce((rowSum, entryType) => {
+                              const key = `${day.date}|${entryType.type_key}`
+                              return rowSum + (gridDraft?.[key] ?? gridCells.get(key)?.hours ?? 0)
+                            }, 0), 0)
+                            .toFixed(1)}
                         </td>
-                      )
-                    })}
-                    <td className="weekly-time__grid-total">
-                      {context.schedule_days
-                        .filter((day) => !isWeekendDate(day.date))
-                        .reduce((sum, day) => sum + gridRowTypes.reduce((rowSum, entryType) => {
-                          const key = `${day.date}|${entryType.type_key}`
-                          return rowSum + (gridDraft?.[key] ?? gridCells.get(key)?.hours ?? 0)
-                        }, 0), 0)
-                        .toFixed(1)}
-                    </td>
-                  </tr>
-                </tfoot>
-              </table>
-              <div className="weekly-time__grid-actions">
-                <button
-                  type="button"
-                  className="button button--primary"
-                  disabled={gridBusy || !gridDraft || !context.permissions.can_edit}
-                  onClick={async () => {
-                    if (!gridDraft) return
-                    setGridBusy(true)
-                    try {
-                      const cells = Object.entries(gridDraft).map(([key, hours]) => {
-                        const [work_date, entry_type] = key.split('|')
-                        return { work_date, entry_type, hours }
-                      })
-                      const response = await portalRequestJson<{ context: WeeklyContext; created: number; updated: number; removed: number }>(
-                        '/api/reports/weekly-time/entries/grid',
-                        { method: 'PUT', body: JSON.stringify({ week_start: context.week_start, cells }) },
-                      )
-                      setContext(response.context)
-                      setGridDraft(null)
-                      toast.success(`Saved: ${response.created} added, ${response.updated} changed, ${response.removed} removed.`)
-                    } catch (saveError) {
-                      toast.error(saveError instanceof Error ? saveError.message : 'The week could not be saved.')
-                    } finally {
-                      setGridBusy(false)
-                    }
-                  }}
-                >
-                  Save week
-                </button>
-                {gridDraft && (
-                  <button type="button" className="button" disabled={gridBusy} onClick={() => setGridDraft(null)}>
-                    Discard changes
-                  </button>
-                )}
-                <span className="weekly-time__grid-hint">
-                  Type hours per work type and day, then save. Weekends are closed, and a holiday
-                  only leaves whatever hours it did not take.
-                </span>
-              </div>
-            </div>
-          ) : (
-          <section className="weekly-time__calendar">
-            {context.schedule_days.map((day) => {
-              const entries = groupedEntries.get(day.date) ?? []
-              const total = entries.reduce((sum, entry) => sum + Number(entry.hours), 0)
-              const weekend = isWeekendDate(day.date)
-              return (
-                <article key={day.date} className={`weekly-time__day ${day.holiday ? 'is-holiday' : ''} ${weekend ? 'is-weekend' : ''}`}>
-                  <header>
-                    <div>
-                      <strong>{weekdayName(day.date)}</strong>
-                      <span className="weekly-time__day-date">{fullDate(day.date)}</span>
-                    </div>
-                    <b className={total > day.target_hours ? 'is-over' : undefined}>
-                      {total}h
-                      {day.target_hours > 0 && <span className="weekly-time__day-target"> / {day.target_hours}h</span>}
-                    </b>
-                  </header>
-                  {day.holiday && (
-                    <div className="weekly-time__holiday">
-                      {day.holiday.name} - {day.holiday.hours}h
-                      {day.target_hours > 0 && ` (${day.target_hours}h still enterable)`}
-                    </div>
-                  )}
-                  {weekend && <div className="weekly-time__holiday">Weekend - no time entry</div>}
-                  {day.time_off && <div className="weekly-time__holiday">Approved time off</div>}
-                  <div className="weekly-time__entries">
-                    {entries.length === 0 && <span className="weekly-time__empty">No time recorded</span>}
-                    {entries.map((entry) => (
-                      <div className="weekly-time__entry" key={entry.entry_id}>
-                        <div>
-                          <strong>{entryTypeLabels.get(entry.entry_type) ?? fallbackEntryTypeLabel(entry.entry_type)}</strong>
-                          <span>{entry.notes || 'No notes'}</span>
-                        </div>
-                        <b>{entry.hours}h</b>
-                        {(context.permissions.can_edit || context.permissions.can_delete) && (
-                          <div className="weekly-time__entry-actions">
-                            {context.permissions.can_edit && <button type="button" title="Edit entry" onClick={() => openEntry(day.date, entry)}><Pencil size={15} /></button>}
-                            {context.permissions.can_delete && <button type="button" title="Delete entry" onClick={() => void deleteEntry(entry)}><Trash2 size={15} /></button>}
-                          </div>
-                        )}
-                      </div>
+                      </tr>
+                    </tfoot>
+                  </table>
+                  <div className="weekly-time__grid-actions">
+                    <button
+                      type="button"
+                      className="button button--primary"
+                      disabled={gridBusy || !gridDraft || !context.permissions.can_edit}
+                      onClick={async () => {
+                        if (!gridDraft) return
+                        setGridBusy(true)
+                        try {
+                          const cells = Object.entries(gridDraft).map(([key, hours]) => {
+                            const [work_date, entry_type] = key.split('|')
+                            return { work_date, entry_type, hours }
+                          })
+                          const response = await portalRequestJson<{ context: WeeklyContext; created: number; updated: number; removed: number }>(
+                            '/api/reports/weekly-time/entries/grid',
+                            { method: 'PUT', body: JSON.stringify({ week_start: context.week_start, cells }) },
+                          )
+                          setContext(response.context)
+                          setGridDraft(null)
+                          toast.success(`Saved: ${response.created} added, ${response.updated} changed, ${response.removed} removed.`)
+                        } catch (saveError) {
+                          toast.error(saveError instanceof Error ? saveError.message : 'The week could not be saved.')
+                        } finally {
+                          setGridBusy(false)
+                        }
+                      }}
+                    >
+                      Save week
+                    </button>
+                    {gridDraft && (
+                      <button type="button" className="button" disabled={gridBusy} onClick={() => setGridDraft(null)}>
+                        Discard changes
+                      </button>
+                    )}
+                    <span className="weekly-time__grid-hint">
+                      Type hours per work type and day, then save. Weekends are closed, and a holiday
+                      only leaves whatever hours it did not take.
+                    </span>
+                  </div>
+                </div>
+                {activeDay && (
+                <div className="weekly-time__dialog-day">
+                  <p className="weekly-time__grid-hint">
+                    These days hold several entries of one work type, so the grid cannot total
+                    them for you. Delete or merge them here and the grid takes over.
+                  </p>
+                  <div className="weekly-time__dialog-daytabs" role="tablist" aria-label="Day details">
+                    {splitEntryDays.map((day) => (
+                      <button key={day} type="button" className={activeDay === day ? 'is-active' : ''} onClick={() => setSelectedDay(day)}>
+                        {weekdayName(day).slice(0, 3)} {shortDate(day)}
+                      </button>
                     ))}
                   </div>
-                  {context.permissions.can_create && day.target_hours > 0 && !weekend && !day.time_off && (
-                    <button type="button" className="weekly-time__add" onClick={() => openEntry(day.date)}>
-                      <Plus size={16} /> Add entry
-                    </button>
-                  )}
-                </article>
-              )
-            })}
+                  {activeDay && (groupedEntries.get(activeDay) ?? []).map((entry) => (
+                    <div key={entry.entry_id} className="weekly-time__dialog-entry">
+                      <strong>{entryTypeLabels.get(entry.entry_type) ?? fallbackEntryTypeLabel(entry.entry_type)}</strong>
+                      <span>{entry.hours}h{entry.start_time && entry.end_time ? ` \u00b7 ${entry.start_time}\u2013${entry.end_time}` : ''}</span>
+                      <em>{entry.notes || 'No notes'}</em>
+                      <span className="weekly-time__table-actions">
+                        {context.permissions.can_edit && (
+                          <button type="button" title="Edit entry" onClick={() => activeDay && openEntry(activeDay, entry)}><Pencil size={14} /></button>
+                        )}
+                        {context.permissions.can_delete && (
+                          <button type="button" title="Delete entry" onClick={() => void deleteEntry(entry)}><Trash2 size={14} /></button>
+                        )}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                )}
           </section>
-          )}
 
           <footer className="weekly-time__workflow">
             <div>
@@ -1236,458 +1656,321 @@ export default function WeeklyTimeReporting() {
         </>
       )}
 
-      {tab === 'insights' && (
-        <section className="weekly-time__insights">
-          <header className="weekly-time__insights-header">
-            <div>
-              <h2>Hours by work type</h2>
-              <p>
-                Submitted and approved weeks only
-                {insights ? ` · ${INSIGHTS_WINDOW_LABELS[insights.window]} · by ${insights.bucket}` : ''}.
-              </p>
-            </div>
-            <div className="weekly-time__insights-controls">
-              <label className="weekly-time__insights-range">
-                <span>Range</span>
-                <select
-                  value={insightsWindow}
-                  onChange={(event) => {
-                    const next = event.currentTarget.value as InsightsWindow
-                    setInsightsWindow(next)
-                    if (next !== 'year') setInsightsYear(null)
-                    else if (!insightsYear) setInsightsYear(insights?.year ?? new Date().getFullYear())
-                  }}
-                >
-                  {(Object.keys(INSIGHTS_WINDOW_LABELS) as InsightsWindow[]).map((value) => (
-                    <option key={value} value={value}>{INSIGHTS_WINDOW_LABELS[value]}</option>
+      {tab === 'stats' && (
+        <section className="weekly-time__week-card" aria-label="Statistics">
+          <div className="weekly-time__stats-controls">
+            <label>
+              <span>From</span>
+              <input type="date" value={statsStart} max={statsEnd || undefined}
+                onChange={(event) => setStatsStart(event.target.value)} />
+            </label>
+            <label>
+              <span>To</span>
+              <input type="date" value={statsEnd} min={statsStart || undefined}
+                onChange={(event) => setStatsEnd(event.target.value)} />
+            </label>
+            <label>
+              <span>Group by</span>
+              <select value={statsBucket} onChange={(event) => setStatsBucket(event.currentTarget.value)}>
+                <option value="total">Work type (total)</option>
+                <option value="month">Month</option>
+                <option value="quarter">Quarter</option>
+                <option value="year">Year</option>
+              </select>
+            </label>
+            <label>
+              <span>Work type</span>
+              <select value={statsType} onChange={(event) => setStatsType(event.currentTarget.value)}>
+                <option value="">All work types</option>
+                {gridRowTypes.map((entryType) => (
+                  <option key={entryType.type_key} value={entryType.type_key}>{entryType.label}</option>
+                ))}
+              </select>
+            </label>
+            {(statsData?.teams.length ?? 0) > 1 && (
+              <label className="weekly-time__stats-team">
+                <span>Team</span>
+                <select value={statsTeam} onChange={(event) => setStatsTeam(event.currentTarget.value)}>
+                  <option value="">All teams</option>
+                  {(statsData?.teams ?? []).map((team) => (
+                    <option key={team} value={team}>{team}</option>
                   ))}
                 </select>
               </label>
-              {insightsWindow === 'custom' && (
-                <>
-                  <label className="weekly-time__insights-range">
-                    <span>From</span>
-                    <input type="date" value={insightsStart} onChange={(event) => setInsightsStart(event.currentTarget.value)} />
-                  </label>
-                  <label className="weekly-time__insights-range">
-                    <span>To</span>
-                    <input type="date" value={insightsEnd} onChange={(event) => setInsightsEnd(event.currentTarget.value)} />
-                  </label>
-                </>
-              )}
-              <button
-                type="button"
-                className="weekly-time__insights-export"
-                disabled={!insights || insightsLoading}
-                onClick={async () => {
-                  if (!context) return
-                  try {
-                    const query = `week_start=${context.week_start}&scope=${insightsScope}&window=${insightsWindow}`
-                      + (insightsYear ? `&year=${insightsYear}` : '')
-                      + (insightsWindow === 'custom' ? `&start=${insightsStart}&end=${insightsEnd}` : '')
-                    const file = await portalRequestBinary(`/api/reports/weekly-time/insights/export?${query}`)
-                    await saveExportAs(`Weekly-Time-Insights-${insights?.start ?? ''}-to-${insights?.end ?? ''}.xlsx`, file.bytes, 'excel')
-                    toast.success('Insights exported.')
-                  } catch (exportError) {
-                    if (exportError instanceof Error && /cancel/i.test(exportError.message)) return
-                    toast.error(exportError instanceof Error ? exportError.message : 'The export failed.')
-                  }
-                }}
-              >
-                Export to Excel
-              </button>
-              {insightsWindow === 'year' && (
-                <label className="weekly-time__insights-range">
-                  <span>Year</span>
-                  <select
-                    value={insightsYear ?? ''}
-                    onChange={(event) => setInsightsYear(Number(event.currentTarget.value))}
-                  >
-                    {(insights?.available_years.length ? insights.available_years : [new Date().getFullYear()]).map((value) => (
-                      <option key={value} value={value}>{value}</option>
-                    ))}
-                  </select>
-                </label>
-              )}
-            </div>
-            {insights?.can_view_all && (
-              <div className="weekly-time__insights-scope" role="group" aria-label="Whose hours">
-                <button
-                  type="button"
-                  className={insightsScope === 'self' ? 'is-active' : ''}
-                  onClick={() => setInsightsScope('self')}
-                >
-                  My hours
-                </button>
-                <button
-                  type="button"
-                  className={insightsScope === 'all' ? 'is-active' : ''}
-                  onClick={() => setInsightsScope('all')}
-                >
-                  Everyone
-                </button>
-              </div>
             )}
-          </header>
-          {insightsLoading && <p className="weekly-time__empty">Loading insights…</p>}
-          {!insightsLoading && insights && (
+            <div className="weekly-time__stats-presets">
+              <button type="button" onClick={() => {
+                const now = new Date()
+                setStatsStart(`${now.getFullYear()}-01-01`)
+                setStatsEnd(isoDate(now))
+              }}>This year</button>
+              <button type="button" onClick={() => {
+                const now = new Date()
+                const fiscalStart = now.getMonth() + 1 >= 7 ? now.getFullYear() : now.getFullYear() - 1
+                setStatsStart(`${fiscalStart}-07-01`)
+                setStatsEnd(isoDate(now))
+              }}>Fiscal year</button>
+              <button type="button" onClick={() => {
+                const now = new Date()
+                const past = new Date(now)
+                past.setDate(now.getDate() - 29)
+                setStatsStart(isoDate(past))
+                setStatsEnd(isoDate(now))
+              }}>Past 30 days</button>
+            </div>
+            <button type="button" className="button button--secondary weekly-time__stats-export"
+              onClick={() => void exportStatistics()} disabled={busy || !statsData}>
+              <Download size={16} /> Export Excel
+            </button>
+          </div>
+          {statsData ? (
             <>
-              <div className="weekly-time__matrix-wrap">
-                <table className="weekly-time__matrix">
-                  <thead>
-                    <tr>
-                      <th className="weekly-time__matrix-type">Work type</th>
-                      {insights.buckets.map((bucket) => (
-                        <th key={bucket.key} title={bucket.key}>{bucket.label}</th>
-                      ))}
-                      <th className="weekly-time__matrix-total">Total</th>
-                      <th className="weekly-time__matrix-total">Avg/wk</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {insights.entry_types.map((entryType) => {
-                      const rowValues = insights.buckets.map((bucket) => bucket.totals[entryType.key] ?? 0)
-                      const rowTotal = rowValues.reduce((sum, value) => sum + value, 0)
-                      const activeWeeks = insights.buckets.filter((bucket) => bucket.total > 0).length
-                      const peak = Math.max(1, ...insights.buckets.flatMap((bucket) =>
-                        insights.entry_types.map((item) => bucket.totals[item.key] ?? 0)))
-                      return (
-                        <tr key={entryType.key}>
-                          <th className="weekly-time__matrix-type">{entryType.label}</th>
-                          {rowValues.map((value, index) => (
-                            <td
-                              key={insights.buckets[index].key}
-                              className="weekly-time__matrix-cell"
-                              title={`${entryType.label} · ${insights.buckets[index].label}: ${value ? `${value}h` : 'no hours'}`}
-                              style={value ? { background: `rgba(37, 90, 143, ${(0.06 + 0.3 * (value / peak)).toFixed(3)})` } : undefined}
-                            >
-                              {value ? value.toFixed(value % 1 ? 1 : 0) : '\u2014'}
-                            </td>
-                          ))}
-                          <td className="weekly-time__matrix-total">{rowTotal ? rowTotal.toFixed(1) : '\u2014'}</td>
-                          <td className="weekly-time__matrix-total">
-                            {rowTotal && activeWeeks ? (rowTotal / activeWeeks).toFixed(1) : '\u2014'}
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                  <tfoot>
-                    <tr>
-                      <th className="weekly-time__matrix-type">Period total</th>
-                      {insights.buckets.map((bucket) => (
-                        <td key={bucket.key} className="weekly-time__matrix-total">
-                          {bucket.total ? bucket.total.toFixed(1) : '\u2014'}
-                        </td>
-                      ))}
-                      <td className="weekly-time__matrix-total">
-                        {insights.buckets.reduce((sum, week) => sum + week.total, 0).toFixed(1)}
-                      </td>
-                      <td className="weekly-time__matrix-total" />
-                    </tr>
-                  </tfoot>
-                </table>
+              <p className="weekly-time__grid-hint">
+                {shortDate(statsData.start)} - {shortDate(statsData.end)}
+                {statsData.counted_through < statsData.end ? ` \u00b7 counted through ${shortDate(statsData.counted_through)}` : ''}
+                {' \u00b7 '}{statsData.working_days} working day{statsData.working_days === 1 ? '' : 's'}
+                {statsData.cards.length > 1 ? ` \u00b7 ${statsData.cards.length} people` : ''}
+              </p>
+              <div className="weekly-time__stats-cards">
+                {statsData.cards.map((card) => {
+                  const grouped = statsData.buckets.length > 0
+                  const columns: { key: string; label: string; value: number }[] = grouped
+                    ? statsData.buckets.map((item) => ({
+                        key: item.key,
+                        label: item.label,
+                        value: card.bucket_hours[item.key] ?? 0,
+                      }))
+                    : Object.entries(card.types)
+                        .sort((a, b) => b[1] - a[1])
+                        .map(([key, value]) => ({
+                          key,
+                          label: entryTypeLabels.get(key) ?? fallbackEntryTypeLabel(key),
+                          value,
+                        }))
+                  const maxColumn = columns.reduce((max, item) => Math.max(max, item.value), 0)
+                  const dense = columns.length > 16
+                  return (
+                    <article key={card.user_id} className="weekly-time__stats-card">
+                      <header>
+                        <strong>{card.name}</strong>
+                        <span>{card.team_name ?? 'No team'}</span>
+                        {card.own && <em>You</em>}
+                      </header>
+                      <div className="weekly-time__heatmap-stats weekly-time__heatmap-stats--card">
+                        <div className="weekly-time__heatmap-stat-list">
+                          <div className="weekly-time__heatmap-stat">
+                            <span>Recorded</span>
+                            <b>{round1(card.total_hours)}h</b>
+                            <small>
+                              {statsData.working_days > 0
+                                ? `${round1(card.total_hours / (statsData.working_days / 5))}h avg/week`
+                                : 'no working days'}
+                            </small>
+                          </div>
+                          <div className="weekly-time__heatmap-stat">
+                            <span>Days logged</span>
+                            <b>{card.logged_days} of {statsData.working_days}</b>
+                            {card.missing_days > 0
+                              ? <small className="is-missing">{card.missing_days} day{card.missing_days === 1 ? '' : 's'} missing</small>
+                              : <small>all days filled</small>}
+                          </div>
+                          <div className="weekly-time__heatmap-stat">
+                            <span>Leave used</span>
+                            <b>{round1(card.leave_hours)}h</b>
+                            <small>{round1(card.leave_hours / 8)} day{card.leave_hours === 8 ? '' : 's'}</small>
+                          </div>
+                        </div>
+                        {columns.length > 0 && maxColumn > 0 && (
+                          <div
+                            className={`weekly-time__heatmap-chart${dense ? ' is-dense' : ''}`}
+                            role="img"
+                            aria-label={`Hours for ${card.name}`}
+                          >
+                            {columns.map((column) => (
+                              <div
+                                key={column.key}
+                                className="weekly-time__heatmap-chart-col"
+                                title={`${column.label}: ${round1(column.value)}h`}
+                              >
+                                {!dense && <b>{column.value ? `${round1(column.value)}h` : ''}</b>}
+                                <span style={{ height: `${Math.max(column.value ? 5 : 2, Math.round((column.value / maxColumn) * 70)) }px` }} />
+                                {!dense && <em>{column.label}</em>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  )
+                })}
               </div>
-              <div className="weekly-time__insights-summary">
-                <div>
-                  <span>Total</span>
-                  <b>{insights.buckets.reduce((sum, bucket) => sum + bucket.total, 0).toFixed(1)}h</b>
-                </div>
-                <div>
-                  <span>Average / period</span>
-                  <b>{(insights.buckets.reduce((sum, bucket) => sum + bucket.total, 0) / Math.max(1, insights.buckets.filter((bucket) => bucket.total > 0).length)).toFixed(1)}h</b>
-                </div>
-                <div>
-                  <span>Periods counted</span>
-                  <b>{insights.buckets.filter((bucket) => bucket.total > 0).length}</b>
-                </div>
-              </div>
-              {insights.scope === 'all' && insights.people.length > 0 && (
-                <div className="weekly-time__insights-table-wrap">
-                  <table className="weekly-time__insights-table">
-                    <thead>
-                      <tr>
-                        <th>Person</th>
-                        <th>Team</th>
-                        {insights.entry_types.map((entryType) => <th key={entryType.key}>{entryType.label}</th>)}
-                        <th>Total</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {insights.people.map((person) => (
-                        <tr key={person.name}>
-                          <td>{person.name}</td>
-                          <td>{person.team ?? '—'}</td>
-                          {insights.entry_types.map((entryType) => (
-                            <td key={entryType.key}>{person.totals[entryType.key]?.toFixed(1) ?? ''}</td>
-                          ))}
-                          <td><b>{person.total.toFixed(1)}</b></td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {!insights.buckets.some((bucket) => bucket.total > 0) && (
-                <p className="weekly-time__empty">No submitted or approved weeks in this range yet.</p>
-              )}
             </>
+          ) : (
+            <p className="weekly-time__empty">Loading statistics\u2026</p>
           )}
         </section>
       )}
 
       {tab === 'review' && context.viewer.can_review && (
         <section className="weekly-time__panel">
-          <header>
-            <div>
-              <h2>Manager review</h2>
-              <p>Weekly reports awaiting your decision.</p>
-            </div>
-            <button type="button" className="button button--secondary" onClick={() => void loadQueue()}>
-              <RefreshCw size={17} /> Refresh queue
-            </button>
-          </header>
-          <div className="weekly-time__filters">
+          <div className="weekly-time__stats-controls">
             <label>
-              <span>Person</span>
-              <select
-                value={matrixPerson ?? ''}
-                onChange={(event) => { setMatrixPerson(Number(event.currentTarget.value) || null); setSelected({}) }}
-              >
-                <option value="">Everyone</option>
-                {matrix?.people.map((person) => (
-                  <option key={person.user_id} value={person.user_id}>{person.name}</option>
-                ))}
-              </select>
+              <span>Weeks from</span>
+              <input type="date" value={queueFrom} max={queueTo || undefined}
+                onChange={(event) => { setQueueFrom(event.target.value); setQueuePage(0) }} />
+            </label>
+            <label>
+              <span>To</span>
+              <input type="date" value={queueTo} min={queueFrom || undefined}
+                onChange={(event) => { setQueueTo(event.target.value); setQueuePage(0) }} />
+            </label>
+            <label>
+              <span>Employee</span>
+              <input type="text" placeholder="Any name" value={queueName}
+                onChange={(event) => { setQueueName(event.target.value); setQueuePage(0) }} />
             </label>
             <label>
               <span>Team</span>
-              <select
-                value={matrixTeam ?? ''}
-                onChange={(event) => { setMatrixTeam(Number(event.currentTarget.value) || null); setSelected({}) }}
-              >
+              <select value={queueTeam} onChange={(event) => { setQueueTeam(event.currentTarget.value); setQueuePage(0) }}>
                 <option value="">All teams</option>
-                {matrix?.teams.map((team) => (
-                  <option key={team.team_id} value={team.team_id}>{team.name}</option>
-                ))}
+                {queueTeams.map((team) => <option key={team} value={team}>{team}</option>)}
               </select>
             </label>
-            <label>
-              <span>Status</span>
-              <select value={matrixStatus} onChange={(event) => setMatrixStatus(event.currentTarget.value)}>
-                <option value="">Any status</option>
-                <option value="submitted">Waiting on review</option>
-                <option value="approved">Approved</option>
-                <option value="returned">Returned</option>
-                <option value="draft">Draft</option>
-              </select>
-            </label>
-            <label>
-              <span>Window</span>
-              <select value={matrixSpan} onChange={(event) => setMatrixSpan(Number(event.currentTarget.value))}>
-                {MATRIX_SPANS.map((value) => (
-                  <option key={value} value={value}>Last {value} weeks</option>
-                ))}
-              </select>
-            </label>
-            <div className="weekly-time__filter-nav">
-              <button
-                type="button"
-                title="Earlier weeks"
-                onClick={() => setMatrixEndWeek(shiftWeek(matrix?.end_week ?? weekStart, -matrixSpan))}
-              >
-                <ArrowLeft size={16} />
+            {queueFiltered.length > 1 && (
+              <button type="button" className="button button--secondary" onClick={() => void approveAllPending()} disabled={busy}>
+                <Check size={16} /> Approve all {queueFiltered.length} weeks
               </button>
-              <button
-                type="button"
-                title="Later weeks"
-                onClick={() => setMatrixEndWeek(shiftWeek(matrix?.end_week ?? weekStart, matrixSpan))}
-              >
-                <ArrowRight size={16} />
-              </button>
-              {matrixEndWeek && (
-                <button type="button" className="table-link" onClick={() => setMatrixEndWeek(null)}>Today</button>
-              )}
-            </div>
+            )}
+            <button type="button" className="button button--secondary weekly-time__stats-export" onClick={() => void loadQueue()}>
+              <RefreshCw size={16} /> Refresh queue
+            </button>
           </div>
 
-          {selectedIds.length > 0 && (
-            <div className="weekly-time__bulk-bar">
-              <strong>{selectedIds.length} week{selectedIds.length === 1 ? '' : 's'} selected</strong>
-              <button type="button" className="button button--primary" onClick={() => setBulkModal('approve')}>
-                <Check size={16} /> Approve selected
-              </button>
-              <button type="button" className="button button--secondary" onClick={() => setBulkModal('return')}>
-                <RotateCcw size={16} /> Return selected
-              </button>
-              {matrix?.can_reopen && (
-                <button type="button" className="button button--secondary" onClick={() => setBulkModal('reopen')}>
-                  Reopen selected
-                </button>
-              )}
-              <button type="button" className="table-link" onClick={() => setSelected({})}>Clear</button>
-            </div>
-          )}
-
-          <div className="weekly-time__matrix-wrap">
-            <table className="weekly-time__review-matrix">
-              <thead>
-                <tr>
-                  <th className="weekly-time__matrix-person">Employee</th>
-                  {matrix?.weeks.map((week) => {
-                    const columnIds = (matrix?.rows ?? [])
-                      .map((row) => row.cells[week.week_start])
-                      .filter((cell): cell is MatrixCell => Boolean(cell) && cell.status === 'submitted')
-                      .map((cell) => cell.submission_id)
-                    const allPicked = columnIds.length > 0 && columnIds.every((id) => selected[id])
-                    return (
-                      <th key={week.week_start}>
-                        <button
-                          type="button"
-                          className="table-link"
-                          disabled={columnIds.length === 0}
-                          title={columnIds.length ? `Select the ${columnIds.length} week(s) waiting on review` : 'Nothing waiting this week'}
-                          onClick={() => setSelected((current) => {
-                            const next = { ...current }
-                            for (const id of columnIds) {
-                              if (allPicked) delete next[id]
-                              else next[id] = true
-                            }
-                            return next
-                          })}
-                        >
-                          {shortDate(week.week_start)}
-                        </button>
-                      </th>
-                    )
-                  })}
-                </tr>
-              </thead>
-              <tbody>
-                {(matrix?.rows.length ?? 0) === 0 && (
-                  <tr>
-                    <td className="empty-cell" colSpan={(matrix?.weeks.length ?? 0) + 1}>
-                      {matrixBusy ? 'Loading...' : 'Nobody in your review scope matches these filters.'}
-                    </td>
-                  </tr>
-                )}
-                {matrix?.rows.map((row) => (
-                  <tr key={row.user_id}>
-                    <th className="weekly-time__matrix-person">
-                      {row.name}
-                      <span>{row.team_name || 'No team'}</span>
-                    </th>
-                    {matrix.weeks.map((week) => {
-                      const cell = row.cells[week.week_start]
-                      if (!cell) {
-                        return (
-                          <td key={week.week_start} className="weekly-time__cell weekly-time__cell--missing" title="Not submitted">
-                            &#8212;
-                          </td>
-                        )
-                      }
-                      const mark = MATRIX_LEGEND.find((item) => item.status === cell.status)?.mark ?? ''
-                      const pickable = cell.status === 'submitted' || (cell.status === 'approved' && matrix.can_reopen)
-                      return (
-                        <td key={week.week_start} className={`weekly-time__cell weekly-time__cell--${cell.status}`}>
-                          <button
-                            type="button"
-                            className={selected[cell.submission_id] ? 'is-picked' : undefined}
-                            title={`${row.name} - ${statusLabel(cell.status)}${cell.hours ? ` - ${cell.hours}h` : ''}`}
-                            onClick={(event) => {
-                              if (pickable && (event.ctrlKey || event.metaKey || event.shiftKey)) {
-                                setSelected((current) => {
-                                  const next = { ...current }
-                                  if (next[cell.submission_id]) delete next[cell.submission_id]
-                                  else next[cell.submission_id] = true
-                                  return next
-                                })
-                                return
-                              }
-                              void openSubmittedWeek({ week_start: week.week_start, user_id: row.user_id })
-                            }}
-                          >
-                            <b>{mark}</b>
-                            <span>{cell.hours ? `${cell.hours}h` : ''}</span>
-                          </button>
-                          {pickable && (
-                            <input
-                              type="checkbox"
-                              aria-label={`Select ${row.name} week of ${week.week_start}`}
-                              checked={Boolean(selected[cell.submission_id])}
-                              onChange={() => setSelected((current) => {
-                                const next = { ...current }
-                                if (next[cell.submission_id]) delete next[cell.submission_id]
-                                else next[cell.submission_id] = true
-                                return next
-                              })}
-                            />
+          {(() => {
+            const PAGE_SIZE = 10
+            const pageCount = Math.max(1, Math.ceil(reviewItems.length / PAGE_SIZE))
+            const page = Math.min(queuePage, pageCount - 1)
+            const rows = reviewItems.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)
+            if (rows.length === 0) return null
+            return (
+              <>
+                <table className="weekly-time__table">
+                  <thead><tr><th>Employee</th><th>Item</th><th>Period</th><th>Status</th><th>Actions</th></tr></thead>
+                  <tbody>
+                    {rows.map((item) => (
+                      <tr key={item.key}>
+                        <td>
+                          {item.employee}
+                          <span className="weekly-time__table-sub">{item.team ?? 'No team'}</span>
+                        </td>
+                        <td>
+                          {item.kind === 'week' ? 'Week' : `Time off \u00b7 ${item.hours}h`}
+                          {item.kind === 'timeoff' && item.reason ? (
+                            <span className="weekly-time__table-sub">{item.reason}</span>
+                          ) : null}
+                        </td>
+                        <td>
+                          {shortDate(item.periodStart)} - {shortDate(item.periodEnd)}
+                          {item.weekCount > 1 ? ` (${item.weekCount} weeks)` : ''}
+                        </td>
+                        <td>
+                          <span className={`weekly-time__status weekly-time__status--${item.status}`}>{statusLabel(item.status)}</span>
+                          <span className="weekly-time__table-sub">
+                            {item.decidedBy ? `${item.decidedBy} \u00b7 ` : ''}
+                            {item.when ? formatTime(item.when) : ''}
+                          </span>
+                        </td>
+                        <td className="weekly-time__table-actions">
+                          {item.kind === 'week' && (
+                            <button type="button" className="table-link" onClick={() => void openSubmittedWeek({ week_start: item.periodStart, user_id: item.userId })}>
+                              Open week
+                            </button>
+                          )}
+                          {item.kind === 'week' && item.status === 'submitted' && item.submissionId && (
+                            <>
+                              <button type="button" className="table-link" onClick={() => setReviewModal({ id: item.submissionId as string, action: 'approve' })}>
+                                Approve
+                              </button>
+                              <button type="button" className="table-link" onClick={() => setReviewModal({ id: item.submissionId as string, action: 'return' })}>
+                                Return
+                              </button>
+                            </>
+                          )}
+                          {item.kind === 'week' && item.status === 'approved' && queueCanReopen && item.submissionId && (
+                            <button type="button" className="table-link" onClick={() => setReviewModal({ id: item.submissionId as string, action: 'reopen' })}>
+                              Reopen
+                            </button>
+                          )}
+                          {item.kind === 'timeoff' && item.status === 'pending' && item.requestId && (
+                            <button
+                              type="button"
+                              className="table-link"
+                              title={item.lockedWeeks > 0
+                                ? 'Some covered weeks are already submitted or approved - your approval writes the leave into them directly.'
+                                : undefined}
+                              onClick={() => setTimeOffReview({ id: item.requestId as string, action: 'approve' })}
+                            >
+                              Approve
+                            </button>
+                          )}
+                          {item.kind === 'timeoff' && item.requestId && (
+                            <button
+                              type="button"
+                              className="table-link"
+                              title={item.status === 'approved'
+                                ? 'Returning removes the approved leave from the week and lets the owner withdraw or re-request.'
+                                : undefined}
+                              onClick={() => setTimeOffReview({ id: item.requestId as string, action: 'return' })}
+                            >
+                              Return
+                            </button>
                           )}
                         </td>
-                      )
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {timeOffQueue.length > 0 && (
-            <>
-              <h3 className="weekly-time__section-heading">Time off waiting on you</h3>
-              <table className="weekly-time__table">
-                <thead><tr><th>Employee</th><th>Week</th><th>Hours</th><th>Reason</th><th>Actions</th></tr></thead>
-                <tbody>
-                  {timeOffQueue.map((request) => (
-                    <tr key={request.request_id}>
-                      <td>{request.employee_name}</td>
-                      <td>{shortDate(request.week_start)} - {shortDate(request.week_end)}</td>
-                      <td>{request.daily_hours.reduce((sum, value) => sum + Number(value || 0), 0)}h</td>
-                      <td>{request.reason}</td>
-                      <td className="weekly-time__table-actions">
-                        <button type="button" className="table-link" onClick={() => setTimeOffReview({ id: request.request_id, action: 'approve' })}>
-                          Approve
-                        </button>
-                        <button type="button" className="table-link" onClick={() => setTimeOffReview({ id: request.request_id, action: 'return' })}>
-                          Return
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </>
-          )}
-          <div className="weekly-time__matrix-legend">
-            {MATRIX_LEGEND.map((item) => (
-              <span key={item.status} className={`weekly-time__cell--${item.status}`}>
-                <b>{item.mark}</b> {item.label}
-                {matrix?.counts[item.status === 'missing' ? 'not_submitted' : item.status]
-                  ? ` (${matrix.counts[item.status === 'missing' ? 'not_submitted' : item.status]})`
-                  : ''}
-              </span>
-            ))}
-            <span className="weekly-time__grid-hint">Click a cell to open the week; Ctrl-click or the checkbox to select it.</span>
-          </div>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {pageCount > 1 && (
+                  <div className="weekly-time__pager">
+                    <button type="button" className="table-link" disabled={page === 0} onClick={() => setQueuePage(page - 1)}>
+                      <ArrowLeft size={14} /> Previous
+                    </button>
+                    <span>Page {page + 1} of {pageCount} \u00b7 {reviewItems.length} items</span>
+                    <button type="button" className="table-link" disabled={page >= pageCount - 1} onClick={() => setQueuePage(page + 1)}>
+                      Next <ArrowRight size={14} />
+                    </button>
+                  </div>
+                )}
+              </>
+            )
+          })()}
         </section>
       )}
 
       {entryModal && (
-        <div className="weekly-time__modal-backdrop" role="presentation">
+        <ModalBackdrop>
           <form className="weekly-time__modal" onSubmit={saveEntry}>
             <header><h2>{editingEntry ? 'Edit time entry' : 'Add time entry'}</h2><button type="button" onClick={() => setEntryModal(false)}><X /></button></header>
             <div className="weekly-time__form-grid">
-              <label><span>Date</span><input type="date" value={entryForm.work_date} min={context.week_start} max={context.week_end} onChange={(event) => setEntryForm({ ...entryForm, work_date: event.target.value })} required /></label>
+              <label><span>Date</span><input type="date" value={entryForm.work_date} min={context.week_start} max={context.week_end} onChange={(event) => {
+                const nextDate = event.target.value
+                setEntryForm({ ...entryForm, work_date: nextDate, ...(isTimeOffDay(nextDate) && entryForm.entry_type !== 'leave' ? { entry_type: 'leave' } : {}) })
+              }} required /></label>
               <label>
                 <span>Type</span>
                 <select value={entryForm.entry_type} onChange={(event) => setEntryForm({ ...entryForm, entry_type: event.target.value })}>
                   {entryTypeOptions
                     .filter((entryType) => entryType.is_active || entryType.type_key === entryForm.entry_type)
+                    .filter((entryType) => !isTimeOffDay(entryForm.work_date) || entryType.type_key === 'leave')
                     .map((entryType) => <option key={entryType.type_key} value={entryType.type_key}>{entryType.label}</option>)}
                 </select>
               </label>
               <label><span>Hours</span><input type="number" min={MIN_ENTRY_HOURS} max={MAX_ENTRY_HOURS} step="0.01" value={entryForm.hours} onChange={(event) => updateLinkedTimeField('hours', event.target.value)} aria-invalid={!entryValidation.valid} required /></label>
               <label><span>Start time</span><input type="time" value={entryForm.start_time} onChange={(event) => updateLinkedTimeField('start_time', event.target.value)} /></label>
               <label><span>End time</span><input type="time" value={entryForm.end_time} onChange={(event) => updateLinkedTimeField('end_time', event.target.value)} /></label>
+              {isTimeOffDay(entryForm.work_date) && (
+                <p className="weekly-time__grid-hint span-2">This day is approved time off - only leave hours can be recorded.</p>
+              )}
               <p className={`weekly-time__duration-help span-2${entryValidation.valid ? '' : ' is-error'}`} aria-live="polite">
                 {entryValidation.message}
               </p>
@@ -1695,11 +1978,11 @@ export default function WeeklyTimeReporting() {
             </div>
             <footer><button type="button" className="button button--secondary" onClick={() => setEntryModal(false)}>Cancel</button><button type="submit" className="button button--primary" disabled={busy || !entryValidation.valid}>Save entry</button></footer>
           </form>
-        </div>
+        </ModalBackdrop>
       )}
 
       {timeOffModal && (
-        <div className="weekly-time__modal-backdrop" role="presentation">
+        <ModalBackdrop>
           <form className="weekly-time__modal" onSubmit={submitTimeOff}>
             <header><h2>Request time off</h2><button type="button" onClick={() => setTimeOffModal(false)}><X /></button></header>
             <p className="weekly-time__grid-hint">
@@ -1710,11 +1993,19 @@ export default function WeeklyTimeReporting() {
               <label>
                 <span>First day</span>
                 <input type="date" required value={timeOffForm.start_date}
-                  onChange={(event) => setTimeOffForm({ ...timeOffForm, start_date: event.target.value })} />
+                  onChange={(event) => {
+                    const start = event.target.value
+                    // Moving the first day past the last drags the last day along.
+                    setTimeOffForm((current) => ({
+                      ...current,
+                      start_date: start,
+                      end_date: current.end_date && current.end_date < start ? start : current.end_date,
+                    }))
+                  }} />
               </label>
               <label>
                 <span>Last day</span>
-                <input type="date" required value={timeOffForm.end_date}
+                <input type="date" required min={timeOffForm.start_date || undefined} value={timeOffForm.end_date}
                   onChange={(event) => setTimeOffForm({ ...timeOffForm, end_date: event.target.value })} />
               </label>
             </div>
@@ -1728,11 +2019,11 @@ export default function WeeklyTimeReporting() {
               <button type="submit" className="button button--primary" disabled={busy}>Send request</button>
             </footer>
           </form>
-        </div>
+        </ModalBackdrop>
       )}
 
       {timeOffReview && (
-        <div className="weekly-time__modal-backdrop" role="presentation">
+        <ModalBackdrop>
           <form className="weekly-time__modal weekly-time__modal--review" onSubmit={decideTimeOff}>
             <header>
               <h2>{timeOffReview.action === 'approve' ? 'Approve time off' : 'Return request'}</h2>
@@ -1756,38 +2047,11 @@ export default function WeeklyTimeReporting() {
               </button>
             </footer>
           </form>
-        </div>
-      )}
-
-      {bulkModal && (
-        <div className="weekly-time__modal-backdrop" role="presentation">
-          <form className="weekly-time__modal weekly-time__modal--review" onSubmit={(event) => { event.preventDefault(); void runBulkReview() }}>
-            <header>
-              <h2>
-                {bulkModal === 'approve' && `Approve ${selectedIds.length} week${selectedIds.length === 1 ? '' : 's'}`}
-                {bulkModal === 'return' && `Return ${selectedIds.length} week${selectedIds.length === 1 ? '' : 's'}`}
-                {bulkModal === 'reopen' && `Reopen ${selectedIds.length} week${selectedIds.length === 1 ? '' : 's'}`}
-              </h2>
-              <button type="button" onClick={() => setBulkModal(null)}><X /></button>
-            </header>
-            <p className="weekly-time__grid-hint">
-              The same comment goes on every week. A week that has moved since the page loaded is
-              skipped and reported back, not silently changed.
-            </p>
-            <label className="weekly-time__reason">
-              <span>{bulkModal === 'approve' ? 'Comments (optional)' : 'Comments (required)'}</span>
-              <textarea rows={4} value={bulkComments} onChange={(event) => setBulkComments(event.target.value)} required={bulkModal !== 'approve'} />
-            </label>
-            <footer>
-              <button type="button" className="button button--secondary" onClick={() => setBulkModal(null)}>Cancel</button>
-              <button type="submit" className="button button--primary" disabled={busy}>Confirm</button>
-            </footer>
-          </form>
-        </div>
+        </ModalBackdrop>
       )}
 
       {reviewModal && (
-        <div className="weekly-time__modal-backdrop" role="presentation">
+        <ModalBackdrop>
           <form className="weekly-time__modal weekly-time__modal--review" onSubmit={completeReview}>
             <header>
               <h2>
@@ -1815,7 +2079,7 @@ export default function WeeklyTimeReporting() {
               </button>
             </footer>
           </form>
-        </div>
+        </ModalBackdrop>
       )}
     </main>
   )

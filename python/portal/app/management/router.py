@@ -80,8 +80,8 @@ from portal.app.management.services import (
     write_audit_log,
 )
 from portal.app.sync.errors import SyncError
-from portal.app.sync.models import Identity
-from portal.app.sync.runtime import current_coordinator
+from portal.app.core.access_preview import is_preview_safe
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 router = APIRouter(tags=["portal-management"])
 
@@ -410,11 +410,7 @@ def _initialize_desktop_business_sync(user: User) -> None:
     """Install or refresh the mutable-data replica during desktop startup."""
     try:
         coordinator = current_coordinator(
-            Identity(
-                user_id=str(user.id),
-                employee_number=str(user.employee_id),
-                email=str(user.email),
-            ),
+            sync_identity(user),
             initialize=False,
         )
         # Always synchronize when Portal starts. A missing local database is
@@ -461,6 +457,10 @@ def _apply_test_access(
         {
             "actor_user_id": user.id,
             "actor_name": display_name(user),
+            # The desktop's own account: local synchronization stays attributed
+            # to the installation rather than to the previewed user.
+            "actor_employee_id": str(user.employee_id or "").strip(),
+            "actor_email": str(user.email or ""),
             "mode": normalized_mode,
             "read_only": normalized_mode == "read_only",
         },
@@ -495,7 +495,12 @@ def get_current_user(
             # has been explicitly selected for this request.
             current_user = _apply_test_access(desktop_user, db, test_access, test_user_id, test_role, test_mode)
             test_context = getattr(current_user, "_portal_test_access", None)
-            if test_context and test_context.get("read_only", True) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            if (
+                test_context
+                and test_context.get("read_only", True)
+                and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+                and not is_preview_safe(request.path)
+            ):
                 raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
             return current_user
         if authorization:
@@ -510,7 +515,12 @@ def get_current_user(
         set_selected_user_role(user, selected_role)
     current_user = _apply_test_access(user, db, test_access, test_user_id, test_role, test_mode)
     test_context = getattr(current_user, "_portal_test_access", None)
-    if test_context and test_context.get("read_only", True) and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+    if (
+        test_context
+        and test_context.get("read_only", True)
+        and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}
+        and not is_preview_safe(request.path)
+    ):
         raise HTTPException(status_code=403, detail="Access preview is read-only. Stop viewing as this user before making changes.")
     return current_user
 

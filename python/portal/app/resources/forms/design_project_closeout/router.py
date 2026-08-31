@@ -46,14 +46,14 @@ from portal.app.sync.errors import (
     SnapshotRequired,
     SyncError,
 )
-from portal.app.sync.models import Identity, Mutation
+from portal.app.sync.models import Mutation
 from portal.app.sync.physical_entities import (
     CLOSEOUT_ASSET_ENTITY_TYPE,
     CLOSEOUT_PROJECT_ENTITY_TYPE,
     REVIEW_EVENT_ENTITY_TYPE,
     stable_global_id,
 )
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 from .workbook import (
     ASSET_ID_PATTERN,
@@ -198,7 +198,7 @@ def _sync_error(error: SyncError) -> None:
 def _coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(user_id=str(user.id), employee_number=_employee_id(user), email=str(user.email))
+            sync_identity(user)
         )
     except SyncError as error:
         _sync_error(error)
@@ -807,6 +807,24 @@ def update_project(
     existing = {
         str(row.get("asset_id")): row for row in _project_assets(coordinator, global_id)
     }
+    # An asset removed by an earlier edit leaves a tombstone under the same
+    # deterministic id. Re-adding that asset must restore the tombstoned record;
+    # inserting a fresh one under the taken identifier would be rejected.
+    tombstoned: dict[str, dict[str, str]] = {}
+    for entity in coordinator.query_entities(
+        CLOSEOUT_ASSET_ENTITY_TYPE,
+        filters={"project_global_id": global_id},
+        include_deleted=True,
+    ):
+        if not bool(entity.get("deleted")):
+            continue
+        values_for_ghost = _entity_values(entity)
+        if values_for_ghost is None:
+            continue
+        tombstoned[str(values_for_ghost.get("asset_id"))] = {
+            "global_id": str(entity["entity_id"]),
+            "record_revision": str(entity["record_revision"]),
+        }
     mutations: list[Mutation] = [
         Mutation(
             entity_type=CLOSEOUT_PROJECT_ENTITY_TYPE,
@@ -822,15 +840,27 @@ def update_project(
         current = existing.get(asset["asset_id"])
         asset_values = {**asset, "project_global_id": global_id}
         if current is None:
-            mutations.append(
-                Mutation(
-                    entity_type=CLOSEOUT_ASSET_ENTITY_TYPE,
-                    entity_id=stable_global_id("closeout-asset", global_id, asset["asset_id"]),
-                    operation_type="insert_entity",
-                    base_record_revision=None,
-                    values=asset_values,
+            ghost = tombstoned.get(asset["asset_id"])
+            if ghost is not None:
+                mutations.append(
+                    Mutation(
+                        entity_type=CLOSEOUT_ASSET_ENTITY_TYPE,
+                        entity_id=ghost["global_id"],
+                        operation_type="restore_entity",
+                        base_record_revision=ghost["record_revision"],
+                        values=asset_values,
+                    )
                 )
-            )
+            else:
+                mutations.append(
+                    Mutation(
+                        entity_type=CLOSEOUT_ASSET_ENTITY_TYPE,
+                        entity_id=stable_global_id("closeout-asset", global_id, asset["asset_id"]),
+                        operation_type="insert_entity",
+                        base_record_revision=None,
+                        values=asset_values,
+                    )
+                )
         else:
             mutations.append(
                 Mutation(
@@ -1249,6 +1279,14 @@ def _cityworks_database() -> Path:
 
 CITYWORKS_STORM_ENTITY_TYPES = ("PIPES", "STRUCTURES", "CHANNELS", "CITY CULVERTS")
 WORKORDER_ID_MAX_DIGITS = 10
+# Close-out starts from the workbook attached to the work order, so one without a
+# spreadsheet has nothing to import. Guarded by a table check because a mirror built
+# before WORKORDERIMG was synced has no attachments at all.
+HAS_CLOSEOUT_EXCEL_SQL = """EXISTS (
+    SELECT 1 FROM {table} i
+    WHERE CAST(i.WORKORDERID AS VARCHAR) = CAST(w.WORKORDERID AS VARCHAR)
+      AND lower(CAST(i.IMAGEPATH AS VARCHAR)) LIKE '%.xls%'
+)"""
 # The work order kinds this resource closes out. Design Team Project is the bulk of
 # it; the other three appear in the historical master and are treated as eligible too.
 ELIGIBLE_WORKORDER_DESCRIPTIONS = (
@@ -1351,6 +1389,7 @@ def _latest_analysis_date(coordinator: Any) -> str | None:
 def cityworks_workorders(
     search: str | None = Query(default=None, max_length=80),
     closed_since: str | None = Query(default=None, max_length=10),
+    spreadsheet: Literal["with", "without", "any"] = Query(default="with"),
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -1383,8 +1422,7 @@ def cityworks_workorders(
         f"upper(CAST(w.STATUS AS VARCHAR)) IN ({status_slots})",
         f"w.DESCRIPTION IN ({description_slots})",
     ]
-    parameters: list[Any] = [
-        *CITYWORKS_STORM_ENTITY_TYPES,
+    filter_parameters: list[Any] = [
         *ELIGIBLE_WORKORDER_STATUSES,
         *ELIGIBLE_WORKORDER_DESCRIPTIONS,
     ]
@@ -1394,15 +1432,40 @@ def cityworks_workorders(
             "(CAST(w.WORKORDERID AS VARCHAR) LIKE '%' || ? || '%'"
             " OR levenshtein(CAST(w.WORKORDERID AS VARCHAR), ?) <= 2)"
         )
-        parameters.extend([query, query])
+        filter_parameters.extend([query, query])
     elif since:
         filters.append(f"CAST({WORKORDER_CLOSED_DATE_SQL} AS DATE) >= CAST(? AS DATE)")
-        parameters.append(since)
+        filter_parameters.append(since)
     elif cutoff is not None:
         filters.append(f"CAST({WORKORDER_CLOSED_DATE_SQL} AS DATE) > CAST(? AS DATE)")
-        parameters.append(cutoff)
-    parameters.append(limit)
+        filter_parameters.append(cutoff)
     with closing(duckdb.connect(str(database), read_only=True)) as connection:
+        attachments_available = bool(
+            connection.execute(
+                "SELECT 1 FROM information_schema.tables WHERE table_name = ? LIMIT 1",
+                [CLOSEOUT_ATTACHMENT_TABLE],
+            ).fetchone()
+        )
+        # An attached workbook is the usual starting point but not the only one: a work
+        # order without one can still be closed out from its assets by hand, so which
+        # side of that line to show is the caller's choice.
+        exists_sql = HAS_CLOSEOUT_EXCEL_SQL.format(table=CLOSEOUT_ATTACHMENT_TABLE)
+        excel_filter = None
+        if attachments_available and spreadsheet == "with":
+            excel_filter = exists_sql
+        elif attachments_available and spreadsheet == "without":
+            excel_filter = f"NOT {exists_sql}"
+        # Counted before the close-out requirements are applied, so the page can say
+        # what it left out rather than quietly showing a shorter list.
+        matched_total = connection.execute(
+            f"SELECT COUNT(DISTINCT w.WORKORDERID) FROM azteca_WORKORDER w WHERE {' AND '.join(filters)}",
+            filter_parameters,
+        ).fetchone()[0]
+        if excel_filter:
+            filters.append(excel_filter)
+        # The entity types belong to the LEFT JOIN and the limit to the tail, so the
+        # row query's values are assembled here rather than carried along in one list.
+        parameters = [*CITYWORKS_STORM_ENTITY_TYPES, *filter_parameters, limit]
         rows = connection.execute(
             f"""
             SELECT w.WORKORDERID, w.DESCRIPTION,
@@ -1415,6 +1478,7 @@ def cityworks_workorders(
               ON e.WORKORDERID = w.WORKORDERID AND e.ENTITYTYPE IN (?, ?, ?, ?)
             WHERE {" AND ".join(filters)}
             GROUP BY 1, 2, 3, 4, 5
+            HAVING COUNT(e.ENTITYUID) > 0
             ORDER BY date_wo_closed DESC NULLS LAST,
                      try_cast(w.WORKORDERID AS BIGINT) DESC NULLS LAST
             LIMIT ?
@@ -1448,9 +1512,13 @@ def cityworks_workorders(
             return (order, len(value), value)
 
         results.sort(key=rank)
+    # Only meaningful when the page is not simply hitting its row limit.
+    hidden = max(0, int(matched_total) - len(results)) if len(results) < limit else 0
     return {
         "cutoff": cutoff,
         "rows": results,
+        "hidden_without_excel": hidden,
+        "spreadsheet": spreadsheet,
         "workorder_url_template": str(os.getenv("PORTAL_CITYWORKS_WORKORDER_URL_TEMPLATE") or "").strip() or None,
     }
 

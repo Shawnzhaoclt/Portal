@@ -7,6 +7,7 @@ import type {
   AmTeamPipeSearchResponse,
 } from './types'
 import { portalDataUrl, portalRequestJson } from '../../desktop/request'
+import { itpipesSessionCookie } from '../../desktop/runtime'
 
 /** Which inputs an observation code actually uses, measured from real ITPipes data. */
 export type ObservationCodeMetadata = {
@@ -105,6 +106,66 @@ export function deleteUserObservation(mliId: string, mloId: string) {
     `/api/amteam/inspections/${encodeURIComponent(mliId)}/user-observations/${encodeURIComponent(mloId)}`,
     { method: 'DELETE' },
   )
+}
+
+export type ItpipesMediaEntry = {
+  name: string
+  kind: 'video' | 'picture' | 'report' | 'other'
+  source_url: string
+  url: string
+}
+
+export type ItpipesManifest = {
+  connected: boolean
+  reason?: string
+  detail?: string
+  mli_id?: string
+  source_url?: string
+  media: ItpipesMediaEntry[]
+  counts?: Record<string, number>
+}
+
+/** Media elements report ITpipes load failures here; the viewer listens and
+ * recovers - re-minting expired presigned URLs, or reopening sign-in when the
+ * session itself has lapsed. A broadcast keeps the deeply nested video and
+ * snapshot components free of recovery plumbing. */
+const itpipesErrorListeners = new Set<() => void>()
+
+export function onItpipesMediaError(listener: () => void) {
+  itpipesErrorListeners.add(listener)
+  return () => {
+    itpipesErrorListeners.delete(listener)
+  }
+}
+
+export function notifyItpipesMediaError(sourceUrl: string | null | undefined) {
+  if (!sourceUrl || !sourceUrl.includes('/api/amteam/itpipes/media')) return
+  for (const listener of [...itpipesErrorListeners]) listener()
+}
+
+/** Whether ITpipes still recognises this machine's session. Drives the sign-in gate. */
+export async function checkItpipesSession(): Promise<{ connected: boolean; reason?: string }> {
+  const cookie = await itpipesSessionCookie()
+  if (!cookie) return { connected: false, reason: 'no_session' }
+  return portalRequestJson<{ connected: boolean; reason?: string }>('/api/amteam/itpipes/session', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cookie }),
+  })
+}
+
+/** Media for one inspection, fetched with the signed-in user's own session. */
+export async function fetchItpipesMedia(mliId: string): Promise<ItpipesManifest> {
+  const cookie = await itpipesSessionCookie()
+  const manifest = await portalRequestJson<ItpipesManifest>('/api/amteam/itpipes/manifest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mli_id: mliId, cookie }),
+  })
+  return {
+    ...manifest,
+    media: (manifest.media ?? []).map((entry) => ({ ...entry, url: portalDataUrl(entry.url) })),
+  }
 }
 
 function normalizeObservationResponse(response: AmTeamObservationResponse): AmTeamObservationResponse {

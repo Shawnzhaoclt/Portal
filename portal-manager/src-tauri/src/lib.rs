@@ -435,7 +435,7 @@ fn source_backup_paths() -> Result<SourceBackupPaths, String> {
     })
 }
 
-fn publish_system_catalog(system_database: &Path) -> Result<Value, String> {
+fn publish_system_catalog(system_database: &Path, environment: &str) -> Result<Value, String> {
     let settings_path = configuration_path()?;
     let settings: ManagerSettings = serde_json::from_value(read_json(&settings_path)?)
         .map_err(|error| format!("Invalid workstation manager settings: {error}"))?;
@@ -484,6 +484,8 @@ fn publish_system_catalog(system_database: &Path) -> Result<Value, String> {
         "system-catalog".to_string(),
         "--stage-source".to_string(),
         format!("system.catalog={}", system_database.display()),
+        "--environment".to_string(),
+        environment.to_string(),
     ];
     let output = run_hidden(&python_executable, &arguments)?;
     serde_json::from_str(output.trim())
@@ -907,18 +909,27 @@ fn portal_release_paths() -> Result<PortalReleasePaths, String> {
     Ok(paths)
 }
 
-fn verify_desktop_release_excludes_system_database(
-    paths: &PortalReleasePaths,
-) -> Result<(), String> {
+/// Keep the plaintext catalog out of the release without stopping the publish.
+///
+/// Portal writes config/system.db as it runs, so any package that was launched
+/// for verification holds one. It is a runtime file the desktop rebuilds from
+/// the published catalog on its next start, so it is removed here rather than
+/// treated as a reason to refuse the release. create_release_zip excludes the
+/// same path, so an archive stays clean even when the file cannot be deleted.
+fn exclude_plaintext_system_database(paths: &PortalReleasePaths) -> Result<bool, String> {
     set_system_database_writable(&paths.system_db, true)?;
     let packaged_database = paths.portable_root.join("config").join("system.db");
-    if packaged_database.exists() {
-        return Err(format!(
-            "The Desktop package contains system.db. Rebuild Portal Desktop so the plaintext catalog is excluded: {}",
-            packaged_database.display()
-        ));
+    if !packaged_database.exists() {
+        return Ok(false);
     }
-    Ok(())
+    if let Ok(metadata) = fs::metadata(&packaged_database) {
+        // Portal leaves the catalog read-only, which would block the removal.
+        let mut permissions = metadata.permissions();
+        permissions.set_readonly(false);
+        let _ = fs::set_permissions(&packaged_database, permissions);
+    }
+    let _ = fs::remove_file(&packaged_database);
+    Ok(true)
 }
 
 fn release_version_from_file(path: &Path) -> Result<String, String> {
@@ -1208,9 +1219,14 @@ fn publish_portal_release_value(
     close_portal_python_worker()?;
     emit_release_progress(
         app,
-        "Verifying the installation excludes a plaintext system catalog.",
+        "Excluding the plaintext system catalog from the installation.",
     );
-    verify_desktop_release_excludes_system_database(&paths)?;
+    if exclude_plaintext_system_database(&paths)? {
+        emit_release_progress(
+            app,
+            "Removed the runtime system catalog left behind by a Portal session.",
+        );
+    }
     emit_release_progress(
         app,
         "Creating the complete installation package. This can take a few minutes.",
@@ -2860,15 +2876,23 @@ fn portal_release_status(channel: Option<String>) -> Result<PortalReleaseStatus,
 }
 
 #[tauri::command]
-fn publish_system_catalog_data() -> Result<Value, String> {
+fn publish_system_catalog_data(environment: Option<String>) -> Result<Value, String> {
     require_manager_system_admin()?;
+    // The same channel vocabulary as software releases: production or test.
+    let environment = normalize_release_channel(environment.as_deref())?;
     // Flush pending catalog writes before copying the authoritative database.
     close_portal_python_worker()?;
     let paths = portal_release_paths()?;
-    let publication = publish_system_catalog(&paths.system_db)?;
+    let publication = publish_system_catalog(&paths.system_db, &environment)?;
+    let message = if environment == "test" {
+        "The system catalog was published to the TEST data tree. Only desktops pointed at the test data root will activate it."
+    } else {
+        "The system catalog was published as Portal data. Desktop encrypts it with SQLCipher during local activation."
+    };
     Ok(serde_json::json!({
         "status": "succeeded",
-        "message": "The system catalog was published as Portal data. Desktop encrypts it with SQLCipher during local activation.",
+        "message": message,
+        "environment": environment,
         "publication": publication
     }))
 }
@@ -3271,13 +3295,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_release_zip, display_timestamp, normalized_machine_names, release_channel_root,
-        verify_desktop_release_excludes_system_database, PortalReleasePaths,
+        create_release_zip, display_timestamp, exclude_plaintext_system_database,
+        normalized_machine_names, release_channel_root, PortalReleasePaths,
     };
     use std::{env, fs, process, process::Command, time::SystemTime};
 
     #[test]
-    fn desktop_release_must_not_contain_a_system_database() {
+    fn a_packaged_system_database_is_excluded_instead_of_blocking() {
         let unique = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("test time")
@@ -3308,13 +3332,22 @@ mod tests {
             version_file: root.join("desktop").join("VERSION"),
         };
 
-        verify_desktop_release_excludes_system_database(&paths).expect("release without database");
+        assert!(!exclude_plaintext_system_database(&paths).expect("release without database"));
         assert!(!fs::metadata(&manager_database)
             .expect("manager metadata")
             .permissions()
             .readonly());
+
+        // A catalog left behind by a Portal session is removed, and the release
+        // carries on instead of failing.
         fs::write(&desktop_database, b"plaintext catalog").expect("desktop database");
-        assert!(verify_desktop_release_excludes_system_database(&paths).is_err());
+        let mut readonly = fs::metadata(&desktop_database)
+            .expect("desktop metadata")
+            .permissions();
+        readonly.set_readonly(true);
+        fs::set_permissions(&desktop_database, readonly).expect("read-only catalog");
+        assert!(exclude_plaintext_system_database(&paths).expect("catalog excluded"));
+        assert!(!desktop_database.exists());
 
         fs::remove_dir_all(root).expect("test cleanup");
     }

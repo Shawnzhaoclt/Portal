@@ -122,6 +122,7 @@ CLONE_ITEMS: list[CloneItem] = [
     CloneItem("itpipes_prod", "dbo", "MLO", "MLO", source_note="ITPIPES validation"),
     CloneItem("itpipes_prod", "dbo", "Media", "Media", source_note="AM team ITPipes media replication"),
     CloneItem("itpipes_prod", "dbo", "MLO_Media", "MLO_Media", source_note="AM team ITPipes media replication"),
+    CloneItem("itpipes_prod", "dbo", "MLI_Media", "MLI_Media", source_note="AM team ITPipes media replication"),
     CloneItem("cityworks_prod", "azteca", "INSPECTION", "azteca_INSPECTION", source_note="Cityworks asset inspections/investigations"),
     CloneItem("cityworks_prod", "azteca", "INSPQUESTION", "azteca_INSPQUESTION", source_note="Cityworks survey answers"),
     CloneItem("cityworks_prod", "azteca", "ACTIVITYLINK", "azteca_ACTIVITYLINK", source_note="Cityworks linked activity QA/QC"),

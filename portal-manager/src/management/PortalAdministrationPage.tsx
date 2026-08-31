@@ -16,19 +16,30 @@ export default function PortalAdministrationPage({ onBack }: PortalAdministratio
       showRoleSelector
       showSignOutAction={false}
       showSystemCatalogPublication
-      onPublishSystemCatalog={async () => {
+      onPublishSystemCatalog={async (environment) => {
+        const isTest = environment === "test";
         const confirmed = await appConfirm(
-          "Publish the current authoritative system catalog as Portal data? Desktop clients will encrypt it with SQLCipher during local activation.",
-          { title: "Publish system catalog", kind: "warning", confirmLabel: "Publish catalog" },
+          isTest
+            ? "Publish the current system catalog to the TEST data tree? Production desktops will not see it; only machines pointed at the test data root activate it."
+            : "Publish the current authoritative system catalog as Portal data? Desktop clients will encrypt it with SQLCipher during local activation.",
+          {
+            title: isTest ? "Publish catalog to TEST" : "Publish system catalog",
+            kind: "warning",
+            confirmLabel: isTest ? "Publish to test" : "Publish catalog",
+          },
         );
         if (!confirmed) return;
         const result = await invoke<{
+          message?: string;
           publication?: { central_publication_id?: string; source_count?: number };
-        }>("publish_system_catalog_data");
+        }>("publish_system_catalog_data", { environment });
         const publicationId = result.publication?.central_publication_id;
+        const suffix = isTest
+          ? "Only test-data desktops will activate it."
+          : "Desktop clients will activate encrypted copies.";
         return publicationId
-          ? `System catalog published in data manifest ${publicationId}. Desktop clients will activate encrypted copies.`
-          : "System catalog published. Desktop clients will activate encrypted copies.";
+          ? `System catalog published${isTest ? " to TEST" : ""} in data manifest ${publicationId}. ${suffix}`
+          : `System catalog published${isTest ? " to TEST" : ""}. ${suffix}`;
       }}
     />
   );

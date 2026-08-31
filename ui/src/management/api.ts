@@ -188,6 +188,7 @@ export type CctvReviewObservationSave = {
   defect_role: 'none' | 'major' | 'other'
   is_extensive: boolean
   selected_picture_file_name: string | null
+  selected_picture_media_id?: string | null
   defect_callout: string | null
 }
 

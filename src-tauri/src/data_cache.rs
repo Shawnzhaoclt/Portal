@@ -37,6 +37,8 @@ struct CacheConfig {
     enabled: bool,
     shared_root: PathBuf,
     remote_manifest: PathBuf,
+    /// A test computer's own manifest, laid over the production one.
+    overlay_manifest: Option<PathBuf>,
     local_root: PathBuf,
     direct_network_source_ids: HashSet<String>,
     grace_period_days: u64,
@@ -214,6 +216,11 @@ pub struct DataCacheStatus {
     publication_id: String,
     last_checked_at_epoch: u64,
     local_manifest: String,
+    /// The production publication this computer activates from.
+    publication_source: String,
+    /// The test publication laid over it, empty unless this is a test computer
+    /// and the test tree has published something.
+    publication_overlay: String,
     updating: bool,
     total_cache_bytes: u64,
     sources: Vec<DataCacheSourceStatus>,
@@ -375,9 +382,12 @@ fn load_config() -> Result<CacheConfig, String> {
         .map(str::to_string)
         .collect::<HashSet<_>>();
     let catalog_key = super::catalog_crypto::load_or_create(&data_root)?;
+    let remote_manifest = expand_setting_path(remote_raw, &shared_root, &data_root)?;
+    let overlay_manifest = super::channel_publication_overlay(&shared_root, &remote_manifest);
     Ok(CacheConfig {
         enabled,
-        remote_manifest: expand_setting_path(remote_raw, &shared_root, &data_root)?,
+        remote_manifest,
+        overlay_manifest,
         local_root: expand_setting_path(local_raw, &shared_root, &data_root)?,
         direct_network_source_ids,
         shared_root,
@@ -440,9 +450,9 @@ fn wait_for_publication_lock(remote_manifest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn load_remote_manifest(config: &CacheConfig) -> Result<RemoteManifest, String> {
-    wait_for_publication_lock(&config.remote_manifest)?;
-    let manifest: RemoteManifest = read_json(&config.remote_manifest)?;
+fn read_publication_manifest(path: &Path) -> Result<RemoteManifest, String> {
+    wait_for_publication_lock(path)?;
+    let manifest: RemoteManifest = read_json(path)?;
     if manifest.manifest_schema_version != 1 {
         return Err(format!(
             "Unsupported Portal data manifest schema: {}",
@@ -456,6 +466,35 @@ fn load_remote_manifest(config: &CacheConfig) -> Result<RemoteManifest, String> 
             || source.source.trim().is_empty()
     }) {
         return Err("The Portal data manifest contains an incomplete source record.".to_string());
+    }
+    Ok(manifest)
+}
+
+/// Lay a test computer's own publication over the production one.
+///
+/// Only the sources the test tree publishes are replaced; every other database
+/// keeps coming from production. Overlaid files sit one directory deeper, so
+/// their paths are re-rooted into the test subtree, and the publication id
+/// records both sides so a change on either one still counts as new data.
+fn overlay_publication(base: &mut RemoteManifest, overlay: RemoteManifest) {
+    for mut source in overlay.sources {
+        source.source = format!("test/{}", source.source);
+        match base
+            .sources
+            .iter_mut()
+            .find(|existing| existing.id == source.id)
+        {
+            Some(existing) => *existing = source,
+            None => base.sources.push(source),
+        }
+    }
+    base.publication_id = format!("{}+test-{}", base.publication_id, overlay.publication_id);
+}
+
+fn load_remote_manifest(config: &CacheConfig) -> Result<RemoteManifest, String> {
+    let mut manifest = read_publication_manifest(&config.remote_manifest)?;
+    if let Some(overlay) = config.overlay_manifest.as_ref() {
+        overlay_publication(&mut manifest, read_publication_manifest(overlay)?);
     }
     Ok(manifest)
 }
@@ -1666,6 +1705,14 @@ pub fn status() -> Result<DataCacheStatus, String> {
         publication_id: local.remote_publication_id,
         last_checked_at_epoch: local.last_checked_at_epoch,
         local_manifest: local_manifest_path(&config).display().to_string(),
+        publication_source: config.remote_manifest.display().to_string(),
+        publication_overlay: config
+            .overlay_manifest
+            .as_ref()
+            // The configured root and the joined subtree disagree on separators,
+            // and this string is only ever read by a person.
+            .map(|path| path.display().to_string().replace('\\', "/"))
+            .unwrap_or_default(),
         updating: BACKGROUND_UPDATE_ACTIVE.load(Ordering::Acquire),
         total_cache_bytes: sources.iter().map(|source| source.size_bytes).sum(),
         sources,
@@ -1766,8 +1813,8 @@ mod tests {
     use super::{
         build_groups, classify_source, modified_at_nanos, now_epoch, safe_component, sha256_file,
         synchronize_system_database_copy, validate_file_header, validate_startup_disk_space,
-        CacheConfig, LocalManifest, LocalSource, QueueKind, RemoteManifest, RemoteSource,
-        DEFAULT_MINIMUM_STARTUP_FREE_BYTES,
+        overlay_publication, CacheConfig, LocalManifest, LocalSource, QueueKind, RemoteManifest,
+        RemoteSource, DEFAULT_MINIMUM_STARTUP_FREE_BYTES,
     };
     use std::collections::HashSet;
     use std::path::Path;
@@ -1778,6 +1825,7 @@ mod tests {
             enabled: true,
             shared_root: root.to_path_buf(),
             remote_manifest: root.join("remote.json"),
+            overlay_manifest: None,
             local_root: root.to_path_buf(),
             direct_network_source_ids: HashSet::new(),
             grace_period_days: 7,
@@ -1788,6 +1836,70 @@ mod tests {
             staging_recovery_hours: 72,
             catalog_key: super::super::catalog_crypto::CatalogKey::for_test(7),
         }
+    }
+
+    fn remote_source(id: &str, source: &str, version: &str) -> RemoteSource {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "displayName": id,
+            "source": source,
+            "format": "sqlite",
+            "version": version,
+            "publishedAtUtc": "2026-01-01T00:00:00Z",
+            "publishedAtEpoch": 0,
+            "sizeBytes": 0,
+            "sha256": "0".repeat(64),
+            "schemaFingerprint": "",
+            "activationGroup": id,
+        }))
+        .expect("remote source")
+    }
+
+    #[test]
+    fn a_test_overlay_replaces_only_the_sources_it_publishes() {
+        let mut production = RemoteManifest {
+            manifest_schema_version: 1,
+            publication_id: "prod-1".to_string(),
+            _published_at_utc: String::new(),
+            _published_at_epoch: 0,
+            sources: vec![
+                remote_source("system.catalog", "databases_local/system/system.db", "v1"),
+                remote_source("terrain.dem", "databases_local/terrain/dem.tif", "v1"),
+            ],
+        };
+        let overlay = RemoteManifest {
+            manifest_schema_version: 1,
+            publication_id: "test-9".to_string(),
+            _published_at_utc: String::new(),
+            _published_at_epoch: 0,
+            sources: vec![remote_source(
+                "system.catalog",
+                "databases_local/system/system.db",
+                "v2",
+            )],
+        };
+
+        overlay_publication(&mut production, overlay);
+
+        assert_eq!(production.sources.len(), 2);
+        let catalog = production
+            .sources
+            .iter()
+            .find(|source| source.id == "system.catalog")
+            .expect("catalog");
+        // The tested catalog wins, and its file is read from the test subtree.
+        assert_eq!(catalog.version, "v2");
+        assert_eq!(catalog.source, "test/databases_local/system/system.db");
+        // Everything production publishes and test does not is untouched.
+        let terrain = production
+            .sources
+            .iter()
+            .find(|source| source.id == "terrain.dem")
+            .expect("terrain");
+        assert_eq!(terrain.version, "v1");
+        assert_eq!(terrain.source, "databases_local/terrain/dem.tif");
+        // Either side changing counts as a new publication.
+        assert_eq!(production.publication_id, "prod-1+test-test-9");
     }
 
     fn remote(epoch: u64) -> RemoteSource {

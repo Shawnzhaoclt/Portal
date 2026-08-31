@@ -736,7 +736,11 @@
 
 .amteam-summary-grid.with-video > .amteam-video-player {
   box-sizing: border-box;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  /* Rows hug their content and spare height falls below the controls: when the
+     defect table stretches this panel, the slider, speed and Add defect stay
+     against the video instead of drifting to the panel's bottom edge. */
+  grid-template-rows: auto auto auto;
+  align-content: start;
   height: auto;
   max-height: none;
   overflow: hidden;
@@ -4335,4 +4339,108 @@
     border: 0;
     box-shadow: none;
   }
+}
+
+.amteam-mli-link {
+  color: #155b91;
+  font-weight: 700;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+
+.amteam-mli-link:hover {
+  color: #0d3f68;
+}
+
+.amteam-review-pipe-title .amteam-mli-link {
+  margin-left: 8px;
+  font-size: 0.82rem;
+}
+
+.amteam-itpipes-chip {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border: 1px solid #9cb6ca;
+  background: #fff;
+  color: #155b91;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.amteam-itpipes-chip.is-connected {
+  border-color: #85bca0;
+  background: #edf8f2;
+  color: #17643a;
+  cursor: default;
+}
+
+.amteam-itpipes-gate {
+  display: grid;
+  min-height: 60vh;
+  place-items: center;
+  padding: 32px;
+}
+
+.amteam-itpipes-gate-card {
+  max-width: 520px;
+  padding: 28px 32px;
+  border: 1px solid #b9cbd9;
+  background: #fff;
+  text-align: center;
+}
+
+.amteam-itpipes-gate-card h1 {
+  margin: 0 0 10px;
+  font-size: 1.3rem;
+}
+
+.amteam-itpipes-gate-card p {
+  margin: 0 0 16px;
+  color: #5d7085;
+  line-height: 1.5;
+}
+
+.amteam-itpipes-gate-button {
+  min-height: 38px;
+  padding: 0 18px;
+  border: 1px solid #1d5f97;
+  background: #1d5f97;
+  color: #fff;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.amteam-itpipes-gate-hint {
+  margin: 14px 0 0 !important;
+  font-size: 0.8rem;
+}
+
+.amteam-snapshot-frame-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 0 14px 10px;
+  min-height: 36px;
+  border: 1px solid var(--amteam-border);
+  border-radius: var(--amteam-radius-sm);
+  background: var(--amteam-control-bg);
+  color: var(--amteam-blue);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.amteam-snapshot-frame-option:hover {
+  border-color: var(--amteam-blue);
+}
+
+.amteam-snapshot-frame-option.selected {
+  border-color: var(--amteam-blue);
+  box-shadow: inset 0 0 0 1px var(--amteam-blue);
 }

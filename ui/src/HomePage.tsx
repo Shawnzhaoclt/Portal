@@ -904,6 +904,18 @@ function AboutPortalDialog({
               <div><span>Active</span><strong>{dataCacheStatus?.activeSources ?? '—'}</strong></div>
               <div><span>Local cache</span><strong>{dataCacheStatus ? formatDataBytes(dataCacheStatus.totalCacheBytes) : '—'}</strong></div>
             </div>
+            {dataCacheStatus?.publicationSource ? (
+              <p className="home-about-publication-source">
+                <span>Published data</span>
+                <code title={dataCacheStatus.publicationSource}>{dataCacheStatus.publicationSource}</code>
+              </p>
+            ) : null}
+            {dataCacheStatus?.publicationOverlay ? (
+              <p className="home-about-publication-source is-test">
+                <span>Test override</span>
+                <code title={dataCacheStatus.publicationOverlay}>{dataCacheStatus.publicationOverlay}</code>
+              </p>
+            ) : null}
             {dataCacheError || dataCacheStatus?.lastError ? <div className="home-test-access-error" role="alert">{dataCacheError || dataCacheStatus?.lastError}</div> : null}
             {dataCacheStatus?.sources?.length ? (
               <div className="home-about-data-table" role="region" aria-label="Active local data versions">
@@ -993,7 +1005,15 @@ function TestAccessDialog({
         </label>
         <label>
           User role
-          <select value={role} disabled={loading} onChange={(event) => setRole(event.target.value as PortalRole)}>
+          <select
+            value={selectedUser && availableRoles.length ? role : ''}
+            disabled={loading || !availableRoles.length}
+            onChange={(event) => setRole(event.target.value as PortalRole)}
+          >
+            {/* The roles on offer belong to the chosen user, so say what the box
+                is waiting for instead of standing empty. */}
+            {!selectedUser ? <option value="">Select a user first</option> : null}
+            {selectedUser && !availableRoles.length ? <option value="">This user holds no portal role</option> : null}
             {availableRoles.map((availableRole) => <option key={availableRole} value={availableRole}>{roleText(availableRole)}</option>)}
           </select>
         </label>

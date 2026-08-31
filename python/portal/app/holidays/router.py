@@ -19,8 +19,8 @@ from portal.app.sync.errors import (
     SnapshotRequired,
     SyncError,
 )
-from portal.app.sync.models import Identity, Mutation
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.models import Mutation
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 
 RESOURCE_ID = "ADMBSHVR"
@@ -75,11 +75,7 @@ def _sync_error(error: SyncError) -> None:
 def _coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(
-                user_id=str(user.id),
-                employee_number=str(user.employee_id),
-                email=str(user.email),
-            )
+            sync_identity(user)
         )
     except SyncError as error:
         _sync_error(error)

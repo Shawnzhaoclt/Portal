@@ -27,7 +27,7 @@ from portal.app.management.services import (
     selected_user_role,
 )
 from portal.app.sync.errors import LockTimeout, RevisionChanged, SharedRootUnavailable, SnapshotRequired, SyncError
-from portal.app.sync.models import Identity, Mutation
+from portal.app.sync.models import Mutation
 from portal.app.sync.physical_entities import (
     AIF_PROACTIVE_INSPECTION_ENTITY_TYPE,
     CCTV_DISTANCE_GROUP_ENTITY_TYPE,
@@ -37,7 +37,7 @@ from portal.app.sync.physical_entities import (
     physical_spec,
     stable_global_id,
 )
-from portal.app.sync.runtime import current_coordinator
+from portal.app.sync.runtime import current_coordinator, sync_identity
 
 from .source import (
     cityworks_history,
@@ -253,7 +253,7 @@ def _sync_error(error: SyncError) -> None:
 def _coordinator(user: User):
     try:
         return current_coordinator(
-            Identity(user_id=str(user.id), employee_number=_employee_id(user), email=str(user.email))
+            sync_identity(user)
         )
     except SyncError as error:
         _sync_error(error)
@@ -453,8 +453,16 @@ def _next_aif_identity(coordinator: Any, asset_id: str, local_date: str) -> tupl
     safe_asset = re.sub(r"[^A-Z0-9_-]+", "", asset_id) or "ASSET"
     prefix = f"AIF-{safe_asset}-{local_date}-"
     highest = 0
-    for entity in coordinator.query_entities(ENTITY_TYPE, filters={"entity_uid": asset_id}):
-        values = _entity_values(entity)
+    # Deleted AIFs included: a tombstone keeps its identifier forever, so allocation
+    # must see it or the sequence restarts and reissues a number whose global id
+    # collides with the dead record - the same failure the MLO allocator had.
+    for entity in coordinator.query_entities(
+        ENTITY_TYPE, filters={"entity_uid": asset_id}, include_deleted=True
+    ):
+        # Not _entity_values: that helper hides deleted entities, which are
+        # exactly the rows this scan exists to see.
+        raw_values = entity.get("values")
+        values = raw_values if isinstance(raw_values, dict) else None
         if values is None:
             continue
         # Reads any width so identifiers issued before the sequence was shortened to one

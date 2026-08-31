@@ -182,13 +182,21 @@ export function importCloseoutExcel(payload: {
   })
 }
 
-export function searchCityworksWorkorders(query: { search?: string; closed_since?: string }) {
+export type SpreadsheetFilter = 'with' | 'without' | 'any'
+
+export function searchCityworksWorkorders(query: {
+  search?: string
+  closed_since?: string
+  spreadsheet?: SpreadsheetFilter
+}) {
   const params = new URLSearchParams()
   if (query.search) params.set('search', query.search)
   if (query.closed_since) params.set('closed_since', query.closed_since)
+  if (query.spreadsheet) params.set('spreadsheet', query.spreadsheet)
   return portalRequestJson<{
     cutoff: string | null
     rows: CityworksWorkorder[]
+    hidden_without_excel: number
     workorder_url_template: string | null
   }>(
     `${ROOT}/cityworks/workorders?${params}`,
