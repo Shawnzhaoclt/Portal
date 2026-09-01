@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import "maplibre-gl/dist/maplibre-gl.css";
 import "./MapTilesViewer.css";
 import { openPortalResource } from "../../../lib/portalNavigation";
+import WorkManagementLookup from "../../tables/work-management-lookup/WorkManagementLookup";
 import {
   Activity,
   Database,
@@ -27,6 +28,8 @@ import {
   Moon,
   Plus,
   BarChart3,
+  CalendarRange,
+  FileSearch,
   ChartArea,
   Route,
   Ruler,
@@ -39,7 +42,7 @@ import {
   Waves,
   X,
 } from "lucide-react";
-import { fetchAssetAssignment, fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchPmtilesFeatureDetails, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
+import { exportActivitySeries, exportInventoryBreakdown, fetchActivityMetrics, fetchActivitySeries, fetchAssetAssignment, fetchInventoryBreakdown, fetchAttributeFilterFields, fetchDuckDbGeoJsonBatch, fetchInventoryMetrics, fetchManifest, fetchMapStyle, fetchPmtilesFeatureDetails, fetchRiskHistograms, fetchRiskTopList, searchAssets } from "./api";
 import AssetDataExtractPanel from "./AssetDataExtractPanel";
 import type { AssetExtractArea, AssetExtractPreview } from "./assetExtract";
 import TerrainProfilePanel from "./TerrainProfilePanel";
@@ -95,6 +98,9 @@ import type {
   Bounds,
   DuckDbGeoJsonFeatureCollection,
   FeatureDetailsResponse,
+  ActivityMetric,
+  ActivitySeriesPoint,
+  InventoryBreakdownItem,
   InventoryMetric,
   Manifest,
   MapStyle,
@@ -244,6 +250,35 @@ const RISK_LIST_WIDGET_DEFAULT_POSITION: FloatingWidgetPosition = {
   x: INVENTORY_WIDGET_DEFAULT_POSITION.x + INVENTORY_WIDGET_WIDTH + DEFAULT_WIDGET_STACK_GAP,
   y: DEFAULT_WIDGET_LAYOUT_TOP,
 };
+const ACTIVITY_WIDGET_WIDTH = INVENTORY_WIDGET_WIDTH;
+const ACTIVITY_WIDGET_HEIGHT = 292;
+const ACTIVITY_WIDGET_DEFAULT_POSITION: FloatingWidgetPosition = {
+  x: INVENTORY_WIDGET_DEFAULT_POSITION.x,
+  y: INVENTORY_WIDGET_DEFAULT_POSITION.y + INVENTORY_WIDGET_HEIGHT + DEFAULT_WIDGET_STACK_GAP,
+};
+const ACTIVITY_PRESETS = ["ytd", "fiscal", "custom"] as const;
+type ActivityPreset = (typeof ACTIVITY_PRESETS)[number];
+const ACTIVITY_PRESET_LABELS: Record<ActivityPreset, string> = {
+  ytd: "This year",
+  fiscal: "Fiscal",
+  custom: "Custom",
+};
+
+function activityIsoDay(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, "0")}-${String(value.getDate()).padStart(2, "0")}`;
+}
+
+/** Each preset ends today: these count work already done, not work planned. */
+function activityPresetRange(preset: ActivityPreset): { start: string; end: string } {
+  const today = new Date();
+  const end = activityIsoDay(today);
+  if (preset === "fiscal") {
+    const fiscalStartYear = today.getMonth() + 1 >= 7 ? today.getFullYear() : today.getFullYear() - 1;
+    return { start: `${fiscalStartYear}-07-01`, end };
+  }
+  return { start: `${today.getFullYear()}-01-01`, end };
+}
+
 const RISK_HISTOGRAM_WIDGET_WIDTH = RISK_LIST_WIDGET_WIDTH;
 const RISK_HISTOGRAM_WIDGET_HEIGHT = 480;
 const RISK_HISTOGRAM_WIDGET_DEFAULT_POSITION: FloatingWidgetPosition = {
@@ -436,6 +471,11 @@ const TERRAIN_PROFILE_LINE_LAYER_ID = `${TERRAIN_PROFILE_SOURCE_ID}-line`;
 const TERRAIN_PROFILE_ENDPOINT_LAYER_ID = `${TERRAIN_PROFILE_SOURCE_ID}-endpoints`;
 const TERRAIN_PROFILE_HOVER_SOURCE_ID = "terrain-profile-hover";
 const TERRAIN_PROFILE_HOVER_LAYER_ID = `${TERRAIN_PROFILE_HOVER_SOURCE_ID}-point`;
+// The cutaway is what a consequence read is for — depth of cover, the pipe in the
+// ground, what the zone of influence reaches — so the tool opens there. 2D stays
+// one click away, and placing a simulated defect drops back to it, since that
+// click has to land on the map.
+const FAILURE_CONSEQUENCE_DEFAULT_3D = true;
 const FAILURE_CONSEQUENCE_SOURCE_ID = "failure-consequence-analysis";
 const FAILURE_CONSEQUENCE_LAYER_IDS = {
   clipMask: `${FAILURE_CONSEQUENCE_SOURCE_ID}-clip-mask`,
@@ -698,6 +738,8 @@ export default function App() {
   const duckDbGeoJsonRefreshQueuedRef = useRef(false);
   const inventoryWidgetDragRef = useRef<FloatingWidgetDrag | null>(null);
   const inventoryWidgetOpenRef = useRef(false);
+  const activityWidgetDragRef = useRef<FloatingWidgetDrag | null>(null);
+  const activityMetricsRequestRef = useRef(0);
   const riskListWidgetDragRef = useRef<FloatingWidgetDrag | null>(null);
   const riskListWidgetOpenRef = useRef(false);
   const riskHistogramRequestRef = useRef(0);
@@ -751,7 +793,7 @@ export default function App() {
   const failureConsequenceSimulatingRef = useRef(false);
   const failureConsequenceResultRef = useRef<FailureConsequenceResult | null>(null);
   const failureConsequenceMapRef = useRef<MapLibreMap | null>(null);
-  const failureConsequence3dRef = useRef(false);
+  const failureConsequence3dRef = useRef(FAILURE_CONSEQUENCE_DEFAULT_3D);
   const failureConsequenceAbortRef = useRef<AbortController | null>(null);
   const polygonClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const swipeDragRef = useRef<{ pointerId: number } | null>(null);
@@ -807,7 +849,7 @@ export default function App() {
   const [failureConsequenceLoading, setFailureConsequenceLoading] = useState(false);
   const [failureConsequenceError, setFailureConsequenceError] = useState("");
   const [failureConsequenceSimulating, setFailureConsequenceSimulating] = useState(false);
-  const [failureConsequence3d, setFailureConsequence3d] = useState(false);
+  const [failureConsequence3d, setFailureConsequence3d] = useState(FAILURE_CONSEQUENCE_DEFAULT_3D);
   const [map3dEnabled, setMap3dEnabled] = useState(false);
   const [map3dTransitioning, setMap3dTransitioning] = useState(false);
   const [mapDataWarning, setMapDataWarning] = useState("");
@@ -822,6 +864,16 @@ export default function App() {
   const [inventoryMetricsError, setInventoryMetricsError] = useState("");
   const [inventoryWidgetOpen, setInventoryWidgetOpen] = useState(false);
   const [inventoryWidgetPosition, setInventoryWidgetPosition] = useState<FloatingWidgetPosition>(INVENTORY_WIDGET_DEFAULT_POSITION);
+  const [activityWidgetOpen, setActivityWidgetOpen] = useState(false);
+  const [activityWidgetPosition, setActivityWidgetPosition] = useState<FloatingWidgetPosition>(ACTIVITY_WIDGET_DEFAULT_POSITION);
+  const [activityMetrics, setActivityMetrics] = useState<ActivityMetric[]>([]);
+  const [activityMetricsLoading, setActivityMetricsLoading] = useState(false);
+  const [activityMetricsError, setActivityMetricsError] = useState("");
+  const [activityTrendMetric, setActivityTrendMetric] = useState<ActivityMetric | null>(null);
+  const [inventoryBreakdown, setInventoryBreakdown] = useState<{ metric: InventoryMetric; bbox: Bounds | null } | null>(null);
+  const [recordLookupOpen, setRecordLookupOpen] = useState(false);
+  const [activityPreset, setActivityPreset] = useState<ActivityPreset>("ytd");
+  const [activityRange, setActivityRange] = useState(() => activityPresetRange("ytd"));
   const [riskTopLists, setRiskTopLists] = useState<RiskTopList[]>([]);
   const [riskTopListLoading, setRiskTopListLoading] = useState(false);
   const [riskTopListError, setRiskTopListError] = useState("");
@@ -1138,6 +1190,42 @@ export default function App() {
     },
     [refreshInventoryMetrics],
   );
+
+  // Activity counts do not depend on the visible extent, so they refresh with the
+  // range rather than with every pan.
+  useEffect(() => {
+    if (!activityWidgetOpen || !activityRange.start || !activityRange.end || activityRange.end < activityRange.start) {
+      return;
+    }
+    const requestId = ++activityMetricsRequestRef.current;
+    setActivityMetricsLoading(true);
+    fetchActivityMetrics(activityRange.start, activityRange.end)
+      .then((payload) => {
+        if (activityMetricsRequestRef.current !== requestId) {
+          return;
+        }
+        setActivityMetrics(payload.metrics || []);
+        setActivityMetricsError("");
+      })
+      .catch((error: Error) => {
+        if (activityMetricsRequestRef.current !== requestId) {
+          return;
+        }
+        setActivityMetricsError(error.message || "Activity metrics are unavailable.");
+      })
+      .finally(() => {
+        if (activityMetricsRequestRef.current === requestId) {
+          setActivityMetricsLoading(false);
+        }
+      });
+  }, [activityWidgetOpen, activityRange]);
+
+  const selectActivityPreset = useCallback((preset: ActivityPreset) => {
+    setActivityPreset(preset);
+    if (preset !== "custom") {
+      setActivityRange(activityPresetRange(preset));
+    }
+  }, []);
 
   const updateRiskListLayerSelection = useCallback((group: RiskLayerGroup, layerId: string) => {
     setRiskListLayerSelection((current) => {
@@ -2184,11 +2272,11 @@ export default function App() {
     failureConsequenceOpenRef.current = false;
     failureConsequenceSimulatingRef.current = false;
     failureConsequenceResultRef.current = null;
-    failureConsequence3dRef.current = false;
+    failureConsequence3dRef.current = FAILURE_CONSEQUENCE_DEFAULT_3D;
     setFailureConsequenceOpen(false);
     setFailureConsequenceSimulating(false);
     setFailureConsequenceResult(null);
-    setFailureConsequence3d(false);
+    setFailureConsequence3d(FAILURE_CONSEQUENCE_DEFAULT_3D);
     setFailureConsequenceLoading(false);
     setFailureConsequenceError("");
     updateFailureConsequenceGraphicsOnMaps([failureConsequenceMapRef.current], null, false);
@@ -2651,10 +2739,13 @@ export default function App() {
 
   const selectAssetSearchResult = useCallback(
     (result: AssetSearchResult) => {
-      setAssetSearch(result.label);
+      const selection = selectedFeatureFromSearchResult(result);
+      // Leave the box holding the asset's own id (P_91322), not the descriptive
+      // label, so what stays on screen is the thing worth copying and re-searching.
+      setAssetSearch(selection.assetHistory?.assetId || result.match_value || result.label);
       setAssetSearchOpen(false);
       setAssetSearchMessage("");
-      setSelectedFeature(selectedFeatureFromSearchResult(result));
+      setSelectedFeature(selection);
       setSelectedFeatureOptions([]);
       setSelectedFeatureOptionIndex(0);
       setSelectedFeatureGeometry(searchResultGeometry(result));
@@ -2905,6 +2996,57 @@ export default function App() {
         stopMiddleMouseRotateRef.current = null;
       }
     };
+  }, []);
+
+  const handleActivityWidgetPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      activityWidgetDragRef.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startPosition: activityWidgetPosition,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [activityWidgetPosition],
+  );
+
+  const handleActivityWidgetPointerMove = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = activityWidgetDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    const container = mapNodeRef.current?.closest("main") as HTMLElement | null;
+    const containerRect = container?.getBoundingClientRect();
+    const nextPosition = {
+      x: drag.startPosition.x + event.clientX - drag.startX,
+      y: drag.startPosition.y + event.clientY - drag.startY,
+    };
+    setActivityWidgetPosition(
+      containerRect
+        ? clampFloatingWidgetPosition(nextPosition, containerRect, ACTIVITY_WIDGET_WIDTH, ACTIVITY_WIDGET_HEIGHT)
+        : nextPosition,
+    );
+  }, []);
+
+  const finishActivityWidgetDrag = useCallback((event: React.PointerEvent<HTMLElement>) => {
+    const drag = activityWidgetDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    activityWidgetDragRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
   }, []);
 
   const handleInventoryWidgetPointerDown = useCallback(
@@ -4119,6 +4261,18 @@ export default function App() {
             onClick={() => setInventoryWidgetOpen((open) => !open)}
           />
           <HeaderIconButton
+            active={activityWidgetOpen}
+            icon={<CalendarRange />}
+            label="Activity metrics"
+            onClick={() => setActivityWidgetOpen((open) => !open)}
+          />
+          <HeaderIconButton
+            active={recordLookupOpen}
+            icon={<FileSearch />}
+            label="Look up a Cityworks record"
+            onClick={() => setRecordLookupOpen((open) => !open)}
+          />
+          <HeaderIconButton
             active={riskListWidgetOpen}
             icon={<ListOrdered />}
             label="Risk top 10"
@@ -4298,12 +4452,6 @@ export default function App() {
             }}
           />
           <div className="map-tiles-navigation-strip grid w-10 overflow-visible border-t border-[var(--control-border)] pt-1">
-            <MapControlButton label="Zoom in" onClick={() => mapRef.current?.zoomIn({ duration: 180 })}>
-              +
-            </MapControlButton>
-            <MapControlButton label="Zoom out" onClick={() => mapRef.current?.zoomOut({ duration: 180 })}>
-              -
-            </MapControlButton>
             <MapControlButton label="Reset view" onClick={resetView}>
               <LocateFixed className="h-4 w-4" />
             </MapControlButton>
@@ -4531,10 +4679,82 @@ export default function App() {
             metrics={inventoryMetrics}
             position={inventoryWidgetPosition}
             onClose={() => setInventoryWidgetOpen(false)}
+            onOpenMetric={(metric) => {
+              const map = mapRef.current;
+              const bounds = map?.getBounds();
+              setInventoryBreakdown({
+                metric,
+                bbox: bounds
+                  ? [bounds.getWest(), bounds.getSouth(), bounds.getEast(), bounds.getNorth()]
+                  : null,
+              });
+            }}
             onHeaderPointerCancel={finishInventoryWidgetDrag}
             onHeaderPointerDown={handleInventoryWidgetPointerDown}
             onHeaderPointerMove={handleInventoryWidgetPointerMove}
             onHeaderPointerUp={finishInventoryWidgetDrag}
+          />
+        ) : null}
+
+        {activityWidgetOpen ? (
+          <ActivityMetricsWidget
+            error={activityMetricsError}
+            loading={activityMetricsLoading}
+            metrics={activityMetrics}
+            position={activityWidgetPosition}
+            preset={activityPreset}
+            range={activityRange}
+            onClose={() => setActivityWidgetOpen(false)}
+            onHeaderPointerCancel={finishActivityWidgetDrag}
+            onHeaderPointerDown={handleActivityWidgetPointerDown}
+            onHeaderPointerMove={handleActivityWidgetPointerMove}
+            onHeaderPointerUp={finishActivityWidgetDrag}
+            onOpenMetric={setActivityTrendMetric}
+            onPresetChange={selectActivityPreset}
+            onRangeChange={setActivityRange}
+          />
+        ) : null}
+
+        {recordLookupOpen ? (
+          <div
+            className="failure-consequence-backdrop"
+            role="presentation"
+            onMouseDown={(event) => event.target === event.currentTarget && setRecordLookupOpen(false)}
+          >
+            <section className="failure-consequence-panel" role="dialog" aria-modal="true" aria-label="Work management lookup">
+              <header className="failure-consequence-header">
+                <div className="failure-consequence-title">
+                  <span>CITYWORKS</span>
+                  <h2>Work Management Lookup</h2>
+                  <p>Start from a record number and see the asset it concerned and every record linked to it.</p>
+                </div>
+                <button type="button" className="icon-button" onClick={() => setRecordLookupOpen(false)} title="Close lookup" aria-label="Close lookup">
+                  <X className="h-5 w-5" />
+                </button>
+              </header>
+              <div className="record-lookup-body">
+                <WorkManagementLookup embedded />
+              </div>
+            </section>
+          </div>
+        ) : null}
+
+        {inventoryBreakdown ? (
+          <InventoryBreakdownDialog
+            bbox={inventoryBreakdown.bbox}
+            colorScheme={colorScheme}
+            filters={backendAttributeFilterPayload(attributeFiltersRef.current)}
+            metric={inventoryBreakdown.metric}
+            onClose={() => setInventoryBreakdown(null)}
+          />
+        ) : null}
+
+        {activityTrendMetric ? (
+          <ActivityTrendDialog
+            colorScheme={colorScheme}
+            initialRange={activityRange}
+            metric={activityTrendMetric}
+            onClose={() => setActivityTrendMetric(null)}
           />
         ) : null}
 
@@ -4784,6 +5004,7 @@ function InventoryMetricsWidget({
   onHeaderPointerDown,
   onHeaderPointerMove,
   onHeaderPointerUp,
+  onOpenMetric,
 }: {
   error: string;
   loading: boolean;
@@ -4794,6 +5015,7 @@ function InventoryMetricsWidget({
   onHeaderPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
   onHeaderPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
   onHeaderPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
+  onOpenMetric: (metric: InventoryMetric) => void;
 }) {
   return (
     <aside
@@ -4831,6 +5053,7 @@ function InventoryMetricsWidget({
             <InventoryMetricCard
               key={metric.id}
               metric={metric}
+              onOpen={() => onOpenMetric(metric)}
             />
           ))}
         </div>
@@ -4854,11 +5077,13 @@ function InventoryMetricsWidget({
   );
 }
 
-function InventoryMetricCard({ metric }: { metric: InventoryMetric }) {
+function InventoryMetricCard({ metric, onOpen }: { metric: InventoryMetric; onOpen: () => void }) {
   return (
-    <article
-      className="grid min-h-[74px] grid-rows-[auto_1fr_auto] rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2.5 py-2 shadow-[inset_0_1px_0_rgba(255,255,255,.08)]"
-      title={metric.source_table}
+    <button
+      type="button"
+      className="grid min-h-[74px] grid-rows-[auto_1fr_auto] rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2.5 py-2 text-left shadow-[inset_0_1px_0_rgba(255,255,255,.08)] hover:border-[var(--accent)] hover:bg-[var(--row-hover)]"
+      title={`${metric.source_table} \u2013 open the breakdown`}
+      onClick={onOpen}
     >
       <div className="flex min-w-0 items-start gap-1.5">
         <span className="grid h-5 w-5 shrink-0 place-items-center text-[var(--accent)] [&>svg]:h-3.5 [&>svg]:w-3.5">
@@ -4880,7 +5105,1117 @@ function InventoryMetricCard({ metric }: { metric: InventoryMetric }) {
       <span className="truncate text-center text-[8px] font-semibold uppercase tracking-[.03em] text-[var(--panel-muted)]">
         {metric.unit === "mi" ? "miles" : metric.unit === "ft" ? "feet" : "visible / total"}
       </span>
-    </article>
+    </button>
+  );
+}
+
+function InventoryBreakdownDialog({
+  bbox,
+  colorScheme,
+  filters,
+  metric,
+  onClose,
+}: {
+  bbox: Bounds | null;
+  colorScheme: ColorScheme;
+  filters: AttributeFilterPayload | undefined;
+  metric: InventoryMetric;
+  onClose: () => void;
+}) {
+  const [dimension, setDimension] = useState("");
+  const [measure, setMeasure] = useState(metric.unit === "mi" ? "length" : "count");
+  const [items, setItems] = useState<InventoryBreakdownItem[]>([]);
+  const [dimensions, setDimensions] = useState<{ key: string; label: string }[]>([]);
+  const [missing, setMissing] = useState({ extent: 0, total: 0 });
+  const [precision, setPrecision] = useState(0);
+  const [unit, setUnit] = useState("features");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [chartType, setChartType] = useState<BreakdownChartType>("bar");
+  const chartNodeRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<echarts.ECharts | null>(null);
+  const requestRef = useRef(0);
+
+  useEffect(() => {
+    const requestId = ++requestRef.current;
+    setLoading(true);
+    fetchInventoryBreakdown(metric.id, dimension, measure, bbox ?? undefined, filters)
+      .then((payload) => {
+        if (requestRef.current !== requestId) return;
+        setItems(payload.items || []);
+        setDimensions(payload.dimensions || []);
+        setMissing(payload.missing || { extent: 0, total: 0 });
+        setPrecision(payload.precision ?? 0);
+        setUnit(payload.unit || "features");
+        if (!dimension && payload.dimension?.key) setDimension(payload.dimension.key);
+        setError("");
+      })
+      .catch((reason: Error) => {
+        if (requestRef.current !== requestId) return;
+        setError(reason.message || "The breakdown could not be loaded.");
+      })
+      .finally(() => {
+        if (requestRef.current === requestId) setLoading(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metric.id, dimension, measure]);
+
+  const format = useCallback(
+    (value: number) =>
+      value.toLocaleString(undefined, { minimumFractionDigits: precision, maximumFractionDigits: precision }),
+    [precision],
+  );
+
+  const totals = useMemo(
+    () => ({
+      extent: items.reduce((sum, item) => sum + item.extent, 0) + missing.extent,
+      total: items.reduce((sum, item) => sum + item.total, 0) + missing.total,
+    }),
+    [items, missing],
+  );
+
+  useEffect(() => {
+    const node = chartNodeRef.current;
+    if (!node) return;
+    const chart = echarts.init(node);
+    chartRef.current = chart;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => chart.resize());
+    observer?.observe(node);
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      observer?.disconnect();
+      chart.dispose();
+      chartRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const palette = activityTrendPalette(colorScheme);
+    const ramp = categoricalRamp(items.length, colorScheme);
+
+    if (chartType === "donut" || chartType === "treemap") {
+      // Neither form can carry two series, so they show what is in view; the
+      // tiles above still give both totals.
+      const data = items.map((item, index) => ({
+        name: item.label,
+        value: item.extent,
+        itemStyle: { color: ramp[index] },
+      }));
+      chart.setOption(
+        {
+          animationDuration: 260,
+          tooltip: {
+            trigger: "item",
+            formatter: (params: unknown) => {
+              const row = params as { name: string; value: number; percent?: number };
+              const share = row.percent ?? 0;
+              return `<strong>${row.name}</strong><br/>${format(row.value)}${share ? ` (${share.toFixed(1)}%)` : ""}`;
+            },
+          },
+          series:
+            chartType === "donut"
+              ? [
+                  {
+                    type: "pie",
+                    radius: ["44%", "72%"],
+                    center: ["50%", "52%"],
+                    avoidLabelOverlap: true,
+                    data,
+                    label: {
+                      color: palette.text,
+                      fontSize: 10,
+                      formatter: (row: { name: string; percent: number }) =>
+                        row.percent >= 3 ? `${row.name} ${row.percent.toFixed(0)}%` : "",
+                    },
+                    labelLine: { length: 8, length2: 8 },
+                  },
+                ]
+              : [
+                  {
+                    type: "treemap",
+                    roam: false,
+                    nodeClick: false,
+                    breadcrumb: { show: false },
+                    top: 8,
+                    bottom: 8,
+                    left: 8,
+                    right: 8,
+                    label: { color: "#ffffff", fontSize: 10, formatter: "{b}" },
+                    itemStyle: { borderColor: palette.split, borderWidth: 2, gapWidth: 2 },
+                    data,
+                  },
+                ],
+        },
+        true,
+      );
+      return;
+    }
+
+    const category = chartType === "bar" ? [...items].reverse() : items;
+    const labels = category.map((item) => item.label);
+    const extent = category.map((item) => item.extent);
+    const total = category.map((item) => item.total);
+    const categoryAxis = {
+      type: "category",
+      data: labels,
+      axisLine: { lineStyle: { color: palette.axis } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: palette.text,
+        fontSize: 10,
+        width: chartType === "bar" ? 130 : 90,
+        overflow: "truncate",
+        rotate: chartType === "column" && labels.length > 6 ? 32 : 0,
+      },
+    };
+    const valueAxis = {
+      type: "value",
+      splitLine: { lineStyle: { color: palette.split } },
+      axisLabel: { color: palette.text, fontSize: 10 },
+    };
+    chart.setOption(
+      {
+        animationDuration: 260,
+        grid: { left: 8, right: chartType === "bar" ? 60 : 16, top: 26, bottom: 8, containLabel: true },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "shadow" },
+          formatter: (params: unknown) => {
+            const rows = params as { name: string; value: number; seriesName: string }[];
+            if (!rows?.length) return "";
+            const inView = rows.find((row) => row.seriesName === "Visible extent")?.value ?? 0;
+            const whole = rows.find((row) => row.seriesName === "Whole dataset")?.value ?? 0;
+            const share = whole ? (inView / whole) * 100 : 0;
+            return [
+              `<strong>${rows[0].name}</strong>`,
+              `Visible extent: ${format(inView)}`,
+              `Whole dataset: ${format(whole)}`,
+              `In view: ${share.toFixed(1)}%`,
+            ].join("<br/>");
+          },
+        },
+        legend: {
+          top: 0,
+          right: 0,
+          itemWidth: 14,
+          itemHeight: 8,
+          textStyle: { color: palette.text, fontSize: 10 },
+          data: ["Visible extent", "Whole dataset"],
+        },
+        xAxis: chartType === "bar" ? valueAxis : categoryAxis,
+        yAxis: chartType === "bar" ? categoryAxis : valueAxis,
+        series: [
+          {
+            // Drawn first and behind: the whole layer as a ghost the extent sits inside.
+            name: "Whole dataset",
+            type: "bar",
+            barGap: "-100%",
+            barMaxWidth: 18,
+            itemStyle: {
+              color: palette.bar,
+              opacity: 0.22,
+              borderRadius: chartType === "bar" ? [0, 3, 3, 0] : [3, 3, 0, 0],
+            },
+            data: total,
+            z: 1,
+          },
+          {
+            name: "Visible extent",
+            type: "bar",
+            barMaxWidth: 18,
+            itemStyle: { color: palette.bar, borderRadius: chartType === "bar" ? [0, 3, 3, 0] : [3, 3, 0, 0] },
+            data: extent,
+            z: 2,
+            label: {
+              show: items.length <= 14,
+              position: chartType === "bar" ? "right" : "top",
+              color: palette.text,
+              fontSize: 9,
+              formatter: (item: { value: number }) => format(item.value),
+            },
+          },
+        ],
+      },
+      true,
+    );
+  }, [items, colorScheme, format, chartType]);
+
+  const segmented = (
+    label: string,
+    options: { key: string; label: string }[],
+    active: string,
+    onPick: (key: string) => void,
+  ) => (
+    <div className="grid gap-1">
+      <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">{label}</span>
+      <div className="flex overflow-hidden rounded-sm border border-[var(--panel-border)]" role="group" aria-label={label}>
+        {options.map((option, index) => (
+          <button
+            key={option.key}
+            type="button"
+            aria-pressed={active === option.key}
+            className={`px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] ${index ? "border-l border-[var(--panel-border)]" : ""} ${
+              active === option.key
+                ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+            }`}
+            onClick={() => onPick(option.key)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <div
+      className="absolute inset-0 z-40 grid place-items-center bg-[rgba(8,27,45,.36)] p-4 backdrop-blur-[2px]"
+      role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <section
+        className="grid max-h-full w-[min(880px,94%)] grid-rows-[42px_auto_auto_minmax(0,1fr)] overflow-hidden rounded-sm border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_24px_60px_rgba(0,0,0,.36)]"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${metric.label} breakdown`}
+      >
+        <header className="flex items-center gap-2 bg-[var(--brand-bg)] px-3 text-[var(--brand-fg)]">
+          <strong className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-none">{metric.label}</strong>
+          <span className="shrink-0 text-[8px] font-black uppercase tracking-[.1em] text-white/75">Composition</span>
+          <button
+            className="grid h-6 w-6 shrink-0 place-items-center text-white/80 hover:bg-white/12 hover:text-white"
+            type="button"
+            onClick={onClose}
+            title="Close breakdown"
+            aria-label="Close breakdown"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-[var(--panel-border)] px-3 py-2.5">
+          {dimensions.length
+            ? segmented("Break down by", dimensions, dimension, setDimension)
+            : null}
+          {metric.unit === "mi"
+            ? segmented(
+                "Measure",
+                [
+                  { key: "length", label: "Miles" },
+                  { key: "count", label: "Count" },
+                ],
+                measure,
+                setMeasure,
+              )
+            : null}
+          <DialogSegmented
+            label="Chart"
+            active={chartType}
+            options={BREAKDOWN_CHART_TYPES.map((option) => ({
+              key: option,
+              label: BREAKDOWN_CHART_LABELS[option],
+              disabled: option === "donut" && items.length > BREAKDOWN_DONUT_LIMIT,
+              title:
+                option === "donut" && items.length > BREAKDOWN_DONUT_LIMIT
+                  ? `A donut is unreadable past ${BREAKDOWN_DONUT_LIMIT} categories - this one has ${items.length}. Try the treemap.`
+                  : undefined,
+            }))}
+            onPick={(key) => setChartType(key as BreakdownChartType)}
+          />
+          <DialogExportButton
+            onExport={() => exportInventoryBreakdown(metric.id, dimension, measure, bbox ?? undefined, filters)}
+          />
+          {loading ? (
+            <span className="ml-auto text-[9px] font-black uppercase tracking-[.12em] text-[var(--panel-muted)]">Loading...</span>
+          ) : null}
+        </div>
+
+        <div className="grid grid-cols-4 gap-px border-b border-[var(--panel-border)] bg-[var(--panel-border)]">
+          {[
+            { label: "In visible extent", value: `${format(totals.extent)} ${unit === "mi" ? "mi" : ""}`.trim() },
+            { label: "Whole dataset", value: `${format(totals.total)} ${unit === "mi" ? "mi" : ""}`.trim() },
+            { label: "Categories", value: String(items.length) },
+            {
+              label: "Not recorded",
+              value: missing.total ? `${format(missing.total)} ${unit === "mi" ? "mi" : ""}`.trim() : "None",
+            },
+          ].map((tile) => (
+            <div key={tile.label} className="bg-[var(--popup-bg)] px-3 py-2">
+              <span className="block truncate text-[8px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">{tile.label}</span>
+              <strong className="mt-0.5 block truncate text-[15px] font-black leading-none text-[var(--panel-text)]">{tile.value}</strong>
+            </div>
+          ))}
+        </div>
+
+        <div className="relative min-h-[320px] px-2 pb-2 pt-1">
+          <div ref={chartNodeRef} className="h-full min-h-[320px] w-full" />
+          {error ? (
+            <div className="absolute inset-x-4 top-3 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--panel-muted)]">
+              {error}
+            </div>
+          ) : null}
+          {chartType === "donut" || chartType === "treemap" ? (
+            <p className="absolute bottom-1 left-3 m-0 text-[9px] font-semibold text-[var(--panel-muted)]">
+              Showing the visible extent only - this shape cannot carry both figures.
+            </p>
+          ) : null}
+          {!error && !loading && !items.length ? (
+            <div className="absolute inset-0 grid place-items-center text-[11px] font-semibold text-[var(--panel-muted)]">
+              Nothing to break down here.
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ActivityMetricsWidget({
+  error,
+  loading,
+  metrics,
+  position,
+  preset,
+  range,
+  onClose,
+  onHeaderPointerCancel,
+  onHeaderPointerDown,
+  onHeaderPointerMove,
+  onHeaderPointerUp,
+  onOpenMetric,
+  onPresetChange,
+  onRangeChange,
+}: {
+  error: string;
+  loading: boolean;
+  metrics: ActivityMetric[];
+  position: FloatingWidgetPosition;
+  preset: ActivityPreset;
+  range: { start: string; end: string };
+  onOpenMetric: (metric: ActivityMetric) => void;
+  onClose: () => void;
+  onHeaderPointerCancel: (event: React.PointerEvent<HTMLElement>) => void;
+  onHeaderPointerDown: (event: React.PointerEvent<HTMLElement>) => void;
+  onHeaderPointerMove: (event: React.PointerEvent<HTMLElement>) => void;
+  onHeaderPointerUp: (event: React.PointerEvent<HTMLElement>) => void;
+  onPresetChange: (preset: ActivityPreset) => void;
+  onRangeChange: (range: { start: string; end: string }) => void;
+}) {
+  return (
+    <aside
+      className="absolute z-20 grid max-w-[calc(100vw-24px)] grid-rows-[38px_minmax(0,1fr)] overflow-hidden rounded-sm border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_18px_45px_rgba(0,0,0,.28)] backdrop-blur-xl"
+      style={{ left: position.x, top: position.y, width: ACTIVITY_WIDGET_WIDTH }}
+    >
+      <header
+        className="flex cursor-move select-none items-center gap-2 bg-[var(--brand-bg)] px-2.5 text-[var(--brand-fg)]"
+        onPointerCancel={onHeaderPointerCancel}
+        onPointerDown={onHeaderPointerDown}
+        onPointerMove={onHeaderPointerMove}
+        onPointerUp={onHeaderPointerUp}
+        style={{ touchAction: "none" }}
+      >
+        <strong className="min-w-0 flex-1 truncate text-left text-[12px] font-semibold leading-none">
+          Activity Metrics
+        </strong>
+        <div className="shrink-0 text-right text-[8px] font-black uppercase tracking-[.1em] text-white/75">
+          Selected range <span className="text-white">/</span> year earlier
+        </div>
+        <button
+          className="grid h-6 w-6 shrink-0 place-items-center text-white/80 hover:bg-white/12 hover:text-white"
+          type="button"
+          onClick={onClose}
+          onPointerDown={(event) => event.stopPropagation()}
+          title="Close activity metrics"
+          aria-label="Close activity metrics"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </header>
+      <div className="min-h-0 overflow-auto px-2.5 pb-2.5 [scrollbar-color:var(--scrollbar-thumb)_transparent]">
+        {/* One segmented control rather than four loose chips: equal columns
+            cannot wrap, and the joined form reads as a single choice. */}
+        <div
+          className="mt-2.5 grid grid-cols-3 overflow-hidden rounded-sm border border-[var(--panel-border)]"
+          role="group"
+          aria-label="Date range preset"
+        >
+          {ACTIVITY_PRESETS.map((option, index) => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={preset === option}
+              className={`truncate px-1 py-1.5 text-[9px] font-black uppercase tracking-[.05em] ${
+                index ? "border-l border-[var(--panel-border)]" : ""
+              } ${
+                preset === option
+                  ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                  : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:bg-[var(--row-hover)] hover:text-[var(--panel-text)]"
+              }`}
+              onClick={() => onPresetChange(option)}
+            >
+              {ACTIVITY_PRESET_LABELS[option]}
+            </button>
+          ))}
+        </div>
+        {preset === "custom" ? (
+          <div className="mt-1.5 flex items-center gap-1.5">
+            <input
+              type="date"
+              className="min-w-0 flex-1 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-1.5 py-1 text-[10px] font-semibold text-[var(--panel-text)]"
+              max={range.end || undefined}
+              value={range.start}
+              onChange={(event) => onRangeChange({ ...range, start: event.target.value })}
+            />
+            <span className="text-[9px] font-black text-[var(--panel-muted)]">TO</span>
+            <input
+              type="date"
+              className="min-w-0 flex-1 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-1.5 py-1 text-[10px] font-semibold text-[var(--panel-text)]"
+              min={range.start || undefined}
+              value={range.end}
+              onChange={(event) => onRangeChange({ ...range, end: event.target.value })}
+            />
+          </div>
+        ) : (
+          <div className="mt-1.5 text-right text-[9px] font-semibold uppercase tracking-[.04em] text-[var(--panel-muted)]">
+            {range.start} → {range.end}
+          </div>
+        )}
+        <div className="grid grid-cols-2 gap-2 pt-2">
+          {metrics.map((metric) => (
+            <ActivityMetricCard key={metric.id} metric={metric} onOpen={() => onOpenMetric(metric)} />
+          ))}
+        </div>
+        {!metrics.length && loading ? (
+          <div className="rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--panel-muted)]">
+            Loading activity metrics...
+          </div>
+        ) : null}
+        {error ? (
+          <div className="mt-2 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 py-2 text-[10px] font-semibold text-[var(--panel-muted)]">
+            {error}
+          </div>
+        ) : null}
+        {loading && metrics.length ? (
+          <div className="mt-2 text-right text-[9px] font-black uppercase tracking-[.12em] text-[var(--panel-muted)]">
+            Updating...
+          </div>
+        ) : null}
+      </div>
+    </aside>
+  );
+}
+
+function formatActivityNumber(metric: ActivityMetric, value: number): string {
+  return value.toLocaleString(undefined, {
+    minimumFractionDigits: metric.precision,
+    maximumFractionDigits: metric.precision,
+  });
+}
+
+/** The change is stated without a good-or-bad colour: fewer service requests and
+ * fewer inspections do not mean the same thing, and the widget does not judge. */
+function activityChangeLabel(metric: ActivityMetric): string {
+  if (!metric.prior) {
+    return metric.current ? "no activity a year earlier" : "no activity";
+  }
+  const change = ((metric.current - metric.prior) / metric.prior) * 100;
+  if (Math.abs(change) < 0.05) {
+    return "level with last year";
+  }
+  return `${change > 0 ? "\u25b2" : "\u25bc"} ${Math.abs(change).toFixed(1)}% vs last year`;
+}
+
+function ActivityMetricCard({ metric, onOpen }: { metric: ActivityMetric; onOpen: () => void }) {
+  return (
+    <button
+      type="button"
+      className="grid min-h-[74px] grid-rows-[auto_1fr_auto] rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-2.5 py-2 text-left shadow-[inset_0_1px_0_rgba(255,255,255,.08)] hover:border-[var(--accent)] hover:bg-[var(--row-hover)]"
+      title={`${metric.source_table} \u2013 open the trend`}
+      onClick={onOpen}
+    >
+      <div className="flex min-w-0 items-start gap-1.5">
+        <span className="grid h-5 w-5 shrink-0 place-items-center text-[var(--accent)] [&>svg]:h-3.5 [&>svg]:w-3.5">
+          {metric.id === "cctv_miles" ? <Route /> : metric.id === "requests_closed" ? <History /> : <Check />}
+        </span>
+        <strong className="min-w-0 text-[9px] font-semibold uppercase leading-[1.05] tracking-[.01em] text-[var(--panel-muted)]">
+          {metric.label}
+        </strong>
+      </div>
+      <div className="flex min-w-0 items-center justify-center gap-1 self-center whitespace-nowrap">
+        <strong className="min-w-0 truncate text-[16px] font-black leading-none text-[var(--panel-text)]">
+          {formatActivityNumber(metric, metric.current)}
+        </strong>
+        <span className="text-[11px] font-black leading-none text-[var(--accent)]">/</span>
+        <strong className="min-w-0 truncate text-[11px] font-black leading-none text-[var(--accent)]">
+          {formatActivityNumber(metric, metric.prior)}
+        </strong>
+      </div>
+      <span className="truncate text-center text-[8px] font-semibold uppercase tracking-[.03em] text-[var(--panel-muted)]">
+        {activityChangeLabel(metric)}
+      </span>
+    </button>
+  );
+}
+
+const ACTIVITY_TREND_BUCKETS = ["month", "quarter", "year"] as const;
+type ActivityTrendBucket = (typeof ACTIVITY_TREND_BUCKETS)[number];
+const ACTIVITY_TREND_BUCKET_LABELS: Record<ActivityTrendBucket, string> = {
+  month: "Month",
+  quarter: "Quarter",
+  year: "Year",
+};
+
+/** Bars carry the selected range; the prior year rides above them as a line, so
+ * the comparison never competes with the columns for the reader's attention. */
+function activityTrendPalette(colorScheme: ColorScheme) {
+  return colorScheme === "dark"
+    ? { bar: "#3f9fd4", prior: "#8fa6ba", axis: "#33506a", text: "#a9bbcb", split: "#22384c" }
+    : { bar: "#1376d5", prior: "#7c93a8", axis: "#cbd5e1", text: "#64748b", split: "#eef2f7" };
+}
+
+/** The first day of the period a date falls in, so a grouping never opens with
+ * a stub period. Fiscal quarters share the calendar quarter boundaries; only a
+ * fiscal year moves, to the first of July. */
+function activitySnapStart(start: string, bucket: ActivityTrendBucket, fiscal: boolean): string {
+  const year = Number(start.slice(0, 4));
+  const month = Number(start.slice(5, 7));
+  if (bucket === "month") {
+    return `${year}-${String(month).padStart(2, "0")}-01`;
+  }
+  if (bucket === "quarter") {
+    const quarterMonth = Math.floor((month - 1) / 3) * 3 + 1;
+    return `${year}-${String(quarterMonth).padStart(2, "0")}-01`;
+  }
+  if (fiscal) {
+    return `${month >= 7 ? year : year - 1}-07-01`;
+  }
+  return `${year}-01-01`;
+}
+
+/** Year grouping opens on the last five years; the others keep the range in
+ * force, moved back to the edge of the period it starts inside. */
+function activityRangeFor(
+  bucket: ActivityTrendBucket,
+  fiscal: boolean,
+  range: { start: string; end: string },
+  earliest: string | null,
+): { start: string; end: string } {
+  const endYear = Number(range.end.slice(0, 4));
+  const endMonth = Number(range.end.slice(5, 7));
+  const start =
+    bucket === "year"
+      ? fiscal
+        ? `${(endMonth >= 7 ? endYear : endYear - 1) - 4}-07-01`
+        : `${endYear - 4}-01-01`
+      : activitySnapStart(range.start, bucket, fiscal);
+  return { ...range, start: earliest && start < earliest ? earliest : start };
+}
+
+const BREAKDOWN_CHART_TYPES = ["bar", "column", "donut", "treemap"] as const;
+type BreakdownChartType = (typeof BREAKDOWN_CHART_TYPES)[number];
+const BREAKDOWN_CHART_LABELS: Record<BreakdownChartType, string> = {
+  bar: "Bar",
+  column: "Column",
+  donut: "Donut",
+  treemap: "Treemap",
+};
+// A donut stops being readable somewhere around here; past it the control says so
+// rather than drawing forty slivers.
+const BREAKDOWN_DONUT_LIMIT = 8;
+
+const TREND_CHART_TYPES = ["column", "line", "area"] as const;
+type TrendChartType = (typeof TREND_CHART_TYPES)[number];
+const TREND_CHART_LABELS: Record<TrendChartType, string> = {
+  column: "Column",
+  line: "Line",
+  area: "Area",
+};
+
+/** Categories here are ranked by size, so they take one hue lightening down the
+ * order rather than a rainbow that would imply unrelated kinds. */
+function categoricalRamp(count: number, colorScheme: ColorScheme): string[] {
+  const base = colorScheme === "dark" ? [63, 159, 212] : [19, 118, 213];
+  const ceiling = colorScheme === "dark" ? 90 : 236;
+  return Array.from({ length: Math.max(count, 1) }, (_, index) => {
+    const position = count <= 1 ? 0 : index / (count - 1);
+    const mix = 0.05 + position * 0.72;
+    const [red, green, blue] = base.map((channel) => Math.round(channel + (ceiling - channel) * mix));
+    return `rgb(${red}, ${green}, ${blue})`;
+  });
+}
+
+/** A segmented control, shared by both dialogs. */
+function DialogSegmented({
+  label,
+  options,
+  active,
+  onPick,
+}: {
+  label: string;
+  options: { key: string; label: string; disabled?: boolean; title?: string }[];
+  active: string;
+  onPick: (key: string) => void;
+}) {
+  return (
+    <div className="grid gap-1">
+      <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">{label}</span>
+      <div className="flex overflow-hidden rounded-sm border border-[var(--panel-border)]" role="group" aria-label={label}>
+        {options.map((option, index) => (
+          <button
+            key={option.key}
+            type="button"
+            aria-pressed={active === option.key}
+            disabled={option.disabled}
+            title={option.title}
+            className={`px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] ${index ? "border-l border-[var(--panel-border)]" : ""} ${
+              option.disabled
+                ? "cursor-not-allowed bg-[var(--input-bg)] text-[var(--panel-disabled)]"
+                : active === option.key
+                  ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                  : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+            }`}
+            onClick={() => !option.disabled && onPick(option.key)}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DialogExportButton({ onExport }: { onExport: () => Promise<unknown> }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      className="ml-auto flex items-center gap-1.5 self-end rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] text-[var(--panel-muted)] hover:text-[var(--panel-text)] disabled:cursor-wait"
+      onClick={() => {
+        setBusy(true);
+        void onExport()
+          .catch((reason: Error) => {
+            // A cancelled save dialog is a decision, not a failure.
+            if (!/cancel/i.test(reason?.message || "")) {
+              toast.error(reason?.message || "The export could not be created.");
+            }
+          })
+          .finally(() => setBusy(false));
+      }}
+    >
+      <Download className="h-3 w-3" />
+      {busy ? "Exporting" : "Excel"}
+    </button>
+  );
+}
+
+function ActivityTrendDialog({
+  colorScheme,
+  initialRange,
+  metric,
+  onClose,
+}: {
+  colorScheme: ColorScheme;
+  initialRange: { start: string; end: string };
+  metric: ActivityMetric;
+  onClose: () => void;
+}) {
+  const [range, setRange] = useState(initialRange);
+  const [bucket, setBucket] = useState<ActivityTrendBucket>("month");
+  const [fiscal, setFiscal] = useState(false);
+  const [cumulative, setCumulative] = useState(false);
+  const [chartType, setChartType] = useState<TrendChartType>("column");
+  const [points, setPoints] = useState<ActivitySeriesPoint[]>([]);
+  const [earliest, setEarliest] = useState<string | null>(null);
+  const rangeBeforeYearRef = useRef<{ start: string; end: string } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const chartNodeRef = useRef<HTMLDivElement | null>(null);
+  const chartRef = useRef<echarts.ECharts | null>(null);
+  const requestRef = useRef(0);
+
+  useEffect(() => {
+    if (!range.start || !range.end || range.end < range.start) {
+      return;
+    }
+    const requestId = ++requestRef.current;
+    setLoading(true);
+    fetchActivitySeries(metric.id, range.start, range.end, bucket, fiscal)
+      .then((payload) => {
+        if (requestRef.current !== requestId) return;
+        setPoints(payload.points || []);
+        setEarliest(payload.earliest || null);
+        setError("");
+      })
+      .catch((reason: Error) => {
+        if (requestRef.current !== requestId) return;
+        setError(reason.message || "The trend could not be loaded.");
+      })
+      .finally(() => {
+        if (requestRef.current === requestId) setLoading(false);
+      });
+  }, [metric.id, range, bucket, fiscal]);
+
+  /** Year grouping opens on the last five years: two partial years say nothing
+   * about a trend, and the whole record buries the recent ones. It never starts
+   * before the source does, so a metric that began in 2024 shows the years it
+   * has rather than empty columns. The range in force is kept so that stepping
+   * back to month or quarter returns the reader to what they were looking at. */
+  const selectBucket = useCallback(
+    (next: ActivityTrendBucket) => {
+      if (next === bucket) return;
+      if (next === "year") {
+        rangeBeforeYearRef.current = range;
+        setRange(activityRangeFor(next, fiscal, range, earliest));
+      } else if (bucket === "year" && rangeBeforeYearRef.current) {
+        const restored = rangeBeforeYearRef.current;
+        rangeBeforeYearRef.current = null;
+        setRange(activityRangeFor(next, fiscal, restored, earliest));
+      } else {
+        setRange(activityRangeFor(next, fiscal, range, earliest));
+      }
+      setBucket(next);
+    },
+    [bucket, earliest, fiscal, range],
+  );
+
+  const selectFiscal = useCallback(
+    (next: boolean) => {
+      if (next === fiscal) return;
+      setRange(activityRangeFor(bucket, next, range, earliest));
+      setFiscal(next);
+    },
+    [bucket, earliest, fiscal, range],
+  );
+
+  // Cumulative is a reading of the same numbers, so it never refetches.
+  const plotted = useMemo(() => {
+    if (!cumulative) return points;
+    let current = 0;
+    let prior = 0;
+    return points.map((point) => {
+      current += point.current;
+      prior += point.prior;
+      return { ...point, current: Number(current.toFixed(2)), prior: Number(prior.toFixed(2)) };
+    });
+  }, [points, cumulative]);
+
+  const summary = useMemo(() => {
+    const total = points.reduce((sum, point) => sum + point.current, 0);
+    const priorTotal = points.reduce((sum, point) => sum + point.prior, 0);
+    const best = points.reduce<ActivitySeriesPoint | null>(
+      (top, point) => (!top || point.current > top.current ? point : top),
+      null,
+    );
+    return {
+      total,
+      priorTotal,
+      average: points.length ? total / points.length : 0,
+      best,
+      change: priorTotal ? ((total - priorTotal) / priorTotal) * 100 : null,
+    };
+  }, [points]);
+
+  const format = useCallback(
+    (value: number) =>
+      value.toLocaleString(undefined, {
+        minimumFractionDigits: metric.precision,
+        maximumFractionDigits: metric.precision,
+      }),
+    [metric.precision],
+  );
+
+  useEffect(() => {
+    const node = chartNodeRef.current;
+    if (!node) return;
+    const chart = echarts.init(node);
+    chartRef.current = chart;
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => chart.resize());
+    observer?.observe(node);
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      observer?.disconnect();
+      chart.dispose();
+      chartRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const palette = activityTrendPalette(colorScheme);
+    chart.setOption(
+      {
+        animationDuration: 260,
+        grid: { left: 52, right: 16, top: 26, bottom: plotted.length > 8 ? 58 : 34 },
+        tooltip: {
+          trigger: "axis",
+          axisPointer: { type: "shadow" },
+          formatter: (params: unknown) => {
+            const rows = params as { name: string; seriesName: string; value: number }[];
+            if (!rows?.length) return "";
+            const current = rows.find((row) => row.seriesName !== "Year earlier")?.value ?? 0;
+            const prior = rows.find((row) => row.seriesName === "Year earlier")?.value ?? 0;
+            const change = prior ? ((current - prior) / prior) * 100 : null;
+            const point = plotted.find((entry) => entry.label === rows[0].name);
+            return [
+              `<strong>${rows[0].name}</strong>${point && !point.complete ? " (partial)" : ""}`,
+              `${metric.label}: ${format(current)}`,
+              `Year earlier: ${format(prior)}`,
+              change === null ? "" : `Change: ${change > 0 ? "+" : ""}${change.toFixed(1)}%`,
+            ]
+              .filter(Boolean)
+              .join("<br/>");
+          },
+        },
+        legend: {
+          top: 0,
+          right: 0,
+          itemWidth: 14,
+          itemHeight: 8,
+          textStyle: { color: palette.text, fontSize: 10 },
+          data: [metric.label, "Year earlier"],
+        },
+        xAxis: {
+          type: "category",
+          data: plotted.map((point) => point.label),
+          axisLine: { lineStyle: { color: palette.axis } },
+          axisTick: { show: false },
+          axisLabel: {
+            color: palette.text,
+            fontSize: 10,
+            interval: plotted.length > 18 ? "auto" : 0,
+            rotate: plotted.length > 8 ? 40 : 0,
+          },
+        },
+        yAxis: {
+          type: "value",
+          splitLine: { lineStyle: { color: palette.split } },
+          axisLabel: { color: palette.text, fontSize: 10 },
+        },
+        series: [
+          chartType === "column"
+            ? {
+                name: metric.label,
+                type: "bar",
+                barMaxWidth: 34,
+                itemStyle: { color: palette.bar, borderRadius: [3, 3, 0, 0] },
+                data: plotted.map((point) => ({
+                  value: point.current,
+                  // A period the range only partly covers is drawn faintly, so it
+                  // is never read as a fall in activity.
+                  itemStyle: point.complete ? undefined : { color: palette.bar, opacity: 0.42 },
+                })),
+                label: {
+                  show: plotted.length <= 12,
+                  position: "top",
+                  color: palette.text,
+                  fontSize: 9,
+                  formatter: (item: { value: number }) => format(item.value),
+                },
+              }
+            : {
+                name: metric.label,
+                type: "line",
+                smooth: false,
+                symbol: "circle",
+                symbolSize: 6,
+                lineStyle: { color: palette.bar, width: 2.5 },
+                itemStyle: { color: palette.bar },
+                areaStyle: chartType === "area" ? { color: palette.bar, opacity: 0.18 } : undefined,
+                data: plotted.map((point) => point.current),
+              },
+          {
+            name: "Year earlier",
+            type: "line",
+            symbol: "circle",
+            symbolSize: 5,
+            lineStyle: { color: palette.prior, width: 2, type: "dashed" },
+            itemStyle: { color: palette.prior },
+            data: plotted.map((point) => point.prior),
+          },
+        ],
+      },
+      true,
+    );
+  }, [plotted, colorScheme, metric.label, format, chartType]);
+
+  return (
+    <div
+      className="absolute inset-0 z-40 grid place-items-center bg-[rgba(8,27,45,.36)] p-4 backdrop-blur-[2px]"
+      role="presentation"
+      onMouseDown={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <section
+        className="grid max-h-full w-[min(880px,94%)] grid-rows-[42px_auto_auto_minmax(0,1fr)] overflow-hidden rounded-sm border border-[var(--panel-border)] bg-[var(--popup-bg)] text-[var(--panel-text)] shadow-[0_24px_60px_rgba(0,0,0,.36)]"
+        role="dialog"
+        aria-modal="true"
+        aria-label={`${metric.label} trend`}
+      >
+        <header className="flex items-center gap-2 bg-[var(--brand-bg)] px-3 text-[var(--brand-fg)]">
+          <strong className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-none">{metric.label}</strong>
+          <span className="shrink-0 text-[8px] font-black uppercase tracking-[.1em] text-white/75">Trend</span>
+          <button
+            className="grid h-6 w-6 shrink-0 place-items-center text-white/80 hover:bg-white/12 hover:text-white"
+            type="button"
+            onClick={onClose}
+            title="Close trend"
+            aria-label="Close trend"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </header>
+
+        <div className="flex flex-wrap items-end gap-x-4 gap-y-2 border-b border-[var(--panel-border)] px-3 py-2.5">
+          <label className="grid gap-1">
+            <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">From</span>
+            <input
+              type="date"
+              className="rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-1.5 py-1 text-[11px] font-semibold text-[var(--panel-text)]"
+              max={range.end || undefined}
+              value={range.start}
+              onChange={(event) => setRange((current) => ({ ...current, start: event.target.value }))}
+            />
+          </label>
+          <label className="grid gap-1">
+            <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">To</span>
+            <input
+              type="date"
+              className="rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-1.5 py-1 text-[11px] font-semibold text-[var(--panel-text)]"
+              min={range.start || undefined}
+              value={range.end}
+              onChange={(event) => setRange((current) => ({ ...current, end: event.target.value }))}
+            />
+          </label>
+          <div className="grid gap-1">
+            <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">Group by</span>
+            <div className="grid grid-cols-3 overflow-hidden rounded-sm border border-[var(--panel-border)]" role="group" aria-label="Group by">
+              {ACTIVITY_TREND_BUCKETS.map((option, index) => (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={bucket === option}
+                  className={`px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] ${index ? "border-l border-[var(--panel-border)]" : ""} ${
+                    bucket === option
+                      ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                      : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+                  }`}
+                  onClick={() => selectBucket(option)}
+                >
+                  {ACTIVITY_TREND_BUCKET_LABELS[option]}
+                </button>
+              ))}
+            </div>
+          </div>
+          {bucket === "month" ? null : (
+            <div className="grid gap-1">
+              <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">Year basis</span>
+              <div className="grid grid-cols-2 overflow-hidden rounded-sm border border-[var(--panel-border)]" role="group" aria-label="Year basis">
+                {[
+                  { value: false, label: "Calendar" },
+                  { value: true, label: "Fiscal" },
+                ].map((option, index) => (
+                  <button
+                    key={option.label}
+                    type="button"
+                    aria-pressed={fiscal === option.value}
+                    className={`px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] ${index ? "border-l border-[var(--panel-border)]" : ""} ${
+                      fiscal === option.value
+                        ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                        : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+                    }`}
+                    onClick={() => selectFiscal(option.value)}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+          <div className="grid gap-1">
+            <span className="text-[8px] font-black uppercase tracking-[.1em] text-[var(--panel-muted)]">Reading</span>
+            <div className="grid grid-cols-2 overflow-hidden rounded-sm border border-[var(--panel-border)]" role="group" aria-label="Reading">
+              {[
+                { value: false, label: "Per period" },
+                { value: true, label: "Cumulative" },
+              ].map((option, index) => (
+                <button
+                  key={option.label}
+                  type="button"
+                  aria-pressed={cumulative === option.value}
+                  className={`px-3 py-1 text-[9px] font-black uppercase tracking-[.05em] ${index ? "border-l border-[var(--panel-border)]" : ""} ${
+                    cumulative === option.value
+                      ? "bg-[var(--panel-active-bg)] text-[var(--panel-text)] shadow-[inset_0_-2px_0_var(--accent)]"
+                      : "bg-[var(--input-bg)] text-[var(--panel-muted)] hover:text-[var(--panel-text)]"
+                  }`}
+                  onClick={() => setCumulative(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <DialogSegmented
+            label="Chart"
+            active={chartType}
+            options={TREND_CHART_TYPES.map((option) => ({ key: option, label: TREND_CHART_LABELS[option] }))}
+            onPick={(key) => setChartType(key as TrendChartType)}
+          />
+          <DialogExportButton
+            onExport={() => exportActivitySeries(metric.id, range.start, range.end, bucket, fiscal)}
+          />
+          {loading ? (
+            <span className="ml-auto text-[9px] font-black uppercase tracking-[.12em] text-[var(--panel-muted)]">Loading...</span>
+          ) : null}
+        </div>
+
+        <div className="grid grid-cols-4 gap-px border-b border-[var(--panel-border)] bg-[var(--panel-border)]">
+          {[
+            { label: "Range total", value: format(summary.total) },
+            { label: `Average per ${bucket}`, value: format(summary.average) },
+            { label: "Busiest period", value: summary.best ? `${summary.best.label} \u00b7 ${format(summary.best.current)}` : "\u2014" },
+            {
+              label: "Vs year earlier",
+              value:
+                summary.change === null
+                  ? "\u2014"
+                  : `${summary.change > 0 ? "\u25b2" : "\u25bc"} ${Math.abs(summary.change).toFixed(1)}%`,
+            },
+          ].map((tile) => (
+            <div key={tile.label} className="bg-[var(--popup-bg)] px-3 py-2">
+              <span className="block truncate text-[8px] font-black uppercase tracking-[.08em] text-[var(--panel-muted)]">{tile.label}</span>
+              <strong className="mt-0.5 block truncate text-[15px] font-black leading-none text-[var(--panel-text)]">{tile.value}</strong>
+            </div>
+          ))}
+        </div>
+
+        <div className="relative min-h-[300px] px-2 pb-2 pt-1">
+          <div ref={chartNodeRef} className="h-full min-h-[300px] w-full" />
+          {error ? (
+            <div className="absolute inset-x-4 top-3 rounded-sm border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 py-2 text-[11px] font-semibold text-[var(--panel-muted)]">
+              {error}
+            </div>
+          ) : null}
+          {chartType === "column" && points.some((point) => !point.complete) ? (
+            <p className="absolute bottom-1 left-3 m-0 text-[9px] font-semibold text-[var(--panel-muted)]">
+              Faded columns cover only part of their period.
+            </p>
+          ) : null}
+          {!error && !loading && !points.length ? (
+            <div className="absolute inset-0 grid place-items-center text-[11px] font-semibold text-[var(--panel-muted)]">
+              No activity in this range.
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
   );
 }
 

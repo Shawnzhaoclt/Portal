@@ -8,7 +8,7 @@ import struct
 import tomllib
 import time
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from portal.app.core.desktop_config import (
+    configured_asset_history,
     configured_map_duckdb_geojson_layers,
     configured_pmtiles_detail_sources,
 )
@@ -37,6 +38,8 @@ from portal.runtime.transport import (
     Request,
     Response,
 )
+
+from portal.app.exports import ExcelColumn, ExcelSheet, build_portal_excel_workbook
 
 from .config import ConfigError, ProjectConfig, load_config
 
@@ -1108,6 +1111,103 @@ def create_app() -> LocalApplication:
             "bbox": bbox,
             "metrics": metrics,
         }
+
+    @app.get("/api/metrics/activity")
+    def activity_metrics(
+        start: str = Query(..., min_length=10, max_length=10),
+        end: str = Query(..., min_length=10, max_length=10),
+    ) -> dict[str, Any]:
+        window = parse_activity_window(start, end)
+        return {
+            "ok": True,
+            "generated_at": int(time.time()),
+            "start": window[0].isoformat(),
+            "end": window[1].isoformat(),
+            "prior_start": window[2].isoformat(),
+            "prior_end": window[3].isoformat(),
+            "metrics": query_activity_metrics(*window),
+        }
+
+    @app.get("/api/metrics/activity/series")
+    def activity_series(
+        metric: str = Query(..., min_length=1, max_length=64),
+        start: str = Query(..., min_length=10, max_length=10),
+        end: str = Query(..., min_length=10, max_length=10),
+        bucket: str = Query("month", min_length=3, max_length=10),
+        fiscal: bool = Query(False),
+    ) -> dict[str, Any]:
+        window = parse_activity_window(start, end)
+        series = query_activity_series(metric, *window, bucket, fiscal)
+        return {
+            "ok": True,
+            "generated_at": int(time.time()),
+            "start": window[0].isoformat(),
+            "end": window[1].isoformat(),
+            "prior_start": window[2].isoformat(),
+            "prior_end": window[3].isoformat(),
+            "bucket": bucket,
+            "fiscal": fiscal,
+            **series,
+        }
+
+    @app.get("/api/inventory/breakdown")
+    def inventory_breakdown(
+        layer: str = Query(..., min_length=1, max_length=64),
+        dimension: str = Query("", max_length=64),
+        measure: str = Query("count", min_length=3, max_length=8),
+        west: float | None = Query(None, ge=-180, le=180),
+        south: float | None = Query(None, ge=-90, le=90),
+        east: float | None = Query(None, ge=-180, le=180),
+        north: float | None = Query(None, ge=-90, le=90),
+        filters: str = Query("", max_length=ATTRIBUTE_FILTER_QUERY_MAX_LENGTH),
+    ) -> dict[str, Any]:
+        bbox = valid_request_bbox(west, south, east, north)
+        breakdown = query_inventory_breakdown(
+            layer, dimension, measure, bbox, parse_attribute_filter_query(filters)
+        )
+        return {"ok": True, "generated_at": int(time.time()), "bbox": bbox, **breakdown}
+
+    @app.get("/api/metrics/activity/series/export")
+    def activity_series_export(
+        metric: str = Query(..., min_length=1, max_length=64),
+        start: str = Query(..., min_length=10, max_length=10),
+        end: str = Query(..., min_length=10, max_length=10),
+        bucket: str = Query("month", min_length=3, max_length=10),
+        fiscal: bool = Query(False),
+    ) -> Response:
+        window = parse_activity_window(start, end)
+        series = query_activity_series(metric, *window, bucket, fiscal)
+        report = {
+            "start": window[0].isoformat(),
+            "end": window[1].isoformat(),
+            "prior_start": window[2].isoformat(),
+            "prior_end": window[3].isoformat(),
+            "bucket": bucket,
+            **series,
+        }
+        filename = f"Activity-{metric}-{report['start']}-to-{report['end']}.xlsx"
+        return excel_response(activity_series_workbook(report, fiscal), filename)
+
+    @app.get("/api/inventory/breakdown/export")
+    def inventory_breakdown_export(
+        layer: str = Query(..., min_length=1, max_length=64),
+        dimension: str = Query("", max_length=64),
+        measure: str = Query("count", min_length=3, max_length=8),
+        west: float | None = Query(None, ge=-180, le=180),
+        south: float | None = Query(None, ge=-90, le=90),
+        east: float | None = Query(None, ge=-180, le=180),
+        north: float | None = Query(None, ge=-90, le=90),
+        filters: str = Query("", max_length=ATTRIBUTE_FILTER_QUERY_MAX_LENGTH),
+    ) -> Response:
+        bbox = valid_request_bbox(west, south, east, north)
+        report = query_inventory_breakdown(
+            layer, dimension, measure, bbox, parse_attribute_filter_query(filters)
+        )
+        report["dataset_total"] = sum(float(item["total"] or 0) for item in report["items"]) + float(
+            (report.get("missing") or {}).get("total") or 0
+        )
+        filename = f"Inventory-{report['layer']['id']}-by-{report['dimension']['key']}.xlsx"
+        return excel_response(inventory_breakdown_workbook(report, bbox), filename)
 
     @app.get("/api/inventory/layers")
     def inventory_layers() -> dict[str, Any]:
@@ -2361,6 +2461,310 @@ def normalize_filter_target_key(value: str) -> str:
     return value.strip().lower()
 
 
+# Only columns that carry data. STRUCT_TYPE_TEXT reads like the label field but
+# is empty on 99% of structures, and the pipes' TYPE column holds one real value,
+# so neither is offered - an empty chart teaches the reader to distrust the rest.
+# Diameters are stored in feet; the bins are labelled in the inches crews use.
+DIAMETER_BINS = (
+    ("<= 12 in", "{column} <= 1.0"),
+    ("15 - 18 in", "{column} > 1.0 AND {column} <= 1.5"),
+    ("21 - 24 in", "{column} > 1.5 AND {column} <= 2.0"),
+    ("27 - 36 in", "{column} > 2.0 AND {column} <= 3.0"),
+    ("42 - 48 in", "{column} > 3.0 AND {column} <= 4.0"),
+    ("> 48 in", "{column} > 4.0"),
+)
+WIDTH_BINS = (
+    ("<= 5 ft", "{column} <= 5"),
+    ("5 - 10 ft", "{column} > 5 AND {column} <= 10"),
+    ("10 - 20 ft", "{column} > 10 AND {column} <= 20"),
+    ("20 - 40 ft", "{column} > 20 AND {column} <= 40"),
+    ("> 40 ft", "{column} > 40"),
+)
+INVENTORY_BREAKDOWN_BINS = {"diameter": DIAMETER_BINS, "width": WIDTH_BINS}
+
+INVENTORY_BREAKDOWN_DIMENSIONS: dict[str, list[dict[str, Any]]] = {
+    "active_structures": [
+        {"key": "type", "label": "Type", "column": "STRUCT_TYPE"},
+        {"key": "material", "label": "Material", "column": "MATERIAL"},
+    ],
+    "active_pipes": [
+        {"key": "material", "label": "Material", "column": "MATERIAL"},
+        {"key": "shape", "label": "Shape", "column": "PI_SHAPE"},
+        {"key": "diameter", "label": "Diameter", "column": "DIAMETER", "bins": "diameter"},
+    ],
+    "city_maintained_pipes": [
+        {"key": "material", "label": "Material", "column": "MATERIAL"},
+        {"key": "shape", "label": "Shape", "column": "PI_SHAPE"},
+        {"key": "diameter", "label": "Diameter", "column": "DIAMETER", "bins": "diameter"},
+    ],
+    "active_drainages": [
+        {"key": "shape", "label": "Shape", "column": "CH_SHAPE"},
+        {"key": "top_width", "label": "Top width", "column": "WIDTH_TOP", "bins": "width"},
+    ],
+}
+# Past this the chart is a list, not a picture; the rest is gathered into Other.
+INVENTORY_BREAKDOWN_TOP = 12
+
+
+def inventory_breakdown_dimension(layer_id: str, dimension_key: str) -> dict[str, Any]:
+    dimensions = INVENTORY_BREAKDOWN_DIMENSIONS.get(layer_id, [])
+    if not dimensions:
+        raise HTTPException(status_code=404, detail=f"{layer_id} has no attributes to break down.")
+    if not dimension_key:
+        return dimensions[0]
+    for dimension in dimensions:
+        if dimension["key"] == dimension_key:
+            return dimension
+    raise HTTPException(
+        status_code=404, detail=f"{layer_id} cannot be broken down by {dimension_key}."
+    )
+
+
+def _breakdown_bucket_expression(dimension: dict[str, Any]) -> str:
+    """The label each row falls under: a bin for numbers, the value itself otherwise."""
+    column = quote_identifier(str(dimension["column"]))
+    bins = INVENTORY_BREAKDOWN_BINS.get(str(dimension.get("bins") or ""))
+    if not bins:
+        return f"NULLIF(TRIM(CAST({column} AS VARCHAR)), '')"
+    cases = " ".join(
+        f"WHEN {condition.format(column=column)} THEN '{label}'" for label, condition in bins
+    )
+    return f"CASE WHEN {column} IS NULL THEN NULL {cases} ELSE NULL END"
+
+
+def query_inventory_breakdown(
+    layer_id: str,
+    dimension_key: str,
+    measure: str,
+    bbox: list[float] | None,
+    attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    """One row per category, carrying both the visible extent and the whole layer.
+
+    Both figures come from the same expressions the cards use, so a breakdown
+    always adds up to the number on the card that opened it.
+    """
+    layer = inventory_layer_or_404(layer_id)
+    dimension = inventory_breakdown_dimension(str(layer["id"]), dimension_key)
+    if measure not in ("count", "length"):
+        raise HTTPException(status_code=400, detail="Measure must be count or length.")
+    if measure == "length" and str(layer.get("metric_type")) != "length":
+        raise HTTPException(status_code=400, detail=f"{layer['label']} has no length to summarize.")
+
+    extent_wkt = bbox_to_stateplane_wkt(bbox) if bbox else None
+    geometry_column = str(layer.get("geometry_column", "geometry"))
+    connection = open_inventory_duckdb(layer)
+    try:
+        where_clause, params = duckdb_spatial_where_clause(geometry_column, None)
+        schema_fields = duckdb_table_schema_fields(connection, str(layer["table"]))
+        filter_fields = [field for field in schema_fields if field["source_field"] != geometry_column]
+        filter_parts, filter_params = duckdb_attribute_filter_where_parts(
+            attribute_filters,
+            inventory_filter_target_keys(layer),
+            filter_fields,
+        )
+        if filter_parts:
+            where_clause = " AND ".join([where_clause, *filter_parts])
+            params.extend(filter_params)
+
+        value = (
+            "COUNT(*)"
+            if measure == "count"
+            else duckdb_length_miles_expression(connection, layer)
+        )
+        # The extent aggregate is the same expression behind a spatial test, so
+        # the two columns are guaranteed comparable.
+        if extent_wkt:
+            # Both forms are a single aggregate, so the extent column is the same
+            # expression with a FILTER on it - no rewriting of the aggregate body.
+            inside = f"ST_Intersects({quote_identifier(geometry_column)}, ST_GeomFromText(?))"
+            extent_value = f"{value} FILTER (WHERE {inside})"
+        else:
+            extent_value = value
+        bucket = _breakdown_bucket_expression(dimension)
+        sql = f"""
+            SELECT {bucket} AS bucket, {extent_value} AS extent_value, {value} AS total_value
+            FROM {quote_identifier(str(layer["table"]))}
+            WHERE {where_clause}
+            GROUP BY 1
+        """
+        rows = connection.execute(sql, ([extent_wkt] if extent_wkt else []) + params).fetchall()
+    finally:
+        connection.close()
+
+    ordered_labels = [label for label, _ in INVENTORY_BREAKDOWN_BINS.get(str(dimension.get("bins") or ""), ())]
+    missing = {"extent": 0.0, "total": 0.0}
+    items: list[dict[str, Any]] = []
+    for bucket_label, extent_value, total_value in rows:
+        entry = {
+            "label": str(bucket_label) if bucket_label is not None else "",
+            "extent": float(extent_value or 0),
+            "total": float(total_value or 0),
+        }
+        if bucket_label is None:
+            missing["extent"] += entry["extent"]
+            missing["total"] += entry["total"]
+            continue
+        items.append(entry)
+
+    if ordered_labels:
+        order = {label: index for index, label in enumerate(ordered_labels)}
+        items.sort(key=lambda item: order.get(item["label"], len(order)))
+        folded = 0
+    else:
+        items.sort(key=lambda item: item["total"], reverse=True)
+        # Folding a single category into "Other" only hides its name.
+        folded = max(0, len(items) - INVENTORY_BREAKDOWN_TOP)
+        if folded < 2:
+            folded = 0
+        if folded:
+            tail = items[INVENTORY_BREAKDOWN_TOP:]
+            items = items[:INVENTORY_BREAKDOWN_TOP]
+            items.append(
+                {
+                    "label": f"Other ({folded})",
+                    "extent": sum(item["extent"] for item in tail),
+                    "total": sum(item["total"] for item in tail),
+                }
+            )
+
+    precision = 2 if measure == "length" else 0
+    for item in items:
+        item["extent"] = round(item["extent"], precision)
+        item["total"] = round(item["total"], precision)
+    return {
+        "layer": {
+            "id": str(layer["id"]),
+            "label": str(layer["label"]),
+            "metric_type": str(layer.get("metric_type")),
+        },
+        "dimension": {"key": dimension["key"], "label": dimension["label"]},
+        "dimensions": [
+            {"key": item["key"], "label": item["label"]}
+            for item in INVENTORY_BREAKDOWN_DIMENSIONS.get(str(layer["id"]), [])
+        ],
+        "measure": measure,
+        "unit": "mi" if measure == "length" else "features",
+        "precision": precision,
+        "items": items,
+        "missing": {
+            "extent": round(missing["extent"], precision),
+            "total": round(missing["total"], precision),
+        },
+        "folded": folded,
+    }
+
+
+def excel_response(content: bytes, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def activity_series_workbook(report: dict[str, Any], fiscal: bool) -> bytes:
+    """The chart's own rows: one period per line, with its year-earlier figure."""
+    metric = report["metric"]
+    columns = [
+        ExcelColumn("period", "Period", 18),
+        ExcelColumn("current", str(metric["label"]), 20, "number"),
+        ExcelColumn("prior", "Year earlier", 16, "number"),
+        ExcelColumn("change", "Change %", 12, "number"),
+        ExcelColumn("complete", "Whole period", 14),
+    ]
+    rows = []
+    for point in report["points"]:
+        prior = float(point["prior"] or 0)
+        current = float(point["current"] or 0)
+        rows.append(
+            {
+                "period": point["label"],
+                "current": current,
+                "prior": prior,
+                "change": round((current - prior) / prior * 100, 1) if prior else None,
+                "complete": "Yes" if point.get("complete", True) else "Partial",
+            }
+        )
+    return build_portal_excel_workbook(
+        report_title="Storm Water Activity Trend",
+        sheets=[
+            ExcelSheet(
+                name="Trend",
+                title=str(metric["label"]),
+                columns=columns,
+                rows=rows,
+                filters={
+                    "Range": f"{report['start']} to {report['end']}",
+                    "Compared with": f"{report['prior_start']} to {report['prior_end']}",
+                    "Grouped by": str(report["bucket"]).title(),
+                    "Year basis": "Fiscal (July to June)" if fiscal else "Calendar",
+                    "Source": str(metric["source_table"]),
+                },
+            )
+        ],
+        exported_by="Storm Water Asset Risk Map",
+        number_format="0.##",
+    )
+
+
+def inventory_breakdown_workbook(report: dict[str, Any], bbox: list[float] | None) -> bytes:
+    """One row per category, carrying both the visible extent and the whole layer."""
+    unit = "miles" if report["unit"] == "mi" else "features"
+    columns = [
+        ExcelColumn("category", str(report["dimension"]["label"]), 26),
+        ExcelColumn("extent", f"Visible extent ({unit})", 22, "number"),
+        ExcelColumn("total", f"Whole dataset ({unit})", 22, "number"),
+        ExcelColumn("share", "Share of dataset %", 18, "number"),
+    ]
+    rows = []
+    for item in report["items"]:
+        total = float(item["total"] or 0)
+        rows.append(
+            {
+                "category": item["label"],
+                "extent": float(item["extent"] or 0),
+                "total": total,
+                "share": round(total / float(report["dataset_total"]) * 100, 1)
+                if report.get("dataset_total")
+                else None,
+            }
+        )
+    missing = report.get("missing") or {}
+    if missing.get("total"):
+        rows.append(
+            {
+                "category": "Not recorded",
+                "extent": float(missing.get("extent") or 0),
+                "total": float(missing.get("total") or 0),
+                "share": None,
+            }
+        )
+    return build_portal_excel_workbook(
+        report_title="Storm Water Inventory Breakdown",
+        sheets=[
+            ExcelSheet(
+                name="Breakdown",
+                title=f"{report['layer']['label']} by {report['dimension']['label'].lower()}",
+                columns=columns,
+                rows=rows,
+                filters={
+                    "Layer": str(report["layer"]["label"]),
+                    "Broken down by": str(report["dimension"]["label"]),
+                    "Measured in": unit,
+                    "Map extent": (
+                        "West {0:.5f}, south {1:.5f}, east {2:.5f}, north {3:.5f}".format(*bbox)
+                        if bbox
+                        else "Whole dataset"
+                    ),
+                },
+            )
+        ],
+        exported_by="Storm Water Asset Risk Map",
+        number_format="0.##",
+    )
+
+
 def query_inventory_metrics(
     bbox: list[float] | None,
     attribute_filters: dict[str, list[dict[str, Any]]] | None = None,
@@ -2372,6 +2776,439 @@ def query_inventory_metrics(
         inventory_metric_from_layer(layer, total_values[str(layer["id"])], extent_values[str(layer["id"])])
         for layer in INVENTORY_DUCKDB_LAYERS.values()
     ]
+
+
+def parse_activity_window(start: str, end: str) -> tuple[date, date, date, date]:
+    """The requested range plus the same span one year earlier."""
+    try:
+        first = date.fromisoformat(start)
+        last = date.fromisoformat(end)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail="Dates must use YYYY-MM-DD format.") from error
+    if last < first:
+        raise HTTPException(status_code=400, detail="The end date must not precede the start date.")
+    if (last - first).days > 14610:
+        raise HTTPException(status_code=400, detail="Summarize at most about forty years at a time.")
+    # A year back rather than a fixed day count, so a range that spans a leap day
+    # still compares against the same calendar period.
+    return first, last, _year_earlier(first), _year_earlier(last)
+
+
+def _year_earlier(value: date) -> date:
+    try:
+        return value.replace(year=value.year - 1)
+    except ValueError:
+        # 29 February has no counterpart in a common year.
+        return value.replace(year=value.year - 1, day=28)
+
+
+def _activity_source(key: str, label: str) -> dict[str, Any]:
+    try:
+        config = configured_asset_history()
+    except RuntimeError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+    return {"database": str(config["sources"][key]["database"]), "label": label}
+
+
+def _period_counts(
+    source_key: str,
+    label: str,
+    sql: str,
+    window: tuple[date, date, date, date],
+) -> tuple[float, float]:
+    """Run one query that totals the current period and the prior one at once."""
+    connection = open_configured_duckdb(_activity_source(source_key, label), label)
+    try:
+        row = connection.execute(
+            sql,
+            [
+                window[0].isoformat(),
+                window[1].isoformat(),
+                window[2].isoformat(),
+                window[3].isoformat(),
+            ],
+        ).fetchone()
+    except Exception as error:  # noqa: BLE001 - a missing table is a 503, not a crash
+        raise HTTPException(
+            status_code=503, detail=f"{label} could not be summarized: {error}"
+        ) from error
+    finally:
+        connection.close()
+    return float(row[0] or 0), float(row[1] or 0)
+
+
+# A metric is described once. The totals query and the trend query are both
+# generated from the same description, so a definition can never drift between
+# the card and the chart it opens.
+#
+# An inspection row in ITpipes is a finished survey - Completed is false on every
+# row and Status is empty on nearly all of them, so the date is what "closed"
+# means there. Inspected_Length is capped at the pipe's own length because a few
+# rows report more footage than the segment has. The Cityworks status match is
+# case-folded because that database holds both COMPLETE and Complete, and SQL
+# Server compares them alike while DuckDB would not.
+CCTV_SURVEYED_FROM = """(
+        SELECT i.Inspection_Date AS Inspection_Date,
+               CASE
+                   WHEN m.Section_Length > 0 AND i.Inspected_Length > m.Section_Length
+                       THEN m.Section_Length
+                   ELSE i.Inspected_Length
+               END AS feet
+        FROM MLI AS i
+        LEFT JOIN ML AS m ON m.ML_ID = i.ML_ID
+        WHERE i.Inspection_Technology_Used_CCTV AND i.Inspected_Length > 0
+    ) AS surveyed"""
+
+ACTIVITY_METRIC_SPECS: list[dict[str, Any]] = [
+    {
+        "id": "requests_closed",
+        "label": "Service requests closed",
+        "unit": "count",
+        "precision": 0,
+        "source": "cityworks",
+        "source_label": "Cityworks requests",
+        "from": "azteca_REQUEST",
+        "date": "DATETIMECLOSED",
+        "aggregate": "count(*)",
+        "filter": "",
+        "scale": 0.0,
+    },
+    {
+        "id": "inspections_closed",
+        "label": "Asset inspections closed",
+        "unit": "count",
+        "precision": 0,
+        "source": "cityworks",
+        "source_label": "Cityworks asset inspections",
+        "from": "azteca_INSPECTION",
+        "date": "DATECLOSED",
+        "aggregate": "count(*)",
+        "filter": "INSPTEMPLATENAME LIKE '%Asset Insp%' AND upper(STATUS) IN ('CLOSED', 'COMPLETE')",
+        "scale": 0.0,
+    },
+    {
+        "id": "cctv_inspections",
+        "label": "CCTV inspections",
+        "unit": "count",
+        "precision": 0,
+        "source": "itpipesProduction",
+        "source_label": "ITpipes inspections",
+        "from": "MLI",
+        "date": "Inspection_Date",
+        "aggregate": "count(*)",
+        "filter": "Inspection_Technology_Used_CCTV",
+        "scale": 0.0,
+    },
+    {
+        "id": "cctv_miles",
+        "label": "CCTV miles inspected",
+        "unit": "mi",
+        "precision": 2,
+        "source": "itpipesProduction",
+        "source_label": "ITpipes inspections",
+        "from": CCTV_SURVEYED_FROM,
+        "date": "Inspection_Date",
+        "aggregate": "sum(feet)",
+        "filter": "",
+        "scale": 5280.0,
+    },
+]
+
+
+def activity_metric_spec(metric_id: str) -> dict[str, Any]:
+    for spec in ACTIVITY_METRIC_SPECS:
+        if spec["id"] == metric_id:
+            return spec
+    raise HTTPException(status_code=404, detail=f"Unknown activity metric: {metric_id}")
+
+
+def _windowed_aggregate(spec: dict[str, Any]) -> str:
+    """The aggregate restricted to one window, scaled if the metric needs it."""
+    expression = f"{spec['aggregate']} FILTER (WHERE {spec['date']} >= ? AND {spec['date']} < CAST(? AS DATE) + 1)"
+    scale = float(spec.get("scale") or 0)
+    return f"{expression} / {scale}" if scale else expression
+
+
+def activity_totals_sql(spec: dict[str, Any]) -> str:
+    where = f"\n    WHERE {spec['filter']}" if spec["filter"] else ""
+    return (
+        f"SELECT {_windowed_aggregate(spec)},\n"
+        f"           {_windowed_aggregate(spec)}\n"
+        f"    FROM {spec['from']}{where}"
+    )
+
+
+def activity_series_sql(spec: dict[str, Any]) -> str:
+    """Monthly totals for both windows in one pass.
+
+    Months are the finest bucket offered, so grouping there and folding the rows
+    into quarters or years afterwards keeps one query per metric no matter which
+    grouping the reader picks.
+    """
+    conditions = [f"{spec['date']} >= ? AND {spec['date']} < CAST(? AS DATE) + 1"]
+    if spec["filter"]:
+        conditions.insert(0, spec["filter"])
+    where = " AND ".join(f"({condition})" for condition in conditions)
+    return (
+        f"SELECT date_trunc('month', {spec['date']}) AS period,\n"
+        f"           {_windowed_aggregate(spec)},\n"
+        f"           {_windowed_aggregate(spec)}\n"
+        f"    FROM {spec['from']}\n"
+        f"    WHERE {where}\n"
+        f"    GROUP BY 1\n"
+        f"    ORDER BY 1"
+    )
+
+
+ACTIVITY_BUCKETS = ("month", "quarter", "year")
+# A chart stops being readable long before this; the guard is here so a wide
+# range with a fine grouping fails with an explanation rather than a wall of bars.
+ACTIVITY_MAX_POINTS = 240
+# The share of the busiest year a year must reach before it counts as the start
+# of the record. Cityworks holds a handful of single rows stamped 1902 through
+# 1989 - typos, not history - and starting a chart there would bury the decades
+# that carry the work.
+ACTIVITY_MATERIAL_YEAR_SHARE = 0.01
+# Nothing before this is trusted as history, whatever the source says. Cityworks
+# request volume becomes continuous in 1992; everything stamped earlier is a
+# handful of single rows back to 1902.
+ACTIVITY_EARLIEST_YEAR = 1992
+# The program's fiscal year opens in July and is named for the year it closes in,
+# so July 2025 through June 2026 is FY2026 and its first quarter is July-September.
+FISCAL_START_MONTH = 7
+MONTH_ABBREVIATIONS = (
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+)
+
+
+def _fiscal_year_of(value: date) -> int:
+    return value.year + 1 if value.month >= FISCAL_START_MONTH else value.year
+
+
+def activity_bucket_of(month_start: date, bucket: str, fiscal: bool) -> tuple[str, str]:
+    """The bucket a month belongs to, as (key, label)."""
+    if bucket == "month":
+        return (
+            f"{month_start.year}-{month_start.month:02d}",
+            f"{MONTH_ABBREVIATIONS[month_start.month - 1]} {month_start.year}",
+        )
+    if bucket == "quarter":
+        if fiscal:
+            fiscal_year = _fiscal_year_of(month_start)
+            index = ((month_start.month - FISCAL_START_MONTH) % 12) // 3 + 1
+            return f"FY{fiscal_year}-Q{index}", f"FY{fiscal_year} Q{index}"
+        index = (month_start.month - 1) // 3 + 1
+        return f"{month_start.year}-Q{index}", f"{month_start.year} Q{index}"
+    if fiscal:
+        fiscal_year = _fiscal_year_of(month_start)
+        return f"FY{fiscal_year}", f"FY{fiscal_year}"
+    return str(month_start.year), str(month_start.year)
+
+
+def activity_bucket_bounds(month_start: date, bucket: str, fiscal: bool) -> tuple[date, date]:
+    """The whole period a month belongs to, whether or not the range covers it."""
+    if bucket == "month":
+        return month_start, _month_end(month_start)
+    if bucket == "quarter":
+        # Fiscal quarters open in July, October, January and April - the same
+        # month boundaries as calendar quarters, only named differently.
+        first_month = ((month_start.month - 1) // 3) * 3 + 1
+        start = date(month_start.year, first_month, 1)
+        return start, _month_end(date(start.year, first_month + 2, 1))
+    if fiscal:
+        fiscal_year = _fiscal_year_of(month_start)
+        return date(fiscal_year - 1, FISCAL_START_MONTH, 1), date(fiscal_year, FISCAL_START_MONTH - 1, 30)
+    return date(month_start.year, 1, 1), date(month_start.year, 12, 31)
+
+
+def _month_end(month_start: date) -> date:
+    following = (
+        month_start.replace(year=month_start.year + 1, month=1)
+        if month_start.month == 12
+        else month_start.replace(month=month_start.month + 1)
+    )
+    return following - timedelta(days=1)
+
+
+def _months_between(first: date, last: date) -> list[date]:
+    months: list[date] = []
+    cursor = first.replace(day=1)
+    stop = last.replace(day=1)
+    while cursor <= stop:
+        months.append(cursor)
+        cursor = (
+            cursor.replace(year=cursor.year + 1, month=1)
+            if cursor.month == 12
+            else cursor.replace(month=cursor.month + 1)
+        )
+    return months
+
+
+def activity_earliest_sql(spec: dict[str, Any]) -> str:
+    """The first year carrying a real share of the busiest year's records."""
+    conditions = [f"{spec['date']} IS NOT NULL"]
+    if spec["filter"]:
+        conditions.insert(0, spec["filter"])
+    where = " AND ".join(f"({condition})" for condition in conditions)
+    return (
+        f"WITH by_year AS (\n"
+        f"        SELECT year({spec['date']}) AS calendar_year, count(*) AS records\n"
+        f"        FROM {spec['from']}\n"
+        f"        WHERE {where}\n"
+        f"        GROUP BY 1\n"
+        f"    )\n"
+        f"    SELECT min(calendar_year) FROM by_year\n"
+        f"    WHERE records >= (SELECT max(records) * {ACTIVITY_MATERIAL_YEAR_SHARE} FROM by_year)"
+    )
+
+
+def _activity_rows(spec: dict[str, Any], sql: str, params: list[str]) -> list[tuple[Any, ...]]:
+    label = str(spec["source_label"])
+    connection = open_configured_duckdb(_activity_source(str(spec["source"]), label), label)
+    try:
+        return connection.execute(sql, params).fetchall()
+    except Exception as error:  # noqa: BLE001 - a missing table is a 503, not a crash
+        raise HTTPException(
+            status_code=503, detail=f"{label} could not be summarized: {error}"
+        ) from error
+    finally:
+        connection.close()
+
+
+def query_activity_series(
+    metric_id: str,
+    start: date,
+    end: date,
+    prior_start: date,
+    prior_end: date,
+    bucket: str,
+    fiscal: bool,
+) -> dict[str, Any]:
+    """One point per period, each carrying the same period a year earlier.
+
+    The query totals whole months for both windows at once; the months are then
+    folded into the requested grouping here, which keeps a single query per
+    metric whichever grouping the reader picks. Periods with no activity stay in
+    the series as zero, because a missing column would misread as a gap in the
+    calendar rather than a month nobody worked.
+    """
+    spec = activity_metric_spec(metric_id)
+    if bucket not in ACTIVITY_BUCKETS:
+        raise HTTPException(status_code=400, detail="Group by month, quarter, or year.")
+    label = str(spec["source_label"])
+    connection = open_configured_duckdb(_activity_source(str(spec["source"]), label), label)
+    try:
+        rows = connection.execute(
+            activity_series_sql(spec),
+            [
+                start.isoformat(),
+                end.isoformat(),
+                prior_start.isoformat(),
+                prior_end.isoformat(),
+                prior_start.isoformat(),
+                end.isoformat(),
+            ],
+        ).fetchall()
+        earliest_year = connection.execute(activity_earliest_sql(spec)).fetchone()
+    except Exception as error:  # noqa: BLE001 - a missing table is a 503, not a crash
+        raise HTTPException(
+            status_code=503, detail=f"{label} could not be summarized: {error}"
+        ) from error
+    finally:
+        connection.close()
+    earliest = (
+        date(max(int(earliest_year[0]), ACTIVITY_EARLIEST_YEAR), 1, 1)
+        if earliest_year and earliest_year[0] is not None
+        else None
+    )
+
+    current_totals: dict[str, float] = {}
+    prior_totals: dict[str, float] = {}
+    for period, current_value, prior_value in rows:
+        month = period.date() if hasattr(period, "date") else period
+        if current_value:
+            key, _ = activity_bucket_of(month, bucket, fiscal)
+            current_totals[key] = current_totals.get(key, 0.0) + float(current_value)
+        if prior_value:
+            # A prior month belongs to the bucket it will be compared against.
+            shifted = _year_later(month)
+            key, _ = activity_bucket_of(shifted, bucket, fiscal)
+            prior_totals[key] = prior_totals.get(key, 0.0) + float(prior_value)
+
+    precision = int(spec["precision"])
+    points: list[dict[str, Any]] = []
+    if bucket == "month" and len(_months_between(start, end)) > ACTIVITY_MAX_POINTS:
+        raise HTTPException(
+            status_code=400,
+            detail="That grouping makes too many periods - group by quarter or year, or shorten the range.",
+        )
+    seen: set[str] = set()
+    for month in _months_between(start, end):
+        key, label = activity_bucket_of(month, bucket, fiscal)
+        if key in seen:
+            continue
+        seen.add(key)
+        current = current_totals.get(key, 0.0)
+        prior = prior_totals.get(key, 0.0)
+        period_start, period_end = activity_bucket_bounds(month, bucket, fiscal)
+        points.append(
+            {
+                "key": key,
+                "label": label,
+                "current": round(current, precision) if precision else int(current),
+                "prior": round(prior, precision) if precision else int(prior),
+                # A period the range only partly covers is not comparable with a
+                # whole one, and the chart says so rather than letting a short
+                # bar read as a decline.
+                "complete": period_start >= start and period_end <= end,
+            }
+        )
+    return {
+        "metric": {
+            "id": spec["id"],
+            "label": spec["label"],
+            "unit": spec["unit"],
+            "precision": precision,
+            "source_table": spec["source_label"],
+        },
+        "earliest": earliest.isoformat() if earliest else None,
+        "points": points,
+    }
+
+
+def _year_later(value: date) -> date:
+    try:
+        return value.replace(year=value.year + 1)
+    except ValueError:
+        return value.replace(year=value.year + 1, day=28)
+
+
+def query_activity_metrics(
+    start: date,
+    end: date,
+    prior_start: date,
+    prior_end: date,
+) -> list[dict[str, Any]]:
+    """Work completed in the range, each against the same period a year earlier."""
+    window = (start, end, prior_start, prior_end)
+    metrics: list[dict[str, Any]] = []
+    for spec in ACTIVITY_METRIC_SPECS:
+        current, prior = _period_counts(
+            str(spec["source"]), str(spec["source_label"]), activity_totals_sql(spec), window
+        )
+        precision = int(spec["precision"])
+        metrics.append(
+            {
+                "id": spec["id"],
+                "label": spec["label"],
+                "unit": spec["unit"],
+                "precision": precision,
+                "current": round(current, precision) if precision else int(current),
+                "prior": round(prior, precision) if precision else int(prior),
+                "source_table": spec["source_label"],
+            }
+        )
+    return metrics
 
 
 def query_inventory_feature_collection(

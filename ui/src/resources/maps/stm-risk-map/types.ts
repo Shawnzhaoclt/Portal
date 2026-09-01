@@ -162,6 +162,69 @@ export type InventoryMetric = {
   source_table: string;
 };
 
+export type ActivityMetric = {
+  id: string;
+  label: string;
+  unit: string;
+  precision: number;
+  current: number;
+  prior: number;
+  source_table: string;
+};
+
+export type ActivityMetricsResponse = {
+  ok: boolean;
+  generated_at: number;
+  start: string;
+  end: string;
+  prior_start: string;
+  prior_end: string;
+  metrics: ActivityMetric[];
+};
+
+export type ActivitySeriesPoint = {
+  key: string;
+  label: string;
+  current: number;
+  prior: number;
+  complete: boolean;
+};
+
+export type ActivitySeriesResponse = {
+  ok: boolean;
+  generated_at: number;
+  start: string;
+  end: string;
+  prior_start: string;
+  prior_end: string;
+  bucket: string;
+  fiscal: boolean;
+  metric: { id: string; label: string; unit: string; precision: number; source_table: string };
+  earliest: string | null;
+  points: ActivitySeriesPoint[];
+};
+
+export type InventoryBreakdownItem = {
+  label: string;
+  extent: number;
+  total: number;
+};
+
+export type InventoryBreakdownResponse = {
+  ok: boolean;
+  generated_at: number;
+  bbox: Bounds | null;
+  layer: { id: string; label: string; metric_type: string };
+  dimension: { key: string; label: string };
+  dimensions: { key: string; label: string }[];
+  measure: string;
+  unit: string;
+  precision: number;
+  items: InventoryBreakdownItem[];
+  missing: { extent: number; total: number };
+  folded: number;
+};
+
 export type InventoryMetricsResponse = {
   ok: boolean;
   generated_at: number;

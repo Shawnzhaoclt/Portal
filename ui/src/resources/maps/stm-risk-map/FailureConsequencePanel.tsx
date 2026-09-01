@@ -107,8 +107,39 @@ export default function FailureConsequencePanel({
 
   useEffect(() => {
     if (!open || !mapNodeRef.current || mapRef.current) return;
-    const map = new maplibregl.Map({
-      container: mapNodeRef.current,
+    let cancelled = false;
+    let pendingFrame = 0;
+    let map: MapLibreMap | null = null;
+    let resizeObserver: ResizeObserver | null = null;
+    let handleLoad: (() => void) | null = null;
+    let handleClick: ((event: maplibregl.MapMouseEvent) => void) | null = null;
+
+    // MapLibre measures its container once, at construction. The panel opens over
+    // the map and the 2D surface is hidden while 3D is showing, so that container
+    // can still be laying out here - a map built then keeps a zero-sized canvas
+    // and draws nothing until something resizes it, which is why switching to 3D
+    // and back used to be the only way to see it. Waiting for a real size costs a
+    // frame or two and removes the race entirely.
+    // Bounded, so a panel opened straight into 3D - where the 2D surface is
+    // display:none and can never report a size - still ends up with a map. Its
+    // ResizeObserver then sizes it the moment 2D comes back.
+    let attemptsLeft = 120;
+    const build = () => {
+      pendingFrame = 0;
+      const node = mapNodeRef.current;
+      if (cancelled || !node) return;
+      const { width, height } = node.getBoundingClientRect();
+      if ((width < 2 || height < 2) && attemptsLeft > 0) {
+        attemptsLeft -= 1;
+        pendingFrame = window.requestAnimationFrame(build);
+        return;
+      }
+      map = createMap(node);
+    };
+
+    const createMap = (node: HTMLDivElement) => {
+      const created = new maplibregl.Map({
+      container: node,
       style: minimalMap.style,
       center: EMPTY_MAP_CENTER,
       zoom: 11,
@@ -121,35 +152,44 @@ export default function FailureConsequencePanel({
         preserveDrawingBuffer: true,
       },
     });
-    mapRef.current = map;
-    map.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-right");
-    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "imperial" }), "bottom-left");
-    map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
-    const handleLoad = () => {
-      onMapReadyRef.current(map);
-      applyConsequenceMapMode(map, false, minimalMap.terrainSourceId, minimalMap.exaggeration, false);
+      mapRef.current = created;
+      created.addControl(new maplibregl.NavigationControl({ showCompass: true, visualizePitch: true }), "top-right");
+      created.addControl(new maplibregl.ScaleControl({ maxWidth: 120, unit: "imperial" }), "bottom-left");
+      created.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
+      handleLoad = () => {
+        created.resize();
+        onMapReadyRef.current(created);
+        applyConsequenceMapMode(created, false, minimalMap.terrainSourceId, minimalMap.exaggeration, false);
+      };
+      handleClick = (event: maplibregl.MapMouseEvent) => {
+        if (!simulatingRef.current) return;
+        onMapClickRef.current([event.lngLat.lng, event.lngLat.lat]);
+      };
+      created.on("load", handleLoad);
+      created.on("click", handleClick);
+      resizeObserver = typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(() => created.resize());
+      resizeObserver?.observe(node);
+      return created;
     };
-    const handleClick = (event: maplibregl.MapMouseEvent) => {
-      if (!simulatingRef.current) return;
-      onMapClickRef.current([event.lngLat.lng, event.lngLat.lat]);
-    };
-    map.on("load", handleLoad);
-    map.on("click", handleClick);
-    const resizeObserver = typeof ResizeObserver === "undefined"
-      ? null
-      : new ResizeObserver(() => map.resize());
-    resizeObserver?.observe(mapNodeRef.current);
+
+    build();
 
     return () => {
+      cancelled = true;
+      if (pendingFrame) window.cancelAnimationFrame(pendingFrame);
       resizeObserver?.disconnect();
-      map.off("load", handleLoad);
-      map.off("click", handleClick);
       if (flashAnimationFrameRef.current != null) {
         window.cancelAnimationFrame(flashAnimationFrameRef.current);
         flashAnimationFrameRef.current = null;
       }
-      onMapReadyRef.current(null);
-      map.remove();
+      if (map) {
+        if (handleLoad) map.off("load", handleLoad);
+        if (handleClick) map.off("click", handleClick);
+        onMapReadyRef.current(null);
+        map.remove();
+      }
       mapRef.current = null;
     };
   }, [minimalMap.exaggeration, minimalMap.style, minimalMap.terrainSourceId, open]);
@@ -227,7 +267,7 @@ export default function FailureConsequencePanel({
             ) : null}
             {!is3d && !minimalMap.terrainSourceId ? <div className="failure-consequence-map-notice"><AlertTriangle size={16} />Local DEM terrain is unavailable.</div> : null}
             {!is3d && simulating ? <div className="failure-consequence-map-instruction"><Crosshair size={17} />Click the selected asset to place the simulated defect.</div> : null}
-            {!is3d && !loading && !error && result && !hasAnalysis && !simulating ? (
+            {!loading && !error && result && !hasAnalysis && !simulating ? (
               <div className="failure-consequence-map-empty" role="status">
                 <span className="failure-consequence-map-empty-icon"><MapPinned size={22} /></span>
                 <div>
@@ -237,8 +277,8 @@ export default function FailureConsequencePanel({
                 <button type="button" onClick={() => changeSimulationMode(true)}><Crosshair size={16} />Place defect</button>
               </div>
             ) : null}
-            {!is3d && !loading && !error && hasAnalysis && !hasImpactedFeatures ? (
-              <div className="failure-consequence-map-zero" role="status">
+            {!loading && !error && hasAnalysis && !hasImpactedFeatures ? (
+              <div className={`failure-consequence-map-zero ${is3d ? "is-3d" : ""}`} role="status">
                 ZOI calculated. No configured consequence features are influenced by this scenario.
               </div>
             ) : null}

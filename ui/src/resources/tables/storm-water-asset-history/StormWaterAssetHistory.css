@@ -321,3 +321,41 @@
   .timeline-card { grid-template-columns: 78px minmax(0, 1fr) auto; }
   .timeline-open { display: none; }
 }
+
+/* Two ways into the same history: by asset, or by the record raised against it. */
+.asset-history-mode {
+  display: inline-flex;
+  overflow: hidden;
+  margin: 2px 0 4px;
+  border: 1px solid #c3d3e2;
+  border-radius: 6px;
+}
+
+.asset-history-mode button {
+  min-height: 30px;
+  padding: 0 14px;
+  color: #5c7085;
+  background: #f5f9fc;
+  border: 0;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.asset-history-mode button + button {
+  border-left: 1px solid #c3d3e2;
+}
+
+.asset-history-mode button.is-active {
+  color: #10486f;
+  background: #ffffff;
+  box-shadow: inset 0 -2px 0 #0d78bb;
+}
+
+.asset-history .work-lookup--embedded {
+  gap: 12px;
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+  text-align: left;
+}

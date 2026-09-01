@@ -62,8 +62,16 @@ export type AssetExtractFilter = {
 
 export type AssetExtractArea = Feature<Polygon | MultiPolygon>;
 
+export type AssetExtractSelectedAsset = {
+  asset_type: AssetExtractAssetType;
+  asset_id: string;
+};
+
+/** An extract is scoped either spatially, by `area`, or by an explicit asset list
+ * gathered from work-management records. `asset_ids` wins where both are present. */
 export type AssetExtractPayload = {
-  area: Polygon | MultiPolygon;
+  area?: Polygon | MultiPolygon;
+  asset_ids?: AssetExtractSelectedAsset[];
   asset_types: AssetExtractAssetType[];
   assignment_states: AssetExtractAssignmentState[];
   filters: Partial<Record<AssetExtractAssetType, AssetExtractFilter[]>>;

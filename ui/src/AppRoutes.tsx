@@ -15,6 +15,7 @@ import AifOverviewDashboard from './dashboards/planning/AifOverviewDashboard'
 import PlanningPendingAifQaTable from './dashboards/planning/PlanningPendingAifQaTable'
 import MapTilesDashboard from './resources/maps/stm-risk-map/MapTilesDashboard'
 import StormWaterAssetHistory from './resources/tables/storm-water-asset-history/StormWaterAssetHistory'
+import WorkManagementLookup from './resources/tables/work-management-lookup/WorkManagementLookup'
 import { clearManagementToken, fetchMe, fetchMyResources, storedManagementToken, storedManagementUser } from './management/api'
 import {
   ADMIN_MANAGEMENT_ROUTE,
@@ -33,6 +34,7 @@ import {
   STM_RISK_MAP_ROUTE,
   STORM_WATER_ASSET_HISTORY_ROUTE,
   WEEKLY_TIME_REPORTING_ROUTE,
+  WORK_MANAGEMENT_LOOKUP_ROUTE,
   criticalAssetSheetIdFromPath,
   criticalTeamSheetIdFromPath,
   criticalTeamSheetPath,
@@ -236,6 +238,11 @@ export default function AppRoutes() {
   if (path === STM_RISK_MAP_ROUTE) {
     setPageMeta('STM Risk Map')
     return <MapTilesDashboard />
+  }
+
+  if (path === WORK_MANAGEMENT_LOOKUP_ROUTE) {
+    setPageMeta('Work Management Lookup')
+    return <WorkManagementLookup />
   }
 
   if (path === STORM_WATER_ASSET_HISTORY_ROUTE) {

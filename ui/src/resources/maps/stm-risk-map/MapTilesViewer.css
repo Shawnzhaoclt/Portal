@@ -344,7 +344,13 @@ html .theme-light .maplibregl-ctrl-attrib,
 
 .failure-consequence-workspace { display: grid; min-height: 0; flex: 1; grid-template-columns: minmax(0, 1fr) minmax(380px, 430px); }
 .failure-consequence-map-shell { position: relative; min-width: 0; min-height: 0; overflow: hidden; background: #e5ecef; border-right: 1px solid #b8cad9; }
-.failure-consequence-map { position: absolute; inset: 0; }
+/* maplibre-gl brands its container with .maplibregl-map, whose own rule sets
+   position: relative at exactly this specificity - so which one wins depends on
+   the order the stylesheets land in the bundle, and when relative won the
+   container collapsed to zero height and the map drew nothing until something
+   resized it. Doubling the class settles the tie, and the explicit size keeps
+   the container filling its shell whichever rule applies. */
+.failure-consequence-map.failure-consequence-map { position: absolute; inset: 0; width: 100%; height: 100%; }
 .failure-consequence-map.hidden { opacity: 0; pointer-events: none; }
 .failure-cutaway-scene { position: absolute; inset: 0; overflow: hidden; background: #eaf1f5; }
 .failure-cutaway-canvas { position: absolute; inset: 0; }
@@ -398,6 +404,8 @@ html .theme-light .maplibregl-ctrl-attrib,
 .failure-consequence-map-empty button { display: inline-flex; width: max-content; min-height: 32px; align-items: center; justify-content: center; gap: 6px; grid-column: 2; padding: 0 11px; color: white; background: #0877b6; border: 1px solid #0877b6; border-radius: 6px; font-size: 11px; font-weight: 800; }
 .failure-consequence-map-empty button:hover { background: #075f91; }
 .failure-consequence-map-zero { position: absolute; z-index: 2; top: 14px; left: 50%; padding: 8px 12px; color: #5c4a12; background: rgba(255, 248, 218, .96); border: 1px solid #dfc66d; border-radius: 8px; box-shadow: 0 5px 20px rgba(8, 31, 50, .16); transform: translateX(-50%); font-size: 11px; font-weight: 750; white-space: nowrap; }
+/* Clear the cutaway toolbar, which owns the top-left of the 3D view. */
+.failure-consequence-map-zero.is-3d { top: 60px; }
 .failure-consequence-map-legend { position: absolute; z-index: 2; left: 50%; bottom: 12px; display: flex; align-items: center; gap: 12px; max-width: calc(100% - 150px); padding: 8px 11px; color: #263a4d; background: rgba(255, 255, 255, .94); border: 1px solid #bdcedc; border-radius: 8px; box-shadow: 0 6px 18px rgba(18, 43, 64, .16); transform: translateX(-50%); font-size: 10px; white-space: nowrap; }
 .failure-consequence-map-legend strong { padding-right: 9px; border-right: 1px solid #c8d6e2; font-size: 11px; }
 .failure-consequence-map-legend span { display: flex; align-items: center; gap: 6px; }
@@ -564,3 +572,19 @@ html .theme-light .maplibregl-ctrl-attrib,
 .theme-dark .failure-method-formula span,
 .theme-dark .failure-method-note p { color: #aec1d1; }
 .theme-dark .failure-method-formula strong { color: #69c4f1; }
+
+/* The record lookup runs as a map tool, like the consequence panel, so it needs
+   no catalogue entry of its own. */
+.record-lookup-body {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: 14px 16px 20px;
+  background: #eef3f8;
+}
+
+.record-lookup-body .work-lookup--embedded {
+  min-height: 0;
+  padding: 0;
+  background: transparent;
+}

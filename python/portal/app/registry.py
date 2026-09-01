@@ -26,6 +26,7 @@ from portal.app.resources.reports.proactive_team_cctv_review.router import route
 from portal.app.resources.forms.create_aif_from_itpipes.router import router as create_aif_router
 from portal.app.resources.forms.design_project_closeout.router import router as design_project_closeout_router
 from portal.app.resources.tables.storm_water_asset_history import router as asset_history_router
+from portal.app.resources.tables.work_management_lookup import router as work_management_lookup_router
 from portal.app.holidays import router as holiday_router
 from portal.app.favorites import router as favorites_router
 from portal.app.weekly_time import router as weekly_time_router
@@ -54,6 +55,7 @@ app.include_router(cctv_review_report_router)
 app.include_router(create_aif_router)
 app.include_router(design_project_closeout_router)
 app.include_router(asset_history_router)
+app.include_router(work_management_lookup_router)
 app.include_router(holiday_router)
 app.include_router(favorites_router)
 app.include_router(weekly_time_router)

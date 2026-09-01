@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ChevronLeft, ChevronRight, Database, Download, Filter, LoaderCircle, MapPinned, Plus, RotateCcw, Search, Trash2, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, ClipboardList, Database, Download, Filter, LoaderCircle, MapPinned, Plus, RotateCcw, Search, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { openFileLocation } from "../../../desktop/runtime";
 
@@ -19,14 +19,26 @@ import {
   type AssetExtractPayload,
   type AssetExtractPreview,
   type AssetExtractRelatedKey,
+  type AssetExtractSelectedAsset,
   type AssetExtractTypeCatalog,
 } from "./assetExtract";
+// The lookup already answers to this map's View permission, so the same search
+// and record reader serve here rather than a second copy behind a new endpoint.
+import {
+  fetchRecord,
+  portalAssetType,
+  searchRecords,
+  type RecordKind,
+  type RecordSummary,
+} from "../../tables/work-management-lookup/api";
 
 type AreaOption = { id: string; label: string; area: AssetExtractArea };
 type Step = "area" | "filters" | "data" | "review";
+type SelectionMode = "draw" | "existing" | "records";
+type SelectedRecord = { kind: RecordKind; id: string; label: string; assets: AssetExtractSelectedAsset[] };
 
 const STEPS: Array<{ id: Step; label: string }> = [
-  { id: "area", label: "Area" },
+  { id: "area", label: "Selection" },
   { id: "filters", label: "Assets & filters" },
   { id: "data", label: "Data" },
   { id: "review", label: "Review" },
@@ -70,7 +82,13 @@ export default function AssetDataExtractPanel({
   const [related, setRelated] = useState<Record<AssetExtractRelatedKey, boolean>>(() => Object.fromEntries(RELATED_KEYS.map((key) => [key, true])) as Record<AssetExtractRelatedKey, boolean>);
   const [relatedMode, setRelatedMode] = useState<"all" | "most_recent">("all");
   const [fieldSearch, setFieldSearch] = useState("");
-  const [areaMode, setAreaMode] = useState<"draw" | "existing">("draw");
+  const [areaMode, setAreaMode] = useState<SelectionMode>("draw");
+  const [recordSearch, setRecordSearch] = useState("");
+  const [recordCandidates, setRecordCandidates] = useState<RecordSummary[]>([]);
+  const [recordSearching, setRecordSearching] = useState(false);
+  const [recordLoading, setRecordLoading] = useState(false);
+  const [recordError, setRecordError] = useState("");
+  const [selectedRecords, setSelectedRecords] = useState<SelectedRecord[]>([]);
   const [boundarySourceId, setBoundarySourceId] = useState("");
   const [boundarySearch, setBoundarySearch] = useState("");
   const [boundaryCandidates, setBoundaryCandidates] = useState<AssetExtractBoundaryCandidate[]>([]);
@@ -84,17 +102,37 @@ export default function AssetDataExtractPanel({
 
   const selectedArea = areas.find((area) => area.id === selectedAreaId) || null;
   const activeStepIndex = STEPS.findIndex((item) => item.id === step);
-  const payload = useMemo<AssetExtractPayload | null>(() => selectedArea ? {
-    area: selectedArea.area.geometry,
-    asset_types: selectedTypes,
-    assignment_states: assignmentStates,
-    filters,
-    fields,
-    include_related: related,
-    related_mode: relatedMode,
-  } : null, [assignmentStates, fields, filters, related, relatedMode, selectedArea, selectedTypes]);
+  // One asset can be named by several records; the extract wants it once.
+  const selectedAssets = useMemo(() => {
+    const seen = new Set<string>();
+    const unique: AssetExtractSelectedAsset[] = [];
+    for (const record of selectedRecords) {
+      for (const asset of record.assets) {
+        const key = `${asset.asset_type}:${asset.asset_id}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        unique.push(asset);
+      }
+    }
+    return unique;
+  }, [selectedRecords]);
+  const payload = useMemo<AssetExtractPayload | null>(() => {
+    const base = {
+      asset_types: selectedTypes,
+      assignment_states: assignmentStates,
+      filters,
+      fields,
+      include_related: related,
+      related_mode: relatedMode,
+    };
+    if (areaMode === "records") {
+      return selectedAssets.length ? { ...base, asset_ids: selectedAssets } : null;
+    }
+    return selectedArea ? { ...base, area: selectedArea.area.geometry } : null;
+  }, [areaMode, assignmentStates, fields, filters, related, relatedMode, selectedArea, selectedAssets, selectedTypes]);
   const signature = useMemo(() => payload ? JSON.stringify({
     area: payload.area,
+    asset_ids: payload.asset_ids,
     asset_types: payload.asset_types,
     assignment_states: payload.assignment_states,
     filters: payload.filters,
@@ -127,6 +165,25 @@ export default function AssetDataExtractPanel({
   }, [areaMode, boundarySearch, boundarySourceId, open]);
 
   useEffect(() => {
+    if (!open || areaMode !== "records") return;
+    const wanted = recordSearch.trim();
+    if (wanted.length < 2) {
+      setRecordCandidates([]);
+      setRecordSearching(false);
+      return;
+    }
+    let active = true;
+    setRecordSearching(true);
+    const timer = window.setTimeout(() => {
+      searchRecords(wanted)
+        .then((value) => { if (active) setRecordCandidates(value.matches || []); })
+        .catch((reason: Error) => { if (active) { setRecordCandidates([]); setRecordError(reason.message); } })
+        .finally(() => { if (active) setRecordSearching(false); });
+    }, 250);
+    return () => { active = false; window.clearTimeout(timer); };
+  }, [areaMode, open, recordSearch]);
+
+  useEffect(() => {
     setPreview(null);
     onPreview(null);
   }, [onPreview, signature]);
@@ -153,6 +210,32 @@ export default function AssetDataExtractPanel({
   const toggleBoundary = (id: string) => {
     setSelectedBoundaryIds((current) => current.includes(id) ? current.filter((value) => value !== id) : [...current, id]);
   };
+  const addRecord = async (candidate: RecordSummary) => {
+    setRecordSearch("");
+    setRecordCandidates([]);
+    if (selectedRecords.some((item) => item.kind === candidate.kind && item.id === candidate.id)) return;
+    setRecordLoading(true);
+    setRecordError("");
+    try {
+      const detail = await fetchRecord(candidate.kind, candidate.id);
+      const assets: AssetExtractSelectedAsset[] = [];
+      for (const asset of detail.assets) {
+        const assetType = portalAssetType(asset.asset_type);
+        if (assetType) assets.push({ asset_type: assetType, asset_id: asset.asset_id });
+      }
+      const label = `${candidate.kind_label} ${candidate.id}`;
+      setSelectedRecords((current) => [...current, { kind: candidate.kind, id: candidate.id, label, assets }]);
+      if (!assets.length) setRecordError(`${label} names no pipes, structures, or channels.`);
+    } catch (reason) {
+      setRecordError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setRecordLoading(false);
+    }
+  };
+  const removeRecord = (record: SelectedRecord) => {
+    setRecordError("");
+    setSelectedRecords((current) => current.filter((item) => !(item.kind === record.kind && item.id === record.id)));
+  };
   const useSelectedBoundaries = async () => {
     if (!boundarySourceId || !selectedBoundaryIds.length) return;
     setBoundaryLoading(true);
@@ -169,7 +252,9 @@ export default function AssetDataExtractPanel({
   };
   const runPreview = async () => {
     if (!payload) {
-      setError("Select or create an export area first.");
+      setError(areaMode === "records"
+        ? "Add a work-management record that names at least one pipe, structure, or channel."
+        : "Select or create an export area first.");
       setStep("area");
       return;
     }
@@ -215,6 +300,15 @@ export default function AssetDataExtractPanel({
     }
   };
 
+  const selectionReady = areaMode === "records" ? selectedAssets.length > 0 : Boolean(selectedArea);
+  const selectionSummary = areaMode === "records"
+    ? selectedAssets.length
+      ? `${selectedAssets.length.toLocaleString()} asset${selectedAssets.length === 1 ? "" : "s"} from ${selectedRecords.length} record${selectedRecords.length === 1 ? "" : "s"}.`
+      : "Search for a record to select the assets it names."
+    : selectedArea
+      ? `${selectedArea.label} is ready.`
+      : "Draw an area or select an existing boundary.";
+
   return (
     <aside className="asset-extract-panel absolute bottom-3 right-3 top-3 z-50 grid w-[640px] max-w-[calc(100vw-76px)] grid-rows-[56px_50px_minmax(0,1fr)_64px] overflow-hidden rounded-md border border-[var(--panel-border)] bg-[var(--panel-bg)] text-[var(--panel-text)] shadow-[0_20px_60px_rgba(0,0,0,.34)]" aria-label="Asset data extract">
       <header className="flex items-center justify-between border-b border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] px-4">
@@ -231,21 +325,50 @@ export default function AssetDataExtractPanel({
         {!catalog && !catalogError ? <EmptyState icon={<LoaderCircle className="h-5 w-5 animate-spin" />} text="Loading active inventory schema..." /> : null}
         {catalogError ? <ErrorBox text={catalogError} /> : null}
         {catalog && step === "area" ? <section className="grid gap-4">
-          <SectionTitle title="Choose an export area" subtitle="Draw an area or select one or more authoritative boundaries." />
-          <div className="grid grid-cols-2 gap-2"><ChoiceButton active={areaMode === "draw"} label="Draw area" onClick={() => setAreaMode("draw")} /><ChoiceButton active={areaMode === "existing"} label="Select existing area" onClick={() => setAreaMode("existing")} /></div>
-          {areaMode === "draw" ? <>
-            <label className="grid gap-1.5 text-[10px] font-semibold uppercase tracking-[.06em] text-[var(--panel-muted)]">Selected drawing
-              <select className="h-10 border border-[var(--panel-border)] bg-[var(--input-bg)] px-3 text-[12px] font-semibold text-[var(--panel-text)] outline-none focus:border-[var(--accent)]" value={selectedAreaId || ""} onChange={(event) => onSelectArea(event.target.value)}>
-                <option value="">Select a drawing</option>{areas.map((area) => <option key={area.id} value={area.id}>{area.label}</option>)}
-              </select>
+          <SectionTitle title="Choose what to export" subtitle="Scope the extract by an area on the map, or by the assets named on work-management records." />
+          <div className="grid grid-cols-3 gap-2"><ChoiceButton active={areaMode === "draw"} label="Draw area" onClick={() => setAreaMode("draw")} /><ChoiceButton active={areaMode === "existing"} label="Existing boundary" onClick={() => setAreaMode("existing")} /><ChoiceButton active={areaMode === "records"} label="By record number" onClick={() => setAreaMode("records")} /></div>
+          {areaMode === "records" ? <div className="grid gap-3 border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] p-3">
+            <label className="relative block">
+              <Search className="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-[var(--panel-muted)]" />
+              <input className="asset-extract-boundary-search-input h-10 w-full border border-[var(--panel-border)] bg-[var(--input-bg)] pl-10 pr-9 text-[11px] text-[var(--panel-text)]" value={recordSearch} onChange={(event) => setRecordSearch(event.target.value)} placeholder="Service request, work order, inspection or investigation ID" />
+              {recordSearching || recordLoading ? <LoaderCircle className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[var(--accent)]" /> : null}
             </label>
+            {recordCandidates.length ? <div className="max-h-52 overflow-y-auto border border-[var(--panel-border)] bg-[var(--panel-bg)]">
+              {recordCandidates.map((candidate) => <button key={`${candidate.kind}-${candidate.id}`} className="flex min-h-11 w-full items-center gap-2 border-b border-[var(--panel-border)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--row-hover)]" type="button" onClick={() => void addRecord(candidate)}>
+                <span className="w-[104px] shrink-0 text-[9px] font-semibold uppercase tracking-[.06em] text-[var(--accent)]">{candidate.kind_label}</span>
+                <strong className="shrink-0 text-[11px]">{candidate.id}</strong>
+                <span className="min-w-0 flex-1 truncate text-[10px] text-[var(--panel-muted)]">{candidate.title || candidate.subtitle || "No description"}</span>
+              </button>)}
+            </div> : recordSearch.trim().length >= 2 && !recordSearching ? <p className="px-1 text-[10px] text-[var(--panel-muted)]">No record matches that number.</p> : null}
+            {selectedRecords.length ? <div className="grid gap-1.5">
+              {selectedRecords.map((record) => <div key={`${record.kind}-${record.id}`} className="flex items-center gap-2 border border-[var(--panel-border)] bg-[var(--panel-bg)] px-3 py-2">
+                <ClipboardList className="h-3.5 w-3.5 shrink-0 text-[var(--accent)]" />
+                <strong className="text-[11px]">{record.label}</strong>
+                <span className="text-[10px] text-[var(--panel-muted)]">{record.assets.length} asset{record.assets.length === 1 ? "" : "s"}</span>
+                <button className="ml-auto grid h-7 w-7 place-items-center text-red-600 hover:bg-[var(--row-hover)]" type="button" onClick={() => removeRecord(record)} aria-label={`Remove ${record.label}`}><Trash2 className="h-3.5 w-3.5" /></button>
+              </div>)}
+            </div> : null}
+            {selectedAssets.length ? <div className="max-h-44 overflow-y-auto border border-[var(--panel-border)] bg-[var(--panel-bg)]">
+              {selectedAssets.map((asset) => <div key={`${asset.asset_type}:${asset.asset_id}`} className="flex items-center gap-3 border-b border-[var(--panel-border)] px-3 py-1.5 last:border-b-0">
+                <span className="w-[72px] shrink-0 text-[9px] font-semibold uppercase tracking-[.06em] text-[var(--panel-muted)]">{asset.asset_type}</span>
+                <strong className="text-[11px]">{asset.asset_id}</strong>
+              </div>)}
+            </div> : null}
+            {recordError ? <ErrorBox text={recordError} warning /> : null}
+          </div> : areaMode === "draw" ? <div className="grid gap-3 border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] p-3">
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
               <ActionButton label="Polygon" onClick={() => onActivateDraw("polygon")} />
               <ActionButton label="Rectangle" onClick={() => onActivateDraw("rectangle")} />
               <ActionButton label="Circle" onClick={() => onActivateDraw("circle")} />
               <ActionButton label="Map extent" onClick={onUseCurrentExtent} />
             </div>
-          </> : <div className="grid gap-3 border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] p-3">
+            <div className="max-h-52 overflow-y-auto border border-[var(--panel-border)] bg-[var(--panel-bg)]">
+              {!areas.length ? <div className="grid h-24 place-items-center px-4 text-center text-[11px] text-[var(--panel-muted)]">No drawings yet. Use a tool above to mark the export area.</div> : areas.map((area) => { const active = area.id === selectedAreaId; return <button key={area.id} className={`flex min-h-11 w-full items-center gap-3 border-b border-[var(--panel-border)] px-3 py-2 text-left last:border-b-0 ${active ? "bg-[var(--panel-active-bg)]" : "hover:bg-[var(--row-hover)]"}`} type="button" onClick={() => onSelectArea(area.id)}>
+                <span className={`grid h-4 w-4 shrink-0 place-items-center border ${active ? "border-[var(--accent)] bg-[var(--accent)] text-white" : "border-[var(--panel-border)]"}`}>{active ? <Check className="h-3 w-3" /> : null}</span>
+                <span className="min-w-0 flex-1 truncate text-[11px] font-semibold">{area.label}</span>
+              </button>; })}
+            </div>
+          </div> : <div className="grid gap-3 border border-[var(--panel-border)] bg-[var(--panel-toolbar-bg)] p-3">
             <div className="grid grid-cols-2 gap-2">{catalog.boundary_sources.map((source) => <ChoiceButton key={source.id} active={boundarySourceId === source.id} label={source.label} onClick={() => { setBoundarySourceId(source.id); setBoundarySearch(""); setBoundaryCandidates([]); setSelectedBoundaryIds([]); }} />)}</div>
             <label className="relative block"><Search className="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-[var(--panel-muted)]" /><input className="asset-extract-boundary-search-input h-10 w-full border border-[var(--panel-border)] bg-[var(--input-bg)] pl-10 pr-3 text-[11px] text-[var(--panel-text)]" value={boundarySearch} onChange={(event) => setBoundarySearch(event.target.value)} placeholder={boundarySourceId === "culvert" ? "Facility ID, location, or grid" : "Work zone name"} /></label>
             <div className="max-h-52 overflow-y-auto border border-[var(--panel-border)] bg-[var(--panel-bg)]">
@@ -256,7 +379,7 @@ export default function AssetDataExtractPanel({
             <div className="flex items-center justify-between gap-3"><span className="text-[10px] font-semibold text-[var(--panel-muted)]">{selectedBoundaryIds.length} selected</span><button className="inline-flex h-9 items-center gap-2 bg-[var(--accent)] px-4 text-[11px] font-semibold text-white disabled:opacity-45" type="button" disabled={!selectedBoundaryIds.length || boundaryLoading} onClick={useSelectedBoundaries}>{boundaryLoading ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <MapPinned className="h-4 w-4" />}Use selection</button></div>
             {boundaryError ? <ErrorBox text={boundaryError} /> : null}
           </div>}
-          <div className={`flex items-center gap-2 border px-3 py-2 text-[11px] font-semibold ${selectedArea ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}><MapPinned className="h-4 w-4" />{selectedArea ? `${selectedArea.label} is ready.` : "Draw an area or select an existing boundary."}</div>
+          <div className={`flex items-center gap-2 border px-3 py-2 text-[11px] font-semibold ${selectionReady ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>{areaMode === "records" ? <ClipboardList className="h-4 w-4 shrink-0" /> : <MapPinned className="h-4 w-4 shrink-0" />}{selectionSummary}</div>
         </section> : null}
         {catalog && step === "filters" ? <section className="grid gap-5">
           <SectionTitle title="Assets and filters" subtitle="Rules within each asset type are combined with AND." />

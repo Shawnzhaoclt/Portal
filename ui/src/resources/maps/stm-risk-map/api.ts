@@ -8,6 +8,9 @@ import type {
   DuckDbGeoJsonBatchResponse,
   DuckDbGeoJsonFeatureCollection,
   FeatureDetailsResponse,
+  ActivityMetricsResponse,
+  ActivitySeriesResponse,
+  InventoryBreakdownResponse,
   InventoryMetricsResponse,
   Manifest,
   MapStyle,
@@ -16,7 +19,8 @@ import type {
   RiskSortType,
   RiskTopListResponse,
 } from "./types";
-import { portalDataOrigin, portalRequestJson } from "../../../desktop/request";
+import { portalDataOrigin, portalRequestBinary, portalRequestJson } from "../../../desktop/request";
+import { saveExportAs } from "../../../desktop/runtime";
 import { clientSetting } from "../../../desktop/settings";
 
 export async function fetchManifest(): Promise<Manifest> {
@@ -51,6 +55,102 @@ export async function fetchInventoryMetrics(bbox?: Bounds, filters?: AttributeFi
   }
   appendAttributeFilters(url, filters);
   return fetchJson<InventoryMetricsResponse>(url.href);
+}
+
+export async function fetchActivityMetrics(start: string, end: string): Promise<ActivityMetricsResponse> {
+  const url = new URL(apiPath("/api/metrics/activity"), window.location.origin);
+  url.searchParams.set("start", start);
+  url.searchParams.set("end", end);
+  return fetchJson<ActivityMetricsResponse>(url.href);
+}
+
+export async function fetchActivitySeries(
+  metric: string,
+  start: string,
+  end: string,
+  bucket: string,
+  fiscal: boolean,
+): Promise<ActivitySeriesResponse> {
+  const url = new URL(apiPath("/api/metrics/activity/series"), window.location.origin);
+  url.searchParams.set("metric", metric);
+  url.searchParams.set("start", start);
+  url.searchParams.set("end", end);
+  url.searchParams.set("bucket", bucket);
+  url.searchParams.set("fiscal", String(fiscal));
+  return fetchJson<ActivitySeriesResponse>(url.href);
+}
+
+export async function fetchInventoryBreakdown(
+  layer: string,
+  dimension: string,
+  measure: string,
+  bbox?: Bounds,
+  filters?: AttributeFilterPayload,
+): Promise<InventoryBreakdownResponse> {
+  const url = new URL(apiPath("/api/inventory/breakdown"), window.location.origin);
+  url.searchParams.set("layer", layer);
+  if (dimension) url.searchParams.set("dimension", dimension);
+  url.searchParams.set("measure", measure);
+  if (bbox) {
+    const [west, south, east, north] = bbox;
+    url.searchParams.set("west", String(west));
+    url.searchParams.set("south", String(south));
+    url.searchParams.set("east", String(east));
+    url.searchParams.set("north", String(north));
+  }
+  appendAttributeFilters(url, filters);
+  return fetchJson<InventoryBreakdownResponse>(url.href);
+}
+
+/** Download the rows behind a chart, using the same workbook styling as the
+ * other Portal exports. */
+async function downloadWorkbook(path: string, fileName: string) {
+  const response = await portalRequestBinary(path);
+  return saveExportAs(fileName, new Uint8Array(response.bytes), "excel", true);
+}
+
+export async function exportActivitySeries(
+  metric: string,
+  start: string,
+  end: string,
+  bucket: string,
+  fiscal: boolean,
+) {
+  const url = new URL(apiPath("/api/metrics/activity/series/export"), window.location.origin);
+  url.searchParams.set("metric", metric);
+  url.searchParams.set("start", start);
+  url.searchParams.set("end", end);
+  url.searchParams.set("bucket", bucket);
+  url.searchParams.set("fiscal", String(fiscal));
+  return downloadWorkbook(
+    `${url.pathname}${url.search}`,
+    `Activity-${metric}-${start}-to-${end}.xlsx`,
+  );
+}
+
+export async function exportInventoryBreakdown(
+  layer: string,
+  dimension: string,
+  measure: string,
+  bbox?: Bounds,
+  filters?: AttributeFilterPayload,
+) {
+  const url = new URL(apiPath("/api/inventory/breakdown/export"), window.location.origin);
+  url.searchParams.set("layer", layer);
+  if (dimension) url.searchParams.set("dimension", dimension);
+  url.searchParams.set("measure", measure);
+  if (bbox) {
+    const [west, south, east, north] = bbox;
+    url.searchParams.set("west", String(west));
+    url.searchParams.set("south", String(south));
+    url.searchParams.set("east", String(east));
+    url.searchParams.set("north", String(north));
+  }
+  appendAttributeFilters(url, filters);
+  return downloadWorkbook(
+    `${url.pathname}${url.search}`,
+    `Inventory-${layer}-by-${dimension || "default"}.xlsx`,
+  );
 }
 
 export async function fetchDuckDbGeoJson(

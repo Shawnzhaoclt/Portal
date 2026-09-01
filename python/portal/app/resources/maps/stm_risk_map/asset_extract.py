@@ -420,6 +420,32 @@ def _selection_area(payload: dict[str, Any]) -> tuple[dict[str, Any], str]:
     return mapping(geometry), state_plane.wkt
 
 
+def _normalized_asset_id(value: Any) -> str:
+    return re.sub(r"\.0+$", "", str(value or "").strip())
+
+
+def _selected_asset_ids(payload: dict[str, Any]) -> dict[str, list[str]] | None:
+    """An explicit asset list, for a selection made from work-management records
+    rather than from the map. Absent means the caller drew or picked an area."""
+    raw = payload.get("asset_ids")
+    if not isinstance(raw, list) or not raw:
+        return None
+    grouped: dict[str, list[str]] = {asset_type: [] for asset_type in ASSET_TYPES}
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        asset_type = str(item.get("asset_type") or "").casefold()
+        asset_id = _normalized_asset_id(item.get("asset_id"))
+        if asset_type in grouped and asset_id and asset_id not in grouped[asset_type]:
+            grouped[asset_type].append(asset_id)
+    total = sum(len(ids) for ids in grouped.values())
+    if not total:
+        raise HTTPException(status_code=422, detail="The selected records name no pipes, structures, or channels.")
+    if total > EXPORT_LIMIT:
+        raise HTTPException(status_code=422, detail=f"The selection exceeds the {EXPORT_LIMIT:,}-asset export limit.")
+    return grouped
+
+
 def _validated_asset_types(payload: dict[str, Any]) -> list[str]:
     values = payload.get("asset_types")
     if not isinstance(values, list):
@@ -575,6 +601,7 @@ def _query_attribute_rows(
     definition: dict[str, Any],
     area_wkt: str,
     fields: list[str],
+    asset_ids: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     rules = _raw_filter_rules(payload, str(definition["asset_type"]))
     inventory_rules = [rule for rule in rules if str(rule.get("field") or "").casefold() not in RISK_FILTER_FIELDS]
@@ -582,10 +609,22 @@ def _query_attribute_rows(
     id_field = str(definition["id_field"])
     geometry_field = str(definition["geometry_field"])
     selected = ", ".join(_quote(field) for field in fields)
-    where = [f"{_quote(geometry_field)} IS NOT NULL", f"ST_Intersects({_quote(geometry_field)}, ST_GeomFromText(?))", *filter_parts]
+    where = [f"{_quote(geometry_field)} IS NOT NULL"]
+    if asset_ids is None:
+        where.append(f"ST_Intersects({_quote(geometry_field)}, ST_GeomFromText(?))")
+        scope_values: list[Any] = [area_wkt]
+    else:
+        if not asset_ids:
+            return []
+        # Ids reach us from Cityworks, where a numeric key can arrive as "1590.0";
+        # the inventory holds them either way, so both sides are normalised.
+        placeholders = ", ".join(["?"] * len(asset_ids))
+        where.append(f"regexp_replace(CAST({_quote(id_field)} AS VARCHAR), '\\.0+$', '') IN ({placeholders})")
+        scope_values = list(asset_ids)
+    where.extend(filter_parts)
     rows = connection.execute(
         f"SELECT {selected} FROM {_quote(str(definition['table']))} WHERE {' AND '.join(where)}",
-        [area_wkt, *filter_values],
+        [*scope_values, *filter_values],
     ).fetchall()
     output: list[dict[str, Any]] = []
     for row in rows:
@@ -672,7 +711,11 @@ def _preview_sample(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def select_assets(payload: dict[str, Any], *, preview: bool) -> dict[str, Any]:
-    area_geojson, area_wkt = _selection_area(payload)
+    asset_ids = _selected_asset_ids(payload)
+    area_geojson: dict[str, Any] | None = None
+    area_wkt = ""
+    if asset_ids is None:
+        area_geojson, area_wkt = _selection_area(payload)
     selected_types = _validated_asset_types(payload)
     assignment_filter = _selected_assignment_states(payload)
     config, path = _inventory_contract()
@@ -683,11 +726,29 @@ def select_assets(payload: dict[str, Any], *, preview: bool) -> dict[str, Any]:
         for asset_type in selected_types:
             definition = definitions[asset_type]
             fields = _requested_fields(payload, asset_type, definition, preview=preview)
-            rows = _query_attribute_rows(connection, payload, definition, area_wkt, fields)
+            rows = _query_attribute_rows(
+                connection, payload, definition, area_wkt, fields,
+                None if asset_ids is None else asset_ids[asset_type],
+            )
             rows_by_type[asset_type] = rows
             all_rows.extend(rows)
 
         warnings: list[str] = []
+        if asset_ids is not None:
+            # A record can name an asset the active inventory no longer carries.
+            # Saying so beats a silently shorter export.
+            found = {(row["asset_type"], row["asset_id"]) for row in all_rows}
+            missing = sum(
+                1
+                for asset_type in selected_types
+                for asset_id in asset_ids[asset_type]
+                if (asset_type, asset_id) not in found
+            )
+            if missing:
+                warnings.append(
+                    f"{missing} selected asset{'' if missing == 1 else 's'} "
+                    f"{'is' if missing == 1 else 'are'} not in the active inventory and cannot be exported."
+                )
         risk_rules = {asset_type: _compiled_risk_rules(payload, asset_type) for asset_type in selected_types}
         if any(risk_rules.values()):
             risk_scores, risk_warnings = related_risk_scores_for_assets(

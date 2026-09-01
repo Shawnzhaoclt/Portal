@@ -513,11 +513,10 @@ export default function StormWaterAssetHistory() {
             <details className={`assignment assignment-${assignment}`}>
               <summary>{assignmentIcon(assignment)} {STATE_LABELS[assignment]}</summary>
               <div className="assignment-popover">
-                <h3>Step 401 assignment</h3>
+                <h3>Assignment</h3>
                 {Object.entries(summary.assignment.branches).map(([name, branch]) => (
                   <div className="branch-row" key={name}><span>{name === 'cityworks' ? 'Cityworks-only' : 'ITPipes-only'}</span><strong>{branch.state.replaceAll('_', ' ')}</strong></div>
                 ))}
-                <p>Portal displays the published Step 401 result; it does not recalculate assignment.</p>
                 <small>{summary.assignment.version || 'Active version'}{sourceTime ? ` · ${formatEasternDateTime(sourceTime)}` : ''}</small>
               </div>
             </details>
