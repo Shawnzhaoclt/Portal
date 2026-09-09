@@ -8,8 +8,10 @@ import type { FailureConsequenceResult, FailureCutawayTerrain, ImpactedFeature }
 type Props = {
   result: FailureConsequenceResult | null;
   basemapTextureUrl: string | null;
-  flashedFeatureId: string | null;
-  flashToken: number;
+  /** Stays set until the inspector row is clicked again, so the highlight persists. */
+  selectedFeatureId: string | null;
+  /** Bumped on every click to replay the locate pulse on an already selected feature. */
+  locateToken: number;
 };
 
 type ProjectedPoint = { x: number; z: number };
@@ -27,33 +29,103 @@ type PipeSizing = {
   radiusFeet: number;
   schematic: boolean;
 };
+type BuildingGeometry = {
+  roof: THREE.BufferGeometry;
+  walls: THREE.BufferGeometry;
+};
 type SurfaceMode = "landscape" | "technical" | "xray";
+/** Highlightable scene object: filled context and influenced parts are meshes, a
+ *  parcel contributes its boundary line instead. */
+type ContextObject = THREE.Mesh | THREE.Line;
 type SceneTooltip = { x: number; y: number; title: string; detail: string };
 
 const FEET_PER_DEGREE_LATITUDE = 364_000;
 const CUTAWAY_CUBE_COLOR = 0x8a7968;
 const CUTAWAY_EDGE_COLOR = 0x4f453c;
-const FEATURE_FLASH_DURATION_MS = 2_600;
+const FEATURE_LOCATE_DURATION_MS = 2_600;
+/** Where the influenced overlay rests once the locate pulse has run its course. */
+const SELECTED_STEADY_PULSE = 0.35;
+/** How far the unselected features fade while one feature is selected. */
+const FOCUS_DIM_FACTOR = 0.28;
+/**
+ * Selection is a state, not a shade of the category: the selected feature takes the
+ * highlight colour outright rather than being tinted towards it, and everything else
+ * loses its colour, so colour itself becomes the signal in a scene full of greens.
+ */
+const SELECTION_HIGHLIGHT_COLOR = 0xffb000;
+const SELECTION_EDGE_COLOR = 0xffd300;
+const SELECTION_EDGE_NAME = "failure-consequence-selection-edges";
+const DIMMED_NEUTRAL_COLOR = 0x9aa0a3;
+
+/**
+ * Bright edges around the selected feature. Faces read poorly under this scene's flat
+ * lighting, but edges read at any distance and any camera angle, and drawing them
+ * without depth testing keeps the selection visible behind a nearer building.
+ * Attached as a child of the mesh so it inherits the transform with no scene access.
+ */
+function addSelectionEdges(object: ContextObject): void {
+  if (!(object instanceof THREE.Mesh) || object.getObjectByName(SELECTION_EDGE_NAME)) return;
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(object.geometry, 18),
+    new THREE.LineBasicMaterial({
+      color: SELECTION_EDGE_COLOR,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: false,
+      depthWrite: false,
+    }),
+  );
+  edges.name = SELECTION_EDGE_NAME;
+  edges.renderOrder = 16;
+  object.add(edges);
+}
+
+function removeSelectionEdges(object: ContextObject): void {
+  const edges = object.getObjectByName(SELECTION_EDGE_NAME);
+  if (!edges) return;
+  object.remove(edges);
+  if (!(edges instanceof THREE.LineSegments)) return;
+  edges.geometry.dispose();
+  const materials = Array.isArray(edges.material) ? edges.material : [edges.material];
+  for (const material of materials) material.dispose();
+}
+/** A gentle wind, not a spinner: the amplitude and period of the pennant's swing. */
+const FLAG_FLUTTER_RADIANS = 0.18;
+const FLAG_FLUTTER_PERIOD_MS = 1_400;
+/** Scales the whole flag at once so the pole, pennant and its offset keep proportion. */
+const EASEMENT_FLAG_SCALE = 3;
+/** Tall enough to clear a one-story context building so the pennant stays visible. */
+const EASEMENT_FLAG_HEIGHT_FEET = 14 * EASEMENT_FLAG_SCALE;
 // A pipe with no recorded diameter is drawn at 15 inch, the network's most common size.
 const SCHEMATIC_PIPE_DIAMETER_FEET = 1.25;
 const ONE_LEVEL_BUILDING_HEIGHT_FEET = 12;
 const ONE_LEVEL_ACCESSORY_HEIGHT_FEET = 10;
-const CONSEQUENCE_SURFACE_OFFSET_FEET = 0.9;
+const TERRAIN_SURFACE_OFFSET_FEET = 0.25;
+// Keep surface context clear of the textured terrain and avoid coplanar flicker.
+const CONSEQUENCE_SURFACE_OFFSET_FEET = 1.5;
 const IMPACT_COLORS: Record<string, number> = {
-  building: 0xe75f28,
-  accessory_structure: 0xf08c38,
-  roadway: 0x737d87,
-  city_row: 0xa7b0b8,
-  driveway: 0xb78b63,
-  paved_surface: 0x8a949d,
-  impervious_surface: 0x9c7bb3,
-  stormwater_easement: 0x8a5fb0,
+  building: 0xc84d1d,
+  accessory_structure: 0xcf6424,
+  roadway: 0x485763,
+  city_row: 0x64727c,
+  driveway: 0x7d5d45,
+  paved_surface: 0x5e6972,
+  impervious_surface: 0x684f78,
+  // Red: the easement flag is a marker to notice, not a surface to blend in.
+  stormwater_easement: 0xd62828,
+  conservation_easement: 0x1f6b63,
+  // Parcels are drawn as a boundary line only, in white so the hairline separates from
+  // the terrain texture rather than blending into its greys and greens.
+  parcel: 0xffffff,
 };
 
-export default function FailureConsequenceScene3D({ result, basemapTextureUrl, flashedFeatureId, flashToken }: Props) {
+export default function FailureConsequenceScene3D({ result, basemapTextureUrl, selectedFeatureId, locateToken }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const impactObjectsRef = useRef<Map<string, THREE.Mesh[]>>(new Map());
-  const flashRequestRef = useRef({ featureId: flashedFeatureId, token: flashToken, startedAt: 0 });
+  // Two registries per feature: the influenced portion carries the emphasis, the whole
+  // feature inside the map extent carries the quieter outline that gives it context.
+  const impactObjectsRef = useRef<Map<string, ContextObject[]>>(new Map());
+  const contextObjectsRef = useRef<Map<string, ContextObject[]>>(new Map());
+  const selectionRef = useRef({ featureId: selectedFeatureId, startedAt: 0, settled: false });
   const [verticalExaggeration, setVerticalExaggeration] = useState(1.5);
   const [surfaceOpacity, setSurfaceOpacity] = useState(0.82);
   const [cubeOpacity, setCubeOpacity] = useState(0.22);
@@ -65,13 +137,20 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
     () => result?.defects.find((defect) => defect.id === result.active_defect_id) ?? null,
     [result],
   );
+  const hasBuildingFeatures = result?.analysis?.impacted_features.some(isBuildingFeature) ?? false;
   const pipeSizing = result?.asset.asset_type === "pipe" ? resolvePipeSizing(result.asset) : null;
 
   useEffect(() => {
-    const previousFeatureId = flashRequestRef.current.featureId;
-    if (previousFeatureId) setImpactedFeatureFlash(impactObjectsRef.current.get(previousFeatureId) ?? [], null);
-    flashRequestRef.current = { featureId: flashedFeatureId, token: flashToken, startedAt: performance.now() };
-  }, [flashedFeatureId, flashToken]);
+    const previousFeatureId = selectionRef.current.featureId;
+    if (previousFeatureId && previousFeatureId !== selectedFeatureId) {
+      setImpactedFeatureFlash(impactObjectsRef.current.get(previousFeatureId) ?? [], null);
+      setContextFeatureHighlight(contextObjectsRef.current.get(previousFeatureId) ?? [], false);
+    }
+    selectionRef.current = { featureId: selectedFeatureId, startedAt: performance.now(), settled: false };
+    // The outline and the fade are states, so they are set once here; only the influenced
+    // overlay is animated.
+    applySceneFocus(contextObjectsRef.current, impactObjectsRef.current, selectedFeatureId);
+  }, [locateToken, selectedFeatureId]);
 
   useEffect(() => {
     const host = hostRef.current;
@@ -106,23 +185,37 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
     if (surfaceMode === "landscape") addSurfaceVegetation(scene, result, cutaway, terrain);
     addSelectedAsset(scene, result, cutaway, terrain);
     addDefectsAndZoi(scene, result, cutaway, terrain);
-    const impactObjects = new Map<string, THREE.Mesh[]>();
-    const influenceColor = active?.source === "simulated" ? 0xb444d2 : 0xef6c28;
+    const impactObjects = new Map<string, ContextObject[]>();
+    const contextObjects = new Map<string, ContextObject[]>();
+    const flagPennants: THREE.Mesh[] = [];
+    // Red for the area the zone of influence actually touches; a simulated scenario
+    // keeps its own violet so a what-if is never mistaken for an observed defect.
+    const influenceColor = active?.source === "simulated" ? 0x8f2fac : 0xd62828;
     if (result.analysis.influence_footprint_geometry) {
       addInfluenceFootprint(scene, result.analysis.influence_footprint_geometry, terrain, influenceColor);
     }
-    const prioritizedFeatures = result.analysis.impacted_features.toSorted(
-      (left, right) => Number(right.is_influenced) - Number(left.is_influenced),
-    );
-    for (const feature of prioritizedFeatures.slice(0, 350)) {
-      addImpactedFeature(scene, feature, terrain, impactObjects, influenceColor);
+    const prioritizedFeatures = result.analysis.impacted_features.toSorted((left, right) => {
+      const influencedOrder = Number(right.is_influenced) - Number(left.is_influenced);
+      if (influencedOrder) return influencedOrder;
+      return Number(isBuildingFeature(right)) - Number(isBuildingFeature(left));
+    });
+    for (const feature of prioritizedFeatures) {
+      addImpactedFeature(scene, feature, terrain, impactObjects, contextObjects, flagPennants, influenceColor, surfaceMode);
     }
     impactObjectsRef.current = impactObjects;
-    flashRequestRef.current = { ...flashRequestRef.current, startedAt: performance.now() };
+    contextObjectsRef.current = contextObjects;
+    // A rebuild (exaggeration, surface mode, a new result) discards every mesh, so the
+    // current selection has to be painted onto the replacements - without replaying the
+    // locate pulse, which belongs to the click that started it.
+    const selection = selectionRef.current;
+    if (selection.featureId) {
+      selectionRef.current = { ...selection, settled: false, startedAt: selection.settled ? 0 : selection.startedAt };
+      applySceneFocus(contextObjects, impactObjects, selection.featureId);
+    }
 
-    const ambient = new THREE.HemisphereLight(0xf5fbff, 0x6f5138, 2.3);
+    const ambient = new THREE.HemisphereLight(0xf5fbff, 0x6f5138, 1.8);
     scene.add(ambient);
-    const sunlight = new THREE.DirectionalLight(0xfff4da, 3.2);
+    const sunlight = new THREE.DirectionalLight(0xfff4da, 3.6);
     sunlight.position.set(horizontalSpan * 0.65, horizontalSpan * 1.1, horizontalSpan * 0.45);
     sunlight.castShadow = true;
     const shadowExtent = horizontalSpan * 0.72;
@@ -190,15 +283,29 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
 
     let animationFrame = 0;
     const render = () => {
-      const flashRequest = flashRequestRef.current;
-      if (flashRequest.featureId) {
-        const elapsed = performance.now() - flashRequest.startedAt;
-        if (elapsed < FEATURE_FLASH_DURATION_MS) {
+      const selection = selectionRef.current;
+      if (selection.featureId && !selection.settled) {
+        const elapsed = performance.now() - selection.startedAt;
+        if (elapsed < FEATURE_LOCATE_DURATION_MS) {
           const pulse = (Math.sin((elapsed / 340) * Math.PI * 2) + 1) / 2;
-          setImpactedFeatureFlash(impactObjects.get(flashRequest.featureId) ?? [], pulse);
+          setImpactedFeatureFlash(impactObjects.get(selection.featureId) ?? [], pulse);
         } else {
-          setImpactedFeatureFlash(impactObjects.get(flashRequest.featureId) ?? [], null);
-          flashRequestRef.current = { ...flashRequest, featureId: null };
+          // Settle instead of clearing: the reviewer keeps the answer on screen until
+          // they clear it, and settling stops the per-frame material writes.
+          setImpactedFeatureFlash(impactObjects.get(selection.featureId) ?? [], SELECTED_STEADY_PULSE);
+          selectionRef.current = { ...selection, settled: true };
+        }
+      }
+      // Wind on the easement flags. The only motion in an otherwise still scene, which
+      // is what makes a point feature findable without it having to blink.
+      if (flagPennants.length) {
+        const angle = Math.sin((performance.now() / FLAG_FLUTTER_PERIOD_MS) * Math.PI * 2) * FLAG_FLUTTER_RADIANS;
+        for (const pennant of flagPennants) {
+          const anchor = pennant.userData.flagAnchor as { x: number; z: number; radius: number } | undefined;
+          if (!anchor) continue;
+          pennant.rotation.y = angle;
+          pennant.position.x = anchor.x + Math.cos(angle) * anchor.radius;
+          pennant.position.z = anchor.z - Math.sin(angle) * anchor.radius;
         }
       }
       controls.update();
@@ -214,6 +321,7 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
       renderer.domElement.removeEventListener("pointerleave", handlePointerLeave);
       controls.dispose();
       impactObjectsRef.current = new Map();
+      contextObjectsRef.current = new Map();
       disposeScene(scene);
       renderer.dispose();
       renderer.domElement.remove();
@@ -226,7 +334,7 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
       <div className="failure-cutaway-unavailable">
         <AlertTriangle size={24} />
         <strong>3D cutaway unavailable</strong>
-        <span>The DEM cutaway could not be generated for this asset-wide screening extent.</span>
+        <span>The DEM cutaway could not be generated for the selected map extent.</span>
       </div>
     );
   }
@@ -294,6 +402,7 @@ export default function FailureConsequenceScene3D({ result, basemapTextureUrl, f
         <span><i className="cube" />Subsurface cutaway</span>
         <span><i className="asset" />Selected asset</span>
         <span><i className="zoi" />Zone of influence</span>
+        {hasBuildingFeatures ? <span><i className="building" />Buildings</span> : null}
         <span><i className="impact" />Affected feature</span>
         {active ? <span><i className={`defect ${active.source}`} />{active.source === "simulated" ? "Simulated defect" : active.source === "inventory" ? "Structure invert" : "Observed defect"}</span> : null}
       </div>
@@ -408,7 +517,7 @@ function addTerrainSurface(
       const elevation = cutaway.elevations[index] ?? cutaway.minimum_elevation;
       const x = -cutaway.width_feet / 2 + (cutaway.width_feet * column / (cutaway.columns - 1));
       const z = -cutaway.height_feet / 2 + (cutaway.height_feet * row / (cutaway.rows - 1));
-      positions.push(x, terrain.elevationToY(elevation) + 0.25, z);
+      positions.push(x, terrain.elevationToY(elevation) + TERRAIN_SURFACE_OFFSET_FEET, z);
       const color = low.clone().lerp(high, clamp((elevation - cutaway.minimum_elevation) / relief, 0, 1));
       colors.push(color.r, color.g, color.b);
       uvs.push(column / (cutaway.columns - 1), 1 - (row / (cutaway.rows - 1)));
@@ -463,6 +572,7 @@ function addTerrainSurface(
   corridorMaterial.opacity = corridorOpacity;
   corridorMaterial.depthWrite = false;
   const mesh = new THREE.Mesh(geometry, [outerMaterial, corridorMaterial]);
+  mesh.renderOrder = 1;
   mesh.receiveShadow = true;
   mesh.userData.tooltipTitle = "DEM terrain surface";
   mesh.userData.tooltipDetail = `${cutaway.dem_file} · elevations ${cutaway.minimum_elevation.toFixed(1)}–${cutaway.maximum_elevation.toFixed(1)} ft`;
@@ -964,69 +1074,211 @@ function addGroundRing(scene: THREE.Scene, point: ProjectedPoint, y: number, rad
   scene.add(line);
 }
 
+function isBuildingFeature(feature: ImpactedFeature): boolean {
+  return feature.category === "building" || feature.category === "accessory_structure";
+}
+
+function createBuildingContextMaterials(
+  category: string,
+  surfaceMode: SurfaceMode,
+): [THREE.MeshStandardMaterial, THREE.MeshStandardMaterial] {
+  const accessory = category === "accessory_structure";
+  const roofOpacity = surfaceMode === "xray" ? 0.3 : surfaceMode === "technical" ? 0.76 : 0.96;
+  const wallOpacity = surfaceMode === "xray" ? 0.2 : surfaceMode === "technical" ? 0.58 : 0.82;
+  const common = {
+    metalness: 0,
+    transparent: true,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -1,
+    polygonOffsetUnits: -1,
+  } as const;
+  const roof = new THREE.MeshStandardMaterial({
+    ...common,
+    color: accessory ? 0xd0d2d3 : 0xe2e3e3,
+    roughness: 0.94,
+    opacity: roofOpacity,
+  });
+  const walls = new THREE.MeshStandardMaterial({
+    ...common,
+    color: accessory ? 0x7c7f82 : 0x949799,
+    roughness: 0.88,
+    opacity: wallOpacity,
+  });
+  return [roof, walls];
+}
+
+function addBuildingEdges(
+  scene: THREE.Scene,
+  geometry: THREE.BufferGeometry,
+  surfaceMode: SurfaceMode,
+): void {
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry, 28),
+    new THREE.LineBasicMaterial({
+      color: 0x4d5862,
+      transparent: true,
+      opacity: surfaceMode === "xray" ? 0.14 : surfaceMode === "technical" ? 0.24 : 0.2,
+      depthWrite: false,
+    }),
+  );
+  edges.renderOrder = 9;
+  scene.add(edges);
+}
+
 function addImpactedFeature(
   scene: THREE.Scene,
   feature: ImpactedFeature,
   terrain: TerrainContext,
-  impactObjects: Map<string, THREE.Mesh[]>,
+  impactObjects: Map<string, ContextObject[]>,
+  contextObjects: Map<string, ContextObject[]>,
+  flagPennants: THREE.Mesh[],
   influenceColor: number,
+  surfaceMode: SurfaceMode,
 ) {
   const color = IMPACT_COLORS[feature.category] ?? 0xdc7429;
   const polygons = geometryPolygons(feature.geometry);
   for (const polygon of polygons) {
-    const isBuilding = feature.category === "building" || feature.category === "accessory_structure";
+    const isBuilding = isBuildingFeature(feature);
     const buildingHeight = feature.category === "accessory_structure"
       ? ONE_LEVEL_ACCESSORY_HEIGHT_FEET
       : ONE_LEVEL_BUILDING_HEIGHT_FEET;
-    const geometry = isBuilding
-      ? createTerrainFootedBuildingGeometry(polygon, terrain, buildingHeight)
-      : createTerrainDrapedPolygonGeometry(polygon, terrain, CONSEQUENCE_SURFACE_OFFSET_FEET);
+    if (isBuilding) {
+      const geometry = createTerrainFootedBuildingGeometry(polygon, terrain, buildingHeight);
+      if (!geometry) continue;
+      const [roofMaterial, wallMaterial] = createBuildingContextMaterials(feature.category, surfaceMode);
+      const roof = new THREE.Mesh(geometry.roof, roofMaterial);
+      const walls = new THREE.Mesh(geometry.walls, wallMaterial);
+      roof.renderOrder = 8;
+      walls.renderOrder = 7;
+      roof.castShadow = true;
+      walls.castShadow = true;
+      roof.receiveShadow = true;
+      walls.receiveShadow = true;
+      const relationship = feature.is_influenced ? "Context building with an influenced portion" : "Context building";
+      const detail = `${relationship} · neutral one-story model · ${buildingHeight.toFixed(0)} ft average height`;
+      for (const mesh of [roof, walls]) {
+        mesh.userData.tooltipTitle = feature.label;
+        mesh.userData.tooltipDetail = detail;
+        registerImpactedFeatureObject(contextObjects, feature.id, mesh);
+      }
+      scene.add(walls, roof);
+      addBuildingEdges(scene, geometry.walls, surfaceMode);
+      addBuildingEdges(scene, geometry.roof, surfaceMode);
+      continue;
+    }
+    // Parcels tile the extent, so a translucent fill for each one stacks into a grey
+    // wash over the whole scene. They are drawn the way a cadastral layer is: boundary
+    // only, which is also what makes a single parcel readable among its neighbours.
+    if (feature.category === "parcel") {
+      addContextPolygonOutline(scene, polygon, terrain, color, feature.label, contextObjects, feature.id);
+      continue;
+    }
+    const geometry = createTerrainDrapedPolygonGeometry(polygon, terrain, CONSEQUENCE_SURFACE_OFFSET_FEET);
     if (!geometry) continue;
     const material = new THREE.MeshStandardMaterial({
       color,
-      roughness: isBuilding ? 0.62 : 0.82,
+      roughness: 0.82,
       transparent: true,
-      opacity: isBuilding ? 0.42 : 0.045,
+      opacity: 0.14,
       side: THREE.DoubleSide,
-      polygonOffset: !isBuilding,
-      polygonOffsetFactor: !isBuilding ? -1 : 0,
-      polygonOffsetUnits: !isBuilding ? -1 : 0,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -1,
+      polygonOffsetUnits: -1,
     });
     const mesh = new THREE.Mesh(geometry, material);
-    mesh.renderOrder = isBuilding ? 5 : 4;
-    mesh.castShadow = isBuilding;
+    mesh.renderOrder = 6;
     mesh.receiveShadow = true;
     mesh.userData.tooltipTitle = feature.label;
     const relationship = feature.is_influenced ? "Context feature with an influenced portion" : "Context feature";
-    mesh.userData.tooltipDetail = isBuilding
-      ? `${relationship} · one-story display model · ${buildingHeight.toFixed(0)} ft average height`
-      : `${relationship} · draped on the DEM surface`;
+    mesh.userData.tooltipDetail = `${relationship} · draped above the DEM surface`;
+    registerImpactedFeatureObject(contextObjects, feature.id, mesh);
     scene.add(mesh);
   }
   for (const line of geometryLineStrings(feature.geometry)) {
-    const points = terrainDrapedLinePoints(line, terrain, 1.2);
+    const points = terrainDrapedLinePoints(line, terrain, CONSEQUENCE_SURFACE_OFFSET_FEET + 0.5);
     if (points.length < 2) continue;
     const path = new THREE.CurvePath<THREE.Vector3>();
     for (let index = 1; index < points.length; index += 1) path.add(new THREE.LineCurve3(points[index - 1], points[index]));
     const mesh = new THREE.Mesh(
       new THREE.TubeGeometry(path, Math.max(8, points.length * 2), 1.2, 8, false),
-      new THREE.MeshStandardMaterial({ color, roughness: 0.75, transparent: true, opacity: 0.24, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+      new THREE.MeshStandardMaterial({ color, roughness: 0.78, transparent: true, opacity: 0.42, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
     );
-    mesh.renderOrder = 4;
+    mesh.renderOrder = 6;
     mesh.userData.tooltipTitle = feature.label;
     mesh.userData.tooltipDetail = "Context feature";
+    registerImpactedFeatureObject(contextObjects, feature.id, mesh);
     scene.add(mesh);
   }
   for (const coordinate of geometryPoints(feature.geometry)) {
     const projected = terrain.project(coordinate);
-    const marker = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.7, 5, 12), new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.32 }));
-    marker.position.set(projected.x, terrain.groundY(projected.x, projected.z) + 4, projected.z);
+    // An easement is recorded as a single point, so a ground-level marker is easy to lose
+    // among the surface context. A flag stands above it and is legible from any camera.
+    if (feature.category === "stormwater_easement") {
+      addEasementFlag(scene, projected, terrain, color, feature, contextObjects, flagPennants);
+      continue;
+    }
+    const marker = new THREE.Mesh(new THREE.CylinderGeometry(1.7, 1.7, 5, 12), new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.5, depthWrite: false }));
+    marker.position.set(projected.x, terrain.groundY(projected.x, projected.z) + CONSEQUENCE_SURFACE_OFFSET_FEET + 2.5, projected.z);
+    marker.renderOrder = 6;
     marker.userData.tooltipTitle = feature.label;
     marker.userData.tooltipDetail = "Context feature";
+    registerImpactedFeatureObject(contextObjects, feature.id, marker);
     scene.add(marker);
   }
   if (feature.influenced_geometry) {
     addInfluencedFeatureOverlay(scene, feature, feature.influenced_geometry, terrain, impactObjects, influenceColor);
+  }
+}
+
+/**
+ * A surveyor's flag for an easement point: a pole planted on the DEM surface with a
+ * pennant near its top. The pennant is a thin box rather than a plane so it never
+ * disappears when the camera lines up with its edge.
+ */
+function addEasementFlag(
+  scene: THREE.Scene,
+  projected: ProjectedPoint,
+  terrain: TerrainContext,
+  color: number,
+  feature: ImpactedFeature,
+  contextObjects: Map<string, ContextObject[]>,
+  flagPennants: THREE.Mesh[],
+) {
+  const ground = terrain.groundY(projected.x, projected.z) + CONSEQUENCE_SURFACE_OFFSET_FEET;
+  const detail = feature.is_influenced
+    ? "Storm water easement point with an influenced portion"
+    : "Storm water easement point";
+  const poleRadius = 0.26 * EASEMENT_FLAG_SCALE;
+  const pennantWidth = 4.6 * EASEMENT_FLAG_SCALE;
+  const pennantHeight = 2.6 * EASEMENT_FLAG_SCALE;
+  const pole = new THREE.Mesh(
+    new THREE.CylinderGeometry(poleRadius, poleRadius, EASEMENT_FLAG_HEIGHT_FEET, 8),
+    new THREE.MeshStandardMaterial({ color: 0x3f4a4f, roughness: 0.7 }),
+  );
+  pole.position.set(projected.x, ground + EASEMENT_FLAG_HEIGHT_FEET / 2, projected.z);
+  const pennant = new THREE.Mesh(
+    new THREE.BoxGeometry(pennantWidth, pennantHeight, 0.18 * EASEMENT_FLAG_SCALE),
+    new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.12, roughness: 0.6, side: THREE.DoubleSide }),
+  );
+  pennant.position.set(
+    projected.x + pennantWidth / 2,
+    ground + EASEMENT_FLAG_HEIGHT_FEET - pennantHeight / 1.625,
+    projected.z,
+  );
+  // The render loop swings the pennant about the pole from this anchor. Orbiting the
+  // centre rather than spinning it in place is what keeps its inner edge on the pole.
+  pennant.userData.flagAnchor = { x: projected.x, z: projected.z, radius: pennantWidth / 2 };
+  flagPennants.push(pennant);
+  for (const mesh of [pole, pennant]) {
+    mesh.renderOrder = 9;
+    mesh.castShadow = true;
+    mesh.userData.tooltipTitle = feature.label;
+    mesh.userData.tooltipDetail = detail;
+    registerImpactedFeatureObject(contextObjects, feature.id, mesh);
+    scene.add(mesh);
   }
 }
 
@@ -1048,10 +1300,10 @@ function addInfluenceFootprint(
       new THREE.MeshStandardMaterial({
         color,
         emissive: color,
-        emissiveIntensity: 0.035,
+        emissiveIntensity: 0.025,
         roughness: 0.82,
         transparent: true,
-        opacity: 0.27,
+        opacity: 0.38,
         side: THREE.DoubleSide,
         depthTest: false,
         depthWrite: false,
@@ -1069,7 +1321,7 @@ function addInfluencedFeatureOverlay(
   feature: ImpactedFeature,
   geometry: GeoJSON.Geometry,
   terrain: TerrainContext,
-  impactObjects: Map<string, THREE.Mesh[]>,
+  impactObjects: Map<string, ContextObject[]>,
   color: number,
 ) {
   const detail = influencedFeatureDetail(feature);
@@ -1104,7 +1356,7 @@ function addInfluencedFeatureOverlay(
     );
   }
   for (const line of geometryLineStrings(geometry)) {
-    const points = terrainDrapedLinePoints(line, terrain, 2.1);
+    const points = terrainDrapedLinePoints(line, terrain, CONSEQUENCE_SURFACE_OFFSET_FEET + 1.6);
     if (points.length < 2) continue;
     const path = new THREE.CurvePath<THREE.Vector3>();
     for (let index = 1; index < points.length; index += 1) path.add(new THREE.LineCurve3(points[index - 1], points[index]));
@@ -1124,12 +1376,42 @@ function addInfluencedFeatureOverlay(
       new THREE.CylinderGeometry(3.1, 3.1, 8, 16),
       new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.18, depthTest: false, depthWrite: false }),
     );
-    marker.position.set(projected.x, terrain.groundY(projected.x, projected.z) + 4.5, projected.z);
+    marker.position.set(projected.x, terrain.groundY(projected.x, projected.z) + CONSEQUENCE_SURFACE_OFFSET_FEET + 4, projected.z);
     marker.renderOrder = 10;
     marker.userData.tooltipTitle = `${feature.label} · influenced point`;
     marker.userData.tooltipDetail = detail;
     registerImpactedFeatureObject(impactObjects, feature.id, marker);
     scene.add(marker);
+  }
+}
+
+/**
+ * A terrain-draped boundary for a context polygon that is drawn as an outline rather
+ * than a fill. Unlike the influenced outline this respects depth, so a parcel line
+ * behind a building is occluded by it instead of floating over the roof.
+ */
+function addContextPolygonOutline(
+  scene: THREE.Scene,
+  polygon: number[][][],
+  terrain: TerrainContext,
+  color: number,
+  label: string,
+  contextObjects: Map<string, ContextObject[]>,
+  featureId: string,
+) {
+  for (const ring of polygon) {
+    const points = terrainDrapedLinePoints(ring, terrain, CONSEQUENCE_SURFACE_OFFSET_FEET + 0.4);
+    if (points.length < 3) continue;
+    const outline = new THREE.Line(
+      new THREE.BufferGeometry().setFromPoints(points),
+      // White over a light terrain needs most of its opacity to read at hairline width.
+      new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.9 }),
+    );
+    outline.renderOrder = 7;
+    outline.userData.tooltipTitle = label;
+    outline.userData.tooltipDetail = "Context feature · parcel boundary draped on the DEM surface";
+    registerImpactedFeatureObject(contextObjects, featureId, outline);
+    scene.add(outline);
   }
 }
 
@@ -1253,7 +1535,7 @@ function createTerrainFootedBuildingGeometry(
   polygon: number[][][],
   terrain: TerrainContext,
   height: number,
-): THREE.BufferGeometry | null {
+): BuildingGeometry | null {
   const rings = projectedPolygonRings(polygon, terrain);
   if (!rings.length) return null;
   const contour = rings[0].map((point) => new THREE.Vector2(point.x, -point.z));
@@ -1262,29 +1544,37 @@ function createTerrainFootedBuildingGeometry(
   const roofPoints = rings.flat();
   if (!triangles.length || !roofPoints.length) return null;
   const highestGround = Math.max(...roofPoints.map((point) => terrain.groundY(point.x, point.z)));
-  const roofY = highestGround + height * terrain.verticalScale;
-  const positions = roofPoints.flatMap((point) => [point.x, roofY, point.z]);
-  const indices: number[] = [];
-  for (const triangle of triangles) appendUpwardTriangle(indices, triangle[0], triangle[1], triangle[2], roofPoints);
+  const roofY = highestGround + CONSEQUENCE_SURFACE_OFFSET_FEET + height * terrain.verticalScale;
+  const roofPositions = roofPoints.flatMap((point) => [point.x, roofY, point.z]);
+  const roofIndices: number[] = [];
+  for (const triangle of triangles) {
+    appendUpwardTriangle(roofIndices, triangle[0], triangle[1], triangle[2], roofPoints);
+  }
+  const wallPositions: number[] = [];
+  const wallIndices: number[] = [];
   for (const ring of rings) {
     for (let index = 0; index < ring.length; index += 1) {
       const start = ring[index];
       const end = ring[(index + 1) % ring.length];
-      const offset = positions.length / 3;
-      positions.push(
-        start.x, terrain.groundY(start.x, start.z) + 0.35, start.z,
-        end.x, terrain.groundY(end.x, end.z) + 0.35, end.z,
+      const offset = wallPositions.length / 3;
+      wallPositions.push(
+        start.x, terrain.groundY(start.x, start.z) + CONSEQUENCE_SURFACE_OFFSET_FEET, start.z,
+        end.x, terrain.groundY(end.x, end.z) + CONSEQUENCE_SURFACE_OFFSET_FEET, end.z,
         start.x, roofY, start.z,
         end.x, roofY, end.z,
       );
-      indices.push(offset, offset + 1, offset + 2, offset + 2, offset + 1, offset + 3);
+      wallIndices.push(offset, offset + 1, offset + 2, offset + 2, offset + 1, offset + 3);
     }
   }
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex(indices);
-  geometry.computeVertexNormals();
-  return geometry;
+  const roof = new THREE.BufferGeometry();
+  roof.setAttribute("position", new THREE.Float32BufferAttribute(roofPositions, 3));
+  roof.setIndex(roofIndices);
+  roof.computeVertexNormals();
+  const walls = new THREE.BufferGeometry();
+  walls.setAttribute("position", new THREE.Float32BufferAttribute(wallPositions, 3));
+  walls.setIndex(wallIndices);
+  walls.computeVertexNormals();
+  return { roof, walls };
 }
 
 function projectedPolygonRings(polygon: number[][][], terrain: TerrainContext): ProjectedPoint[][] {
@@ -1336,9 +1626,9 @@ function terrainDrapedLinePoints(line: number[][], terrain: TerrainContext, vert
 }
 
 function registerImpactedFeatureObject(
-  impactObjects: Map<string, THREE.Mesh[]>,
+  impactObjects: Map<string, ContextObject[]>,
   featureId: string,
-  object: THREE.Mesh,
+  object: ContextObject,
 ): void {
   const objects = impactObjects.get(featureId) ?? [];
   objects.push(object);
@@ -1346,10 +1636,13 @@ function registerImpactedFeatureObject(
   object.userData.baseRenderOrder = object.renderOrder;
   const materials = Array.isArray(object.material) ? object.material : [object.material];
   for (const material of materials) {
-    if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+    if (material instanceof THREE.MeshStandardMaterial) {
+      material.userData.flashBaseEmissive = material.emissive.getHex();
+      material.userData.flashBaseEmissiveIntensity = material.emissiveIntensity;
+    } else if (!(material instanceof THREE.LineBasicMaterial)) {
+      continue;
+    }
     material.userData.flashBaseColor = material.color.getHex();
-    material.userData.flashBaseEmissive = material.emissive.getHex();
-    material.userData.flashBaseEmissiveIntensity = material.emissiveIntensity;
     material.userData.flashBaseOpacity = material.opacity;
     material.userData.flashBaseTransparent = material.transparent;
     material.userData.flashBaseDepthTest = material.depthTest;
@@ -1357,7 +1650,103 @@ function registerImpactedFeatureObject(
   }
 }
 
-function setImpactedFeatureFlash(objects: THREE.Mesh[], pulse: number | null): void {
+/**
+ * Fades every feature except the selected one, so the highlight is read against a quiet
+ * scene. Restores the registered base values when the selection clears.
+ */
+function applySceneFocus(
+  contextObjects: Map<string, ContextObject[]>,
+  impactObjects: Map<string, ContextObject[]>,
+  selectedFeatureId: string | null,
+): void {
+  for (const [featureId, objects] of contextObjects) {
+    const selected = featureId === selectedFeatureId;
+    // Highlight first: passing false restores the registered base values, which the fade
+    // then scales. Both write opacity, so calling them the other way round - or calling
+    // the fade at all for the selected feature - would cancel the highlight out.
+    setContextFeatureHighlight(objects, selected);
+    if (selectedFeatureId && !selected) setFeatureDimmed(objects, true);
+  }
+  for (const [featureId, objects] of impactObjects) {
+    if (featureId === selectedFeatureId) continue;
+    setFeatureDimmed(objects, Boolean(selectedFeatureId));
+  }
+}
+
+function setFeatureDimmed(objects: ContextObject[], dimmed: boolean): void {
+  const neutral = new THREE.Color(DIMMED_NEUTRAL_COLOR);
+  for (const object of objects) {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      const isMesh = material instanceof THREE.MeshStandardMaterial;
+      if (!isMesh && !(material instanceof THREE.LineBasicMaterial)) continue;
+      const baseOpacity = Number(material.userData.flashBaseOpacity ?? material.opacity);
+      const baseColor = Number(material.userData.flashBaseColor ?? material.color.getHex());
+      material.opacity = dimmed ? baseOpacity * FOCUS_DIM_FACTOR : baseOpacity;
+      material.transparent = dimmed ? true : Boolean(material.userData.flashBaseTransparent ?? material.transparent);
+      // Draining the colour is what leaves the highlight as the only coloured thing on
+      // screen; fading alone kept a field of greens competing with it. Boundary lines are
+      // already neutral, so draining them only turns a white parcel grey - they just fade.
+      material.color.setHex(baseColor);
+      if (dimmed && isMesh) material.color.lerp(neutral, 0.8);
+      if (isMesh) material.emissiveIntensity = dimmed
+        ? 0
+        : Number(material.userData.flashBaseEmissiveIntensity ?? material.emissiveIntensity);
+      material.needsUpdate = true;
+    }
+  }
+}
+
+/**
+ * The quiet tier: the whole feature as the map extent has it. It only lifts out of the
+ * scene - no pulse, and `depthTest` is left alone so building walls keep sitting behind
+ * the terrain instead of drawing through it.
+ */
+function setContextFeatureHighlight(objects: ContextObject[], active: boolean): void {
+  const outline = new THREE.Color(SELECTION_HIGHLIGHT_COLOR);
+  for (const object of objects) {
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      // A parcel is registered as its boundary line, so the quiet tier has to lift line
+      // materials as well as the filled context meshes.
+      if (material instanceof THREE.LineBasicMaterial) {
+        const lineBase = Number(material.userData.flashBaseColor ?? material.color.getHex());
+        const lineOpacity = Number(material.userData.flashBaseOpacity ?? 1);
+        material.color.setHex(lineBase);
+        if (active) material.color.lerp(outline, 0.55);
+        material.opacity = active ? 1 : lineOpacity;
+        material.transparent = true;
+        material.needsUpdate = true;
+        continue;
+      }
+      if (!(material instanceof THREE.MeshStandardMaterial)) continue;
+      const baseColor = Number(material.userData.flashBaseColor ?? material.color.getHex());
+      const baseEmissive = Number(material.userData.flashBaseEmissive ?? material.emissive.getHex());
+      const baseIntensity = Number(material.userData.flashBaseEmissiveIntensity ?? 0);
+      const baseOpacity = Number(material.userData.flashBaseOpacity ?? 1);
+      if (active) {
+        // Nearly the full highlight colour, and emissive alongside it: these materials
+        // are rough and lit flatly, so colour alone washes out.
+        material.color.setHex(baseColor).lerp(outline, 0.9);
+        material.emissive.setHex(0xffa000);
+        material.emissiveIntensity = 0.6;
+        material.opacity = Math.max(baseOpacity, 0.55);
+        material.transparent = true;
+      } else {
+        material.color.setHex(baseColor);
+        material.emissive.setHex(baseEmissive);
+        material.emissiveIntensity = baseIntensity;
+        material.opacity = baseOpacity;
+        material.transparent = Boolean(material.userData.flashBaseTransparent);
+      }
+      material.needsUpdate = true;
+    }
+    if (active) addSelectionEdges(object);
+    else removeSelectionEdges(object);
+  }
+}
+
+function setImpactedFeatureFlash(objects: ContextObject[], pulse: number | null): void {
   const highlight = new THREE.Color(0xffc400);
   for (const object of objects) {
     object.renderOrder = pulse == null ? Number(object.userData.baseRenderOrder ?? 0) : 14;

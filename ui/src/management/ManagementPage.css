@@ -1450,6 +1450,60 @@
   padding: 9px 16px;
 }
 
+.management-cctv-permission-presets {
+  display: grid;
+  gap: 10px;
+  border-bottom: 1px solid #bfd3e6;
+  padding: 14px 16px;
+  background: #f4f8fc;
+}
+
+.management-cctv-permission-presets > div:first-child {
+  display: grid;
+  gap: 2px;
+}
+
+.management-cctv-permission-presets > div:first-child strong {
+  color: #173b60;
+  font-size: 14px;
+}
+
+.management-cctv-permission-presets > div:first-child span,
+.management-cctv-permission-presets > small {
+  color: #5f7185;
+  font-size: 12px;
+}
+
+.management-cctv-permission-preset-actions {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.management-cctv-permission-preset-actions button {
+  display: grid;
+  min-height: 62px;
+  gap: 3px;
+  align-content: center;
+  border: 1px solid #a9bfd4;
+  padding: 8px 10px;
+  background: #ffffff;
+  color: #164f82;
+  text-align: left;
+}
+
+.management-cctv-permission-preset-actions button:hover {
+  border-color: #2473b8;
+  background: #eaf4fd;
+}
+
+.management-cctv-permission-preset-actions button span {
+  color: #5e6f81;
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.25;
+}
+
 .management-permission-modes {
   display: inline-grid;
   grid-template-columns: repeat(2, max-content);
@@ -1750,6 +1804,7 @@
   .management-featured-config,
   .management-table-toolbar,
   .management-permission-bulk-toolbar,
+  .management-cctv-permission-preset-actions,
   .management-permission-toolbar {
     grid-template-columns: 1fr;
   }

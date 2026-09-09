@@ -140,6 +140,11 @@ export async function startDesktopSession<TUser>() {
   return invoke<DesktopStartupSession<TUser>>('desktop_startup_session')
 }
 
+export async function prepareNetworkAccess() {
+  if (!isDesktopRuntime()) throw new Error('Desktop network preparation is available only inside Tauri.')
+  await invoke('prepare_network_access')
+}
+
 export async function startDataCache() {
   if (!isDesktopRuntime()) throw new Error('Desktop data cache is available only inside Tauri.')
   return invoke<DataCacheStartupResult>('data_cache_startup')

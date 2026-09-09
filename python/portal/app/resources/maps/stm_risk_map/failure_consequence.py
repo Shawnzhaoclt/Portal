@@ -41,7 +41,11 @@ BASE_ZOI_FEET = 3.0
 SIMULATION_SNAP_TOLERANCE_FEET = 100.0
 NUMBER_PATTERN = re.compile(r"\d+(?:\.\d+)?")
 CUTAWAY_GRID_SIZE = 72
-DISPLAY_EXTENT_SCALE = 2.0
+FEET_PER_MILE = 5_280.0
+DEFAULT_DISPLAY_EXTENT_MILES = 0.2
+MINIMUM_DISPLAY_EXTENT_MILES = 0.1
+MAXIMUM_DISPLAY_EXTENT_MILES = 1.0
+DISPLAY_EXTENT_STEP_MILES = 0.1
 
 REFERENCE_LAYERS = (
     ("row_city", "City right-of-way", "city_row"),
@@ -54,11 +58,32 @@ REFERENCE_LAYERS = (
     ("eop_state_local_py", "State local street", "roadway"),
     ("eop_state_freeway_py", "State freeway", "roadway"),
 )
-WAREHOUSE_LAYERS = (
+DEDICATED_BUILDING_LAYERS = (
+    ("Buildings_py", "Building", "building", "TRUE"),
+)
+# The daily SQL Server mirror clones ten curated SDW tables, and neither parcels nor
+# conservation easements are among them - they are only published by the weekly 68-layer
+# spatial mirror, which also writes each layer in ST_Hilbert order with an R-Tree index
+# on its geometry. That mirror is therefore both the only source and the faster one for
+# the extent query these two layers need.
+SPATIAL_MIRROR_LAYERS = (
+    (
+        "STORMWATERCONSERVATIONEASEMENTS_PY",
+        "Storm water conservation easement",
+        "conservation_easement",
+        "TRUE",
+    ),
+    # Parcels blanket the extent, so they are queried last: both the per-layer and the
+    # overall cap then trim parcels before the layers a reviewer needs most.
+    ("PARCELJOIN_PY", "Parcel", "parcel", "TRUE"),
+)
+IMPERVIOUS_BUILDING_FALLBACK_LAYERS = (
     ("IMPERVIOUSSURFACESINGLEFAMILY_PY", "Building", "building", "lower(Subtheme)='building' AND coalesce(ImperviousSurfaceAreaSqFt, 0) >= 500"),
     ("IMPERVIOUSSURFACENSF_PY", "Building", "building", "lower(Subtheme)='building' AND coalesce(ImperviousSurfaceAreaSqFt, 0) >= 500"),
     ("IMPERVIOUSSURFACESINGLEFAMILY_PY", "Accessory structure", "accessory_structure", "lower(Subtheme)='building' AND coalesce(ImperviousSurfaceAreaSqFt, 0) >= 150 AND coalesce(ImperviousSurfaceAreaSqFt, 0) < 500"),
     ("IMPERVIOUSSURFACENSF_PY", "Accessory structure", "accessory_structure", "lower(Subtheme)='building' AND coalesce(ImperviousSurfaceAreaSqFt, 0) >= 150 AND coalesce(ImperviousSurfaceAreaSqFt, 0) < 500"),
+)
+WAREHOUSE_LAYERS = (
     ("IMPERVIOUSSURFACESINGLEFAMILY_PY", "Driveway", "driveway", "lower(Subtheme)='driveway'"),
     ("IMPERVIOUSSURFACENSF_PY", "Paved surface", "paved_surface", "lower(Subtheme)='paved'"),
     ("IMPERVIOUSSURFACEOTHER_PY", "Other impervious surface", "impervious_surface", "TRUE"),
@@ -78,6 +103,7 @@ def build_failure_consequence(payload: dict[str, Any]) -> dict[str, Any]:
     asset_id = str(payload.get("asset_id") or "").strip()
     if not asset_id:
         raise HTTPException(status_code=422, detail="Select an asset before opening consequence analysis.")
+    display_extent_miles = _display_extent_miles(payload.get("extent_miles"))
 
     config = _asset_history_config()
     inventory_path = Path(str(config["sources"]["inventory"]["database"]))
@@ -115,9 +141,17 @@ def build_failure_consequence(payload: dict[str, Any]) -> dict[str, Any]:
         observed.append(simulated)
 
     active = _active_defect(observed, scenario_payload)
-    # Consequence screening is asset-wide.  A selected defect changes the active
-    # scenario/marker, but it must not gate the ZOI or consequence-layer query.
-    analysis = _analyze(active, asset_type, geometry_2264, profile, warnings)
+    # The conservative ZOI remains asset-wide. A selected defect sets the active
+    # scenario and centers the display extent, but the ZOI never clips or filters
+    # the consequence-layer context query.
+    analysis = _analyze(
+        active,
+        asset_type,
+        geometry_2264,
+        profile,
+        display_extent_miles,
+        warnings,
+    )
     cutaway = _terrain_cutaway(active, geometry_2264, analysis, warnings)
 
     to_wgs84 = Transformer.from_crs(f"EPSG:{INVENTORY_SRID}", "EPSG:4326", always_xy=True)
@@ -137,6 +171,7 @@ def build_failure_consequence(payload: dict[str, Any]) -> dict[str, Any]:
         "cutaway": _public_cutaway(cutaway, to_wgs84) if cutaway else None,
         "method": {
             "zoi_formula": "3 ft + (2 x relative depth)",
+            "context_clip": "selected square map extent",
             "latest_itpipes_only": True,
             "latest_cityworks_only": True,
             "fallback_to_older_inspections": False,
@@ -162,12 +197,10 @@ def _terrain_cutaway(
         warnings.append(f"The cutaway terrain runtime is unavailable: {type(exc).__name__}: {exc}")
         return None
 
-    defect_geometry = defect.get("geometry_2264") if defect else None
     display_extent = analysis.get("display_extent_2264")
     if display_extent is None or display_extent.is_empty:
-        radius = float(analysis.get("zoi_radius_feet") or BASE_ZOI_FEET)
-        zoi = analysis.get("zoi_2264") or asset_geometry.buffer(radius)
-        display_extent, _ = _display_clip_extent(asset_geometry, zoi)
+        center_geometry = defect.get("geometry_2264") if defect else asset_geometry
+        display_extent, _ = _display_clip_extent(center_geometry, DEFAULT_DISPLAY_EXTENT_MILES)
     minimum_x, minimum_y, maximum_x, maximum_y = display_extent.bounds
     center = display_extent.centroid
     width = max(1.0, maximum_x - minimum_x)
@@ -833,6 +866,7 @@ def _analyze(
     asset_type: str,
     asset_geometry: Any,
     profile: dict[str, Any] | None,
+    display_extent_miles: float,
     warnings: list[str],
 ) -> dict[str, Any]:
     geometry = defect.get("geometry_2264") if defect else None
@@ -848,7 +882,8 @@ def _analyze(
         else None
     )
     zoi, minimum_radius, maximum_radius = _asset_wide_zoi(asset_type, asset_geometry, profile)
-    display_extent, clip_basis = _display_clip_extent(asset_geometry, zoi)
+    display_center = geometry if geometry is not None and not geometry.is_empty else asset_geometry
+    display_extent, clip_basis = _display_clip_extent(display_center, display_extent_miles)
     impacted: list[dict[str, Any]] = []
     try:
         sources = configured_failure_consequence_sources()
@@ -868,19 +903,23 @@ def _analyze(
                             table,
                             label,
                             category,
-                            zoi,
                             display_extent,
                             scenario_zoi,
                             direct_zone,
+                            warnings=warnings,
                         )
                     )
         except HTTPException as error:
             warnings.append(str(error.detail))
-    warehouse = sources.get("spatialWarehouse")
-    if warehouse:
+    buildings_loaded = False
+    buildings = sources.get("buildings")
+    if buildings:
         try:
-            with closing(_open(Path(str(warehouse["database"])), "spatial warehouse")) as connection:
-                for table, label, category, predicate in WAREHOUSE_LAYERS:
+            with closing(_open(Path(str(buildings["database"])), "spatial mirror")) as connection:
+                for table, label, category, predicate in (
+                    *DEDICATED_BUILDING_LAYERS,
+                    *SPATIAL_MIRROR_LAYERS,
+                ):
                     impacted.extend(
                         _query_impacts(
                             connection,
@@ -888,11 +927,41 @@ def _analyze(
                             table,
                             label,
                             category,
-                            zoi,
                             display_extent,
                             scenario_zoi,
                             direct_zone,
                             predicate,
+                            warnings=warnings,
+                        )
+                    )
+                buildings_loaded = True
+        except HTTPException as error:
+            warnings.append(
+                f"{error.detail} The impervious-surface building fallback will be used if available."
+            )
+
+    warehouse = sources.get("spatialWarehouse")
+    if warehouse:
+        try:
+            with closing(_open(Path(str(warehouse["database"])), "spatial warehouse")) as connection:
+                layers = (
+                    WAREHOUSE_LAYERS
+                    if buildings_loaded
+                    else (*IMPERVIOUS_BUILDING_FALLBACK_LAYERS, *WAREHOUSE_LAYERS)
+                )
+                for table, label, category, predicate in layers:
+                    impacted.extend(
+                        _query_impacts(
+                            connection,
+                            "main",
+                            table,
+                            label,
+                            category,
+                            display_extent,
+                            scenario_zoi,
+                            direct_zone,
+                            predicate,
+                            warnings=warnings,
                         )
                     )
         except HTTPException as error:
@@ -901,11 +970,12 @@ def _analyze(
         impacted.sort(
             key=lambda item: (
                 not bool(item.get("is_influenced")),
+                str(item.get("category")) not in {"building", "accessory_structure"},
                 str(item.get("relationship")) != "direct",
             )
         )
         warnings.append(
-            f"Only {MAX_IMPACT_FEATURES:,} context features are displayed; scenario-influenced features were prioritized."
+            f"Only {MAX_IMPACT_FEATURES:,} features from the selected map extent are displayed; scenario-influenced features were prioritized."
         )
         impacted = impacted[:MAX_IMPACT_FEATURES]
     counts: dict[str, int] = {}
@@ -923,6 +993,7 @@ def _analyze(
         "scenario_zoi_2264": scenario_zoi,
         "influence_footprint_2264": influence_footprint,
         "display_extent_2264": display_extent,
+        "display_extent_miles": display_extent_miles,
         "clip_basis": clip_basis,
         "impacted_features": impacted,
         "counts": counts,
@@ -937,32 +1008,55 @@ def _query_impacts(
     table: str,
     label: str,
     category: str,
-    zoi: Any,
     display_extent: Any,
     scenario_zoi: Any | None,
     direct_zone: Any | None,
     predicate: str = "TRUE",
+    warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    # A mirror that has not published one configured layer yet must not cost the reviewer
+    # the layers that are present, so a missing table is reported and skipped rather than
+    # aborting the rest of the batch.
+    if not _table_exists(connection, schema, table):
+        if warnings is not None:
+            warnings.append(f"{label} layer ({table}) is not in the local mirror; it was skipped.")
+        return []
     try:
         columns = _columns(connection, table, schema)
         geometry = _column(columns, "geometry", "Shape", "SHAPE")
         if geometry is None:
             return []
-        id_field = _column(columns, "OBJECTID", "WorkZoneID", "PID", "GlobalID")
+        id_field = _column(columns, "OBJECTID", "WorkZoneID", "ParcelID", "PID", "GlobalID")
         attributes = [
-            item for item in (id_field, _column(columns, "Subtheme"), _column(columns, "PID"), _column(columns, "Address"))
+            item for item in (
+                id_field,
+                _column(columns, "Subtheme"),
+                _column(columns, "ParcelID"),
+                _column(columns, "PID"),
+                _column(columns, "Address"),
+            )
             if item
         ]
         selected = ", ".join(f'"{item}"' for item in dict.fromkeys(attributes))
         if selected:
             selected += ", "
         qualified = f'"{schema}"."{table}"' if schema else f'"{table}"'
+        priority = ""
+        parameters = [bytes(display_extent.wkb), bytes(display_extent.wkb)]
+        if scenario_zoi is not None and not scenario_zoi.is_empty:
+            priority = (
+                f'ORDER BY CASE WHEN ST_Intersects("{geometry}", ST_GeomFromWKB(?)) '
+                "THEN 0 ELSE 1 END "
+            )
+            parameters.append(bytes(scenario_zoi.wkb))
+        parameters.append(MAX_IMPACT_FEATURES + 1)
         rows = connection.execute(
             f'SELECT {selected}ST_AsWKB(ST_Intersection("{geometry}", ST_GeomFromWKB(?))) AS __wkb, '
             f'ST_Area("{geometry}") AS __feature_area_sqft, ST_Length("{geometry}") AS __feature_length_feet '
             f'FROM {qualified} '
-            f'WHERE ({predicate}) AND ST_Intersects("{geometry}", ST_GeomFromWKB(?)) LIMIT ?',
-            [bytes(display_extent.wkb), bytes(zoi.wkb), MAX_IMPACT_FEATURES + 1],
+            f'WHERE ({predicate}) AND ST_Intersects("{geometry}", ST_GeomFromWKB(?)) '
+            f"{priority}LIMIT ?",
+            parameters,
         ).fetchall()
         names = [str(item[0]) for item in connection.description]
     except duckdb.Error:
@@ -990,11 +1084,56 @@ def _query_impacts(
                 "label": label,
                 "source_table": table,
                 **influence,
+                "extends_beyond_extent": _extends_beyond_extent(
+                    feature_geometry,
+                    feature_area=feature_area,
+                    feature_length=feature_length,
+                ),
                 "geometry_2264": feature_geometry,
                 "attributes": {key: _json(value) for key, value in values.items()},
             }
         )
     return result
+
+
+def _table_exists(connection: duckdb.DuckDBPyConnection, schema: str, table: str) -> bool:
+    """True when the mirror publishes this table or view, matched case-insensitively.
+
+    DuckDB resolves identifiers case-insensitively, so the layer lists can keep one
+    spelling while mirrors carry the source's own casing (`ParcelJoin_py`).
+    """
+
+    statement = (
+        "SELECT 1 FROM information_schema.tables "
+        "WHERE lower(table_name) = lower(?) AND (? = '' OR lower(table_schema) = lower(?)) LIMIT 1"
+    )
+    try:
+        return bool(connection.execute(statement, [table, schema, schema]).fetchall())
+    except duckdb.Error:
+        return False
+
+
+def _extends_beyond_extent(
+    clipped_geometry: Any,
+    *,
+    feature_area: float | None,
+    feature_length: float | None,
+) -> bool:
+    """True when the map extent cut the feature, so the drawn shape is not its full outline.
+
+    The query returns the feature clipped to the extent alongside the unclipped area and
+    length, so the two measures answer this exactly - no second geometry has to travel.
+    Polygons are judged on area because clipping can leave a shorter or longer perimeter.
+    """
+
+    # Both measures come from the same projected CRS, but one is measured by DuckDB and
+    # the other by shapely, so only a difference above float noise counts as a real cut.
+    tolerance = 1e-4
+    if feature_area is not None and feature_area > 1e-6:
+        return float(clipped_geometry.area) < feature_area * (1 - tolerance)
+    if feature_length is not None and feature_length > 1e-6:
+        return float(clipped_geometry.length) < feature_length * (1 - tolerance)
+    return False
 
 
 def _feature_influence(
@@ -1075,16 +1214,51 @@ def _influence_footprint(features: list[dict[str, Any]]) -> Any | None:
     return None if footprint.is_empty else footprint
 
 
-def _display_clip_extent(asset_geometry: Any, zoi: Any) -> tuple[Any, str]:
-    """Return exactly twice the asset-wide ZOI envelope for every map mode."""
+def _display_extent_miles(value: Any) -> float:
+    if value is None or str(value).strip() == "":
+        return DEFAULT_DISPLAY_EXTENT_MILES
+    if isinstance(value, bool):
+        raise HTTPException(
+            status_code=422,
+            detail="Map extent must be from 0.1 to 1.0 mile in 0.1-mile steps.",
+        )
+    try:
+        extent = float(value)
+    except (TypeError, ValueError) as error:
+        raise HTTPException(
+            status_code=422,
+            detail="Map extent must be from 0.1 to 1.0 mile in 0.1-mile steps.",
+        ) from error
+    step_count = round(extent / DISPLAY_EXTENT_STEP_MILES)
+    if (
+        not math.isfinite(extent)
+        or extent < MINIMUM_DISPLAY_EXTENT_MILES
+        or extent > MAXIMUM_DISPLAY_EXTENT_MILES
+        or not math.isclose(
+            extent,
+            step_count * DISPLAY_EXTENT_STEP_MILES,
+            abs_tol=1e-9,
+        )
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Map extent must be from 0.1 to 1.0 mile in 0.1-mile steps.",
+        )
+    return round(extent, 1)
 
-    zoi_min_x, zoi_min_y, zoi_max_x, zoi_max_y = zoi.bounds
-    center_x = (zoi_min_x + zoi_max_x) / 2.0
-    center_y = (zoi_min_y + zoi_max_y) / 2.0
-    half_width = max(0.5, (zoi_max_x - zoi_min_x) / 2.0) * DISPLAY_EXTENT_SCALE
-    half_height = max(0.5, (zoi_max_y - zoi_min_y) / 2.0) * DISPLAY_EXTENT_SCALE
-    extent = box(center_x - half_width, center_y - half_height, center_x + half_width, center_y + half_height)
-    return extent, "zoi"
+
+def _display_clip_extent(center_geometry: Any, extent_miles: float) -> tuple[Any, str]:
+    """Return the selected square map extent centered on the active scenario."""
+
+    center = center_geometry.centroid
+    half_side = (extent_miles * FEET_PER_MILE) / 2.0
+    extent = box(
+        center.x - half_side,
+        center.y - half_side,
+        center.x + half_side,
+        center.y + half_side,
+    )
+    return extent, "map_extent"
 
 
 def _public_defect(defect: dict[str, Any], transformer: Transformer) -> dict[str, Any]:

@@ -58,6 +58,7 @@ export default function DesktopStartupSplash({
   const maintenanceStart = formatLocalClock(MAINTENANCE_START_HOUR * 60)
   const maintenanceEnd = formatLocalClock(MAINTENANCE_END_HOUR * 60)
   const updating = updateCountdownSeconds !== undefined || updateStarting
+  const networkConnectionRequired = Boolean(error?.includes('City network or VPN'))
 
   useEffect(() => {
     if (error || maintenance || updating) return
@@ -129,14 +130,14 @@ export default function DesktopStartupSplash({
         ) : error ? (
           <>
             <AlertTriangle className="desktop-startup-error-icon" aria-hidden="true" />
-            <h2>Portal could not start</h2>
+            <h2>{networkConnectionRequired ? 'Network connection required' : 'Portal could not start'}</h2>
             <p className="desktop-startup-error">{error}</p>
             <div className="desktop-startup-actions">
               <button onClick={onRetry} type="button">
-                <RotateCw size={18} /> Retry
+                <RotateCw size={18} /> {networkConnectionRequired ? 'Try again' : 'Retry'}
               </button>
               <button onClick={onExit} type="button">
-                <LogOut size={18} /> Exit
+                <LogOut size={18} /> {networkConnectionRequired ? 'Close Portal' : 'Exit'}
               </button>
             </div>
           </>

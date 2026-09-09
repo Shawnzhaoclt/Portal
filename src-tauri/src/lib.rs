@@ -8,7 +8,7 @@ use std::{
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{Mutex, OnceLock},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::http::{header, Request as HttpRequest, Response as HttpResponse, StatusCode};
 use tauri::Manager;
@@ -43,8 +43,12 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const MAINTENANCE_SPLASH_DURATION: Duration = Duration::from_secs(15);
 const MAINTENANCE_MONITOR_INTERVAL: Duration = Duration::from_secs(5);
+const DRIVE_MAPPING_TIMEOUT: Duration = Duration::from_secs(45);
+const DRIVE_MAPPING_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MAX_EXCEL_EXPORT_BYTES: usize = 100 * 1024 * 1024;
 const MAX_FILE_EXPORT_BYTES: usize = 512 * 1024 * 1024;
+
+const NETWORK_CONNECTION_REQUIRED_MESSAGE: &str = "Portal could not connect to the shared data location.\n\nCheck that you are connected to the City network or VPN, then select Try again.";
 
 fn is_scheduled_maintenance_hour(hour: u16) -> bool {
     hour >= 22 || hour < 5
@@ -1269,6 +1273,136 @@ fn configured_shared_data_root(settings: &serde_json::Value) -> Result<PathBuf, 
     Ok(PathBuf::from(expanded))
 }
 
+#[cfg(target_os = "windows")]
+fn mapped_drive_root(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    let Component::Prefix(prefix) = path.components().next()? else {
+        return None;
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => letter,
+        _ => return None,
+    };
+    Some(PathBuf::from(format!("{}:\\", char::from(drive))))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn mapped_drive_root(_path: &Path) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_executable() -> PathBuf {
+    env::var_os("SystemRoot")
+        .or_else(|| env::var_os("WINDIR"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe")
+}
+
+#[cfg(target_os = "windows")]
+fn drive_mapping_script() -> Option<PathBuf> {
+    env::var_os("APPDATA").map(|root| {
+        PathBuf::from(root)
+            .join("DriveMapping")
+            .join("mapDrives.ps1")
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn run_drive_mapping_script() -> Result<(), String> {
+    let script = drive_mapping_script()
+        .filter(|path| path.is_file())
+        .ok_or_else(|| NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string())?;
+    let powershell = powershell_executable();
+    if !powershell.is_file() {
+        return Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string());
+    }
+
+    let mut command = Command::new(&powershell);
+    command
+        .arg("-NoLogo")
+        .arg("-NoProfile")
+        .arg("-NonInteractive")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-File")
+        .arg(&script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
+        .spawn()
+        .map_err(|_| NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string())?;
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    eprintln!("Portal drive mapping script exited with status {status}.");
+                }
+                return Ok(());
+            }
+            Ok(None) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string());
+            }
+        }
+        if started.elapsed() >= DRIVE_MAPPING_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string());
+        }
+        thread::sleep(DRIVE_MAPPING_POLL_INTERVAL);
+    }
+}
+
+fn ensure_mapped_drive_available(path: &Path) -> Result<(), String> {
+    let Some(drive_root) = mapped_drive_root(path) else {
+        return Ok(());
+    };
+    if drive_root.is_dir() {
+        return if path.is_dir() {
+            Ok(())
+        } else {
+            Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string())
+        };
+    }
+
+    #[cfg(target_os = "windows")]
+    run_drive_mapping_script()?;
+
+    if drive_root.is_dir() && path.is_dir() {
+        Ok(())
+    } else {
+        Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string())
+    }
+}
+
+fn is_unavailable_business_sync_root(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .contains("business synchronization root is unavailable")
+}
+
+#[tauri::command]
+async fn prepare_network_access() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let settings = load_client_settings()?;
+        let shared_root = configured_shared_data_root(&settings)?;
+        ensure_mapped_drive_available(&shared_root)
+    })
+    .await
+    .map_err(|error| format!("Portal network preparation task failed: {error}"))?
+}
+
 /// The publication a test computer layers over production data, per channel.
 ///
 /// A test computer keeps reading the production tree and lays whatever the test
@@ -1615,6 +1749,7 @@ fn install_portal_update(app: tauri::AppHandle) -> Result<(), String> {
 fn startup_preflight() -> Result<DesktopStartupSession, String> {
     let settings = load_client_settings()?;
     let shared_root = configured_shared_data_root(&settings)?;
+    ensure_mapped_drive_available(&shared_root)?;
 
     let windows_identity = windows_identity()?;
     env::set_var("PORTAL_WINDOWS_EMAIL", &windows_identity.email);
@@ -1643,6 +1778,9 @@ fn startup_preflight() -> Result<DesktopStartupSession, String> {
                 .and_then(serde_json::Value::as_str)
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or("Portal could not initialize its local business data.");
+            if is_unavailable_business_sync_root(detail) {
+                return Err(NETWORK_CONNECTION_REQUIRED_MESSAGE.to_string());
+            }
             return Err(format!(
                 "Portal authenticated the signed-in Windows account, but could not synchronize its business data:\n\n{detail}\n\nOpen Portal Manager > Maintenance > Repository to validate the shared repository, then retry."
             ));
@@ -2380,6 +2518,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            prepare_network_access,
             data_cache_startup,
             data_cache_status,
             desktop_startup_session,
@@ -2408,9 +2547,9 @@ pub fn run() {
 mod tests {
     use super::{
         atomically_save_export, configure_system_database_access, file_response_range,
-        is_scheduled_maintenance_hour, manifest_allows_machine, normalize_update_channel,
-        packaged_application_version, publication_overlay_for_channel, release_root_for_channel,
-        save_excel_export,
+        is_scheduled_maintenance_hour, is_unavailable_business_sync_root,
+        manifest_allows_machine, normalize_update_channel, packaged_application_version,
+        publication_overlay_for_channel, release_root_for_channel, save_excel_export,
         validated_excel_export_file_name, validated_file_export, PortalReleaseManifest,
         PortalReleasePayload, INITIAL_MEDIA_CHUNK_BYTES,
     };
@@ -2424,6 +2563,31 @@ mod tests {
         assert!(is_scheduled_maintenance_hour(4));
         assert!(!is_scheduled_maintenance_hour(5));
         assert!(!is_scheduled_maintenance_hour(21));
+    }
+
+    #[test]
+    fn unavailable_business_sync_root_is_classified_as_a_network_error() {
+        assert!(is_unavailable_business_sync_root(
+            r"The business synchronization root is unavailable: G:\Strategic Planning\Planning\stm_risk_data\portal\data"
+        ));
+        assert!(!is_unavailable_business_sync_root(
+            "The local business database is invalid."
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn mapped_drive_root_is_extracted_from_a_windows_path() {
+        assert_eq!(
+            super::mapped_drive_root(std::path::Path::new(
+                r"G:\Strategic Planning\Planning\stm_risk_data"
+            )),
+            Some(std::path::PathBuf::from(r"G:\"))
+        );
+        assert_eq!(
+            super::mapped_drive_root(std::path::Path::new(r"\\server\share\folder")),
+            None
+        );
     }
 
     #[test]

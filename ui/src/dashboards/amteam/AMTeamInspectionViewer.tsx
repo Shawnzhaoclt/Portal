@@ -10,6 +10,8 @@ import {
   Download,
   FileText,
   Loader2,
+  Maximize2,
+  Minimize2,
   Pause,
   Play,
   Plus,
@@ -22,6 +24,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { fuzzyMatchScore } from './fuzzyMatch'
 import { formatDateOnly, formatDateTime } from '../../lib/dateTime'
+import { ERROR_MESSAGE_MINIMUM_DURATION_MS } from '../../lib/errorToast'
 import { appConfirm, appPrompt } from '../../components/messageDialogService'
 import { closeItpipesLogin, isDesktopRuntime, openExternalUrl, openItpipesLogin, saveExportAs } from '../../desktop/runtime'
 import {
@@ -84,6 +87,12 @@ type ObservationDefectSelection = {
   noHighScoreConfirmed: boolean
 }
 type ObservationDefectRole = '' | 'major' | 'other'
+type SnapshotPickerController = {
+  host: HTMLDivElement | null
+  activePickerId: string
+  open: (pickerId: string) => void
+  close: (pickerId: string) => void
+}
 type ObservationCardEntry = {
   cardKey: string
   observation: AmTeamObservation
@@ -104,6 +113,7 @@ type PipeReviewOption = {
 type ReviewNotice = {
   id: number
   message: string
+  kind: 'success' | 'error'
 }
 type PipeReviewInput = {
   cloggingPercent: string
@@ -137,21 +147,25 @@ type VideoSeekRequest = {
   videoPath: string
   timeSeconds: number
 }
-type DefectColumnKey = 'observation' | 'defect' | 'review' | 'extensive' | 'snapshot'
+type DefectColumnKey = 'observation' | 'defect' | 'review' | 'inReport' | 'extensive'
 type PipeObservationCacheEntry = {
   inspection: AmTeamInspection
   observations: AmTeamObservation[]
   media: AmTeamInspectionMedia
 }
 type SavedCctvReviewState = {
+  recordRevision: string
   selectedInspectionDateKey: string
   pipeGroups: AmTeamPipeInspectionGroup[]
   visiblePipeGroups: AmTeamPipeInspectionGroup[]
+  /** Saved pipes that current inspection data no longer covers, named for the reviewer. */
+  unmatchedPipeIds: string[]
   pipeObservationCache: Record<string, PipeObservationCacheEntry>
   pipeReviewInputs: Record<string, PipeReviewInput>
   observationDefectSelections: Record<string, ObservationDefectSelection>
   snapshotSelections: Record<string, string>
   extensiveDefectSelections: Record<string, boolean>
+  inReportSelections: Record<string, boolean>
   observationDefectCallouts: Record<string, string[]>
 }
 type ReportImage = {
@@ -221,20 +235,20 @@ const VIDEO_DEFECT_MIN_WIDTH = 320
 const VIDEO_DEFECT_TABLE_DEFAULT_WIDTH = 650
 const VIDEO_DEFECT_TABLE_MIN_WIDTH = 520
 const VIDEO_DEFECT_SPLITTER_WIDTH = 12
-const DEFECT_COLUMN_KEYS: DefectColumnKey[] = ['observation', 'defect', 'review', 'extensive', 'snapshot']
+const DEFECT_COLUMN_KEYS: DefectColumnKey[] = ['observation', 'defect', 'review', 'inReport', 'extensive']
 const DEFAULT_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
   observation: 109,
   defect: 300,
   review: 120,
+  inReport: 90,
   extensive: 75,
-  snapshot: 100,
 }
 const MIN_DEFECT_COLUMN_WIDTHS: Record<DefectColumnKey, number> = {
   observation: 60,
   defect: 200,
   review: 120,
+  inReport: 60,
   extensive: 50,
-  snapshot: 100,
 }
 const CCTV_REVIEW_LAYOUT_STORAGE_KEY = 'portal.cctv-review.workspace-layout.v1'
 
@@ -246,6 +260,7 @@ function FuzzyCalloutInput({
   placeholder = 'Select or enter',
   className = '',
   onChange,
+  commitOnEnter = false,
 }: {
   value: string
   options: string[]
@@ -254,11 +269,18 @@ function FuzzyCalloutInput({
   placeholder?: string
   className?: string
   onChange: (value: string) => void
+  /**
+   * Holds what is typed locally and reports it once, on Enter, on picking an option or
+   * on leaving the field. The chip list reuses this control with a permanently empty
+   * value, so reporting every keystroke turned each letter into its own chip.
+   */
+  commitOnEnter?: boolean
 }) {
   const listboxId = useId()
   const [isOpen, setOpen] = useState(false)
   const [activeIndex, setActiveIndex] = useState(-1)
   const [filterQuery, setFilterQuery] = useState('')
+  const [draft, setDraft] = useState('')
   const [menuStyle, setMenuStyle] = useState<CSSProperties | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const filteredOptions = useMemo(() => (
@@ -269,7 +291,10 @@ function FuzzyCalloutInput({
       .slice(0, 12)
       .map((entry) => entry.option)
   ), [filterQuery, options])
-  const hasExactMatch = options.some((option) => option.localeCompare(value, undefined, { sensitivity: 'accent' }) === 0)
+  const editedValue = commitOnEnter ? draft : value
+  const hasExactMatch = options.some((option) => (
+    option.localeCompare(editedValue, undefined, { sensitivity: 'accent' }) === 0
+  ))
 
   useEffect(() => {
     setActiveIndex(-1)
@@ -319,6 +344,7 @@ function FuzzyCalloutInput({
     setOpen(false)
     setActiveIndex(-1)
     setFilterQuery('')
+    setDraft('')
     window.requestAnimationFrame(() => inputRef.current?.focus())
   }
 
@@ -326,7 +352,13 @@ function FuzzyCalloutInput({
     <div
       className={`amteam-callout-combobox ${isOpen ? 'open' : ''} ${className}`.trim()}
       onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false)
+        if (event.currentTarget.contains(event.relatedTarget as Node | null)) return
+        setOpen(false)
+        if (!commitOnEnter) return
+        const pending = draft.trim()
+        setDraft('')
+        setFilterQuery('')
+        if (pending) onChange(pending)
       }}
     >
       <input
@@ -338,7 +370,7 @@ function FuzzyCalloutInput({
         aria-expanded={isOpen}
         aria-activedescendant={activeIndex >= 0 ? `${listboxId}-${activeIndex}` : undefined}
         autoComplete="off"
-        value={value}
+        value={editedValue}
         disabled={disabled}
         placeholder={placeholder}
         onFocus={(event) => {
@@ -347,8 +379,10 @@ function FuzzyCalloutInput({
           event.currentTarget.select()
         }}
         onChange={(event) => {
-          onChange(event.currentTarget.value)
-          setFilterQuery(event.currentTarget.value)
+          const nextValue = event.currentTarget.value
+          if (commitOnEnter) setDraft(nextValue)
+          else onChange(nextValue)
+          setFilterQuery(nextValue)
           setOpen(true)
         }}
         onKeyDown={(event) => {
@@ -363,10 +397,17 @@ function FuzzyCalloutInput({
           } else if (event.key === 'Enter' && isOpen && activeIndex >= 0) {
             event.preventDefault()
             selectValue(filteredOptions[activeIndex])
+          } else if (event.key === 'Enter' && commitOnEnter && draft.trim()) {
+            event.preventDefault()
+            selectValue(draft.trim())
           } else if (event.key === 'Escape') {
             event.preventDefault()
             setOpen(false)
             setActiveIndex(-1)
+            if (commitOnEnter) {
+              setDraft('')
+              setFilterQuery('')
+            }
           }
         }}
       />
@@ -392,9 +433,9 @@ function FuzzyCalloutInput({
         <div className="amteam-callout-menu" id={listboxId} role="listbox" style={menuStyle}>
           <button
             type="button"
-            className={`amteam-callout-option clear-option ${value ? '' : 'selected'}`.trim()}
+            className={`amteam-callout-option clear-option ${editedValue ? '' : 'selected'}`.trim()}
             role="option"
-            aria-selected={!value}
+            aria-selected={!editedValue}
             tabIndex={-1}
             onMouseDown={(event) => event.preventDefault()}
             onClick={() => selectValue('')}
@@ -408,7 +449,7 @@ function FuzzyCalloutInput({
               id={`${listboxId}-${index}`}
               key={option}
               role="option"
-              aria-selected={option === value}
+              aria-selected={option === editedValue}
               tabIndex={-1}
               onMouseEnter={() => setActiveIndex(index)}
               onMouseDown={(event) => event.preventDefault()}
@@ -525,6 +566,26 @@ function pipeScopedKey(pipeId: string, key: string) {
 
 function pipeIdFromScopedKey(key: string) {
   return key.split('::')[0] ?? ''
+}
+
+/**
+ * A distance group is decided once at least one of its observations is published in the
+ * report. Nothing published means the reviewer has to say so explicitly with Confirm,
+ * which is what keeps an untouched group from passing silently.
+ */
+function distanceGroupIncludedCount(
+  pipeId: string,
+  group: ObservationDistanceGroup,
+  inReportSelections: Record<string, boolean>,
+  selection?: ObservationDefectSelection,
+) {
+  return group.observations.reduce((count, observation, index) => {
+    const cardKey = observationCardKey(observation, index)
+    // A major defect is always published, even before its flag has been written.
+    const included = selection?.majorKey === cardKey
+      || Boolean(inReportSelections[pipeScopedKey(pipeId, cardKey)])
+    return included ? count + 1 : count
+  }, 0)
 }
 
 function distanceGroupHasHighAmScore(selection?: ObservationDefectSelection) {
@@ -720,6 +781,17 @@ function numericValue(value: AmTeamCellValue | undefined) {
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
 }
 
+/**
+ * Orders two cell values numerically. `numericValue` maps anything unparseable to
+ * Infinity, so subtracting would hand `sort` a NaN whenever both sides are unparseable.
+ */
+function compareNumericValues(left: AmTeamCellValue | undefined, right: AmTeamCellValue | undefined) {
+  const leftNumber = numericValue(left)
+  const rightNumber = numericValue(right)
+  if (leftNumber === rightNumber) return 0
+  return leftNumber < rightNumber ? -1 : 1
+}
+
 function observationSeekSeconds(observation: AmTeamObservation, video: AmTeamMediaAsset | null | undefined) {
   if (!video) return null
   const seconds = finiteNumberValue(observation.digital_time)
@@ -728,7 +800,7 @@ function observationSeekSeconds(observation: AmTeamObservation, video: AmTeamMed
 
 function isInteractiveEventTarget(target: EventTarget | null) {
   return target instanceof HTMLElement
-    && Boolean(target.closest('button,input,select,textarea,a,label,[role="button"]'))
+    && Boolean(target.closest('button,input,select,textarea,a,label,[contenteditable="true"],[role="button"],[role="textbox"]'))
 }
 
 function observationDistanceGroups(observations: AmTeamObservation[]) {
@@ -1374,8 +1446,7 @@ async function downloadReviewReportFile(report: ReviewReportFile, format: Review
 
   if (isDesktopRuntime()) {
     const bytes = new Uint8Array(await blob.arrayBuffer())
-    await saveExportAs(fileName, bytes, format, true)
-    return
+    return saveExportAs(fileName, bytes, format, true)
   }
 
   const link = document.createElement('a')
@@ -1385,9 +1456,16 @@ async function downloadReviewReportFile(report: ReviewReportFile, format: Review
   link.click()
   URL.revokeObjectURL(link.href)
   link.remove()
+  return fileName
 }
 
 async function saveReviewReportFile(report: ReviewReportFile) {
+  // Desktop reports are Word documents. Route them through the native Save As
+  // command so Windows opens the completed file with its registered Office app.
+  if (isDesktopRuntime()) {
+    return downloadReviewReportFile(report, 'docx')
+  }
+
   const pickerWindow = window as SaveFilePickerWindow
   const suggestedName = reportFileName(report.suggestedBaseName, 'docx')
 
@@ -1414,7 +1492,7 @@ async function saveReviewReportFile(report: ReviewReportFile) {
     const writable = await handle.createWritable()
     await writable.write(createReviewReportBlob(report, format))
     await writable.close()
-    return
+    return handle.name
   }
 
   const fallbackName = await appPrompt('Save report as .docx or .pdf', {
@@ -1422,11 +1500,11 @@ async function saveReviewReportFile(report: ReviewReportFile) {
     confirmLabel: 'Download',
     defaultValue: suggestedName,
   })
-  if (!fallbackName) return
+  if (!fallbackName) return null
   const format = reportFormatFromFileName(fallbackName)
   const downloadName = fallbackName.toLowerCase().endsWith(`.${format}`) ? fallbackName : reportFileName(fallbackName, format)
   const directDownloadReport = { ...report, suggestedBaseName: downloadName.replace(/\.[^.]+$/, '') }
-  await downloadReviewReportFile(directDownloadReport, format)
+  return downloadReviewReportFile(directDownloadReport, format)
 }
 
 function pipeGradeThreePlusCount(
@@ -1440,9 +1518,32 @@ function pipeGradeThreePlusCount(
   }, 0)
 }
 
-function observationReportText(observation: AmTeamObservation, isExtensive: boolean) {
-  const text = displayValue(observation.observation_text)
-  return isExtensive && text !== '-' ? `${text} (Extensive)` : text
+/** How many defects this pipe publishes - what the report is built from. */
+function pipePublishedDefectCount(
+  pipeId: string,
+  groupedObservations: ObservationDistanceGroup[],
+  inReportSelections: Record<string, boolean>,
+  observationDefectSelections: Record<string, ObservationDefectSelection>,
+) {
+  return groupedObservations.reduce((count, group) => {
+    const groupSelection = observationDefectSelections[pipeScopedKey(pipeId, group.key)]
+    return count + distanceGroupIncludedCount(pipeId, group, inReportSelections, groupSelection)
+  }, 0)
+}
+
+/** What a published defect prints when the reviewer entered no callout of its own. */
+function observationFallbackCallout(observation: AmTeamObservation) {
+  const code = displayValue(observation.code)
+  const grade = displayValue(observation.grade)
+  if (code === '-') return displayValue(observation.observation_text)
+  return grade === '-' ? code : `${code} (Grade ${grade})`
+}
+
+function defectCalloutReportTexts(callouts: string[], isExtensive: boolean) {
+  return callouts
+    .map((callout) => callout.trim())
+    .filter(Boolean)
+    .map((callout) => isExtensive ? `${callout} (Extensive)` : callout)
 }
 
 function sortedPipeGroupsForReport(
@@ -1451,6 +1552,7 @@ function sortedPipeGroupsForReport(
   pipeObservationCache: Record<string, PipeObservationCacheEntry>,
   pipeReviewInputs: Record<string, PipeReviewInput>,
   observationDefectSelections: Record<string, ObservationDefectSelection>,
+  inReportSelections: Record<string, boolean>,
 ) {
   return [...pipeGroups].sort((leftGroup, rightGroup) => {
     const reportSortInfo = (group: AmTeamPipeInspectionGroup) => {
@@ -1458,7 +1560,12 @@ function sortedPipeGroupsForReport(
       const cachedPipe = pipeObservationCache[pipeId]
       const inspection = cachedPipe?.inspection ?? inspectionForDate(group, selectedInspectionDateKey) ?? group.inspections[0]
       const groupedObservations = observationDistanceGroups(cachedPipe?.observations ?? [])
-      const defectsScoredCount = pipeGradeThreePlusCount(pipeId, groupedObservations, observationDefectSelections)
+      const defectsScoredCount = pipePublishedDefectCount(
+        pipeId,
+        groupedObservations,
+        inReportSelections,
+        observationDefectSelections,
+      )
       const cloggingPercent = cloggingPercentNumber(pipeReviewInputs[pipeId] ?? emptyPipeReviewInput())
       const assetId = reportAssetId(inspection).toLowerCase()
       const category = defectsScoredCount > 0 ? 0 : cloggingPercent > 0 ? 1 : 2
@@ -1483,6 +1590,8 @@ async function buildReviewReportFile({
   observationDefectSelections,
   snapshotSelections,
   extensiveDefectSelections,
+  inReportSelections,
+  observationDefectCallouts,
   mediaMode,
 }: {
   visiblePipeGroups: AmTeamPipeInspectionGroup[]
@@ -1492,6 +1601,8 @@ async function buildReviewReportFile({
   observationDefectSelections: Record<string, ObservationDefectSelection>
   snapshotSelections: Record<string, string>
   extensiveDefectSelections: Record<string, boolean>
+  inReportSelections: Record<string, boolean>
+  observationDefectCallouts: Record<string, string[]>
   mediaMode: MediaSourceMode
 }): Promise<ReviewReportFile> {
   const firstInspection = visiblePipeGroups
@@ -1520,6 +1631,7 @@ async function buildReviewReportFile({
     pipeObservationCache,
     pipeReviewInputs,
     observationDefectSelections,
+    inReportSelections,
   )
 
   for (const group of reportPipeGroups) {
@@ -1530,7 +1642,12 @@ async function buildReviewReportFile({
 
     const pipeReviewInput = pipeReviewInputs[pipeId] ?? emptyPipeReviewInput()
     const groupedPipeObservations = observationDistanceGroups(cachedPipe?.observations ?? [])
-    const defectsScoredCount = pipeGradeThreePlusCount(pipeId, groupedPipeObservations, observationDefectSelections)
+    const defectsScoredCount = pipePublishedDefectCount(
+      pipeId,
+      groupedPipeObservations,
+      inReportSelections,
+      observationDefectSelections,
+    )
     let defectNumber = 0
     const cloggingComment = pipeReviewInput.comments.trim()
 
@@ -1566,57 +1683,66 @@ async function buildReviewReportFile({
       continue
     }
 
-    for (const distanceGroup of groupedPipeObservations) {
+    // Every published defect is its own block, ordered by distance and then by MLO id,
+    // so two defects recorded at the same distance both reach the report instead of one
+    // of them being folded into the other's "additional codes".
+    const publishedDefects = groupedPipeObservations.flatMap((distanceGroup) => {
       const scopedGroupKey = pipeScopedKey(pipeId, distanceGroup.key)
       const selection = observationDefectSelections[scopedGroupKey] ?? emptyObservationDefectSelection()
-      if (!distanceGroupHasHighAmScore(selection)) continue
+      return distanceGroup.observations
+        .map((observation, index) => ({ observation, cardKey: observationCardKey(observation, index), selection }))
+        .filter(({ cardKey }) => (
+          selection.majorKey === cardKey
+          || Boolean(inReportSelections[pipeScopedKey(pipeId, cardKey)])
+        ))
+    })
+    publishedDefects.sort((left, right) => (
+      compareNumericValues(left.observation.distance, right.observation.distance)
+      || compareNumericValues(left.observation.mlo_id, right.observation.mlo_id)
+    ))
 
-      const observationEntries: ObservationCardEntry[] = distanceGroup.observations.map((observation, index) => ({
-        cardKey: observationCardKey(observation, index),
-        observation,
-        observationNumber: index + 1,
-      }))
-      const majorEntry = observationEntries.find((entry) => entry.cardKey === selection.majorKey)
-      if (!majorEntry) continue
-
+    for (const { observation, cardKey, selection } of publishedDefects) {
       defectNumber += 1
-      const scopedMajorCardKey = pipeScopedKey(pipeId, majorEntry.cardKey)
-      const selectedSnapshotUrl = snapshotSelections[scopedMajorCardKey]
-      let majorImage: ReportImage | null = null
+      const scopedCardKey = pipeScopedKey(pipeId, cardKey)
+      const selectedSnapshotUrl = snapshotSelections[scopedCardKey]
+      let defectImage: ReportImage | null = null
       if (isFrameSelection(selectedSnapshotUrl)) {
         const frameVideo = cachedPipe?.media.videos[0]
         const frameVideoUrls = frameVideo
           ? mediaAssetViewUrls(frameVideo, mediaMode, cachedPipe?.media.media_root ?? '')
           : []
-        majorImage = await fetchVideoFrameReportImageFromCandidates(
+        defectImage = await fetchVideoFrameReportImageFromCandidates(
           frameVideoUrls,
           frameSelectionSeconds(selectedSnapshotUrl),
         )
       } else {
-        const majorImageUrls = observationImageUrls(majorEntry.observation)
+        const defectImageUrls = observationImageUrls(observation)
         const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
-        const selectedApiImageUrl = majorImageUrls.find((imageUrl) => (
+        const selectedApiImageUrl = defectImageUrls.find((imageUrl) => (
           fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
-        )) ?? majorImageUrls[0]
-        const majorImageCandidates = selectedApiImageUrl
+        )) ?? defectImageUrls[0]
+        const defectImageCandidates = selectedApiImageUrl
           ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
           : uniqueMediaUrls([selectedSnapshotUrl])
-        majorImage = await fetchReportImageFromCandidates(majorImageCandidates)
+        defectImage = await fetchReportImageFromCandidates(defectImageCandidates)
       }
-      const otherEntries = observationEntries.filter((entry) => selection.otherKeys.includes(entry.cardKey))
-      const additionalCodes = otherEntries
-        .map((entry) => observationReportText(entry.observation, Boolean(extensiveDefectSelections[pipeScopedKey(pipeId, entry.cardKey)])))
-        .filter((text) => text && text !== '-')
+      // Every callout of this defect is printed; only the first used to survive.
+      const isExtensiveDefect = Boolean(extensiveDefectSelections[scopedCardKey])
+      const enteredCodes = defectCalloutReportTexts(
+        observationDefectCallouts[scopedCardKey] ?? [],
+        isExtensiveDefect,
+      )
+      const defectCodes = enteredCodes.length
+        ? enteredCodes
+        : defectCalloutReportTexts([observationFallbackCallout(observation)], isExtensiveDefect)
 
       addParagraph('')
       addParagraph(`Defect ${defectNumber}:`, { bold: true, fontSize: 12, outlineLevel: 3 })
-      if (majorImage) elements.push({ type: 'image', image: majorImage })
-      addParagraph(`Code: ${observationReportText(majorEntry.observation, Boolean(extensiveDefectSelections[scopedMajorCardKey]))}`)
-      addParagraph(`Distance: ${displayValue(majorEntry.observation.distance)}`)
+      if (defectImage) elements.push({ type: 'image', image: defectImage })
+      addParagraph(`Code: ${defectCodes.join('; ')}`)
+      addParagraph(`Distance: ${displayValue(observation.distance)}`)
+      // The AM score belongs to the distance group, so defects that share a group share it.
       addParagraph(`AM Score: ${selection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE}`)
-      if (additionalCodes.length > 0) {
-        addParagraph(`Additional Code(s): ${additionalCodes.join('; ')}`)
-      }
     }
 
     addParagraph('')
@@ -1669,15 +1795,16 @@ function savedPipeReviewInput(savedPipe: CctvReviewSavedPipe, media: AmTeamInspe
 
 async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<SavedCctvReviewState> {
   const detail = await fetchCctvReviewReportDetail(report.id)
+  const currentReport = detail.report
   if (!detail.pipes.length) {
     throw new Error('This report does not have saved pipe review data.')
   }
 
   const mediaMode = mediaSourceMode()
-  const selectedInspectionDateKey = inspectionOptionKeyFromReportDateText(report.inspection_date_text)
+  const selectedInspectionDateKey = inspectionOptionKeyFromReportDateText(currentReport.inspection_date_text)
   const pipeGroupsResponse = await fetchAmTeamPipeGroups(
-    report.binding_text,
-    report.binding_type === 'project_title' ? 'ProjectTitle' : 'Address',
+    currentReport.binding_text,
+    currentReport.binding_type === 'project_title' ? 'ProjectTitle' : 'Address',
   )
   const pipeGroupsById = new Map(pipeGroupsResponse.rows.map((group) => [recordId(group.ml_id), group]))
   const visiblePipeGroups: AmTeamPipeInspectionGroup[] = []
@@ -1686,17 +1813,25 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
   const observationDefectSelections: Record<string, ObservationDefectSelection> = {}
   const snapshotSelections: Record<string, string> = {}
   const extensiveDefectSelections: Record<string, boolean> = {}
+  const inReportSelections: Record<string, boolean> = {}
   const observationDefectCallouts: Record<string, string[]> = {}
 
+  const unmatchedPipeIds: string[] = []
   const savedPipeContexts = detail.pipes.flatMap((savedPipe) => {
     const pipeId = recordId(savedPipe.ml_id)
     const group = pipeGroupsById.get(pipeId)
-    if (!group) return []
+    if (!group) {
+      unmatchedPipeIds.push(pipeId)
+      return []
+    }
 
     const inspection = group.inspections.find((candidate) => recordId(candidate.mli_id) === savedPipe.mli_id)
       ?? inspectionForDate(group, selectedInspectionDateKey)
       ?? group.inspections[0]
-    if (!inspection) return []
+    if (!inspection) {
+      unmatchedPipeIds.push(pipeId)
+      return []
+    }
 
     return [{ savedPipe, pipeId, group, inspection }]
   })
@@ -1706,7 +1841,10 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
 
   for (const { savedPipe, pipeId, group, inspection } of savedPipeContexts) {
     const observationResponse = observationResponses[savedPipe.mli_id]
-    if (!observationResponse) continue
+    if (!observationResponse) {
+      unmatchedPipeIds.push(pipeId)
+      continue
+    }
 
     visiblePipeGroups.push(group)
     pipeObservationCache[pipeId] = {
@@ -1731,7 +1869,11 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
           groupSelection.otherKeys.push(savedObservation.source_observation_key)
         }
 
-        if (savedObservation.defect_role !== 'none') {
+        // Reports saved before the flag existed carry the decision in the role alone.
+        inReportSelections[scopedCardKey] = savedObservation.in_report
+          ?? savedObservation.defect_role !== 'none'
+
+        if (savedObservation.defect_role !== 'none' || inReportSelections[scopedCardKey]) {
           extensiveDefectSelections[scopedCardKey] = savedObservation.is_extensive
           const legacyGroupCallout = savedObservation.defect_role === 'major' ? savedDistanceGroup.defect_comment ?? '' : ''
           const savedCallout = savedObservation.defect_callout ?? legacyGroupCallout
@@ -1771,14 +1913,17 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
   }
 
   return {
+    recordRevision: currentReport.record_revision,
     selectedInspectionDateKey,
     pipeGroups: visiblePipeGroups,
     visiblePipeGroups,
+    unmatchedPipeIds,
     pipeObservationCache,
     pipeReviewInputs,
     observationDefectSelections,
     snapshotSelections,
     extensiveDefectSelections,
+    inReportSelections,
     observationDefectCallouts,
   }
 }
@@ -1794,9 +1939,11 @@ export async function downloadSavedCctvReviewReport(report: CctvReviewReport) {
     observationDefectSelections: savedState.observationDefectSelections,
     snapshotSelections: savedState.snapshotSelections,
     extensiveDefectSelections: savedState.extensiveDefectSelections,
+    inReportSelections: savedState.inReportSelections,
+    observationDefectCallouts: savedState.observationDefectCallouts,
     mediaMode,
   })
-  await downloadReviewReportFile(reportFile, 'docx')
+  return downloadReviewReportFile(reportFile, 'docx')
 }
 
 function inspectionDateOptionsFromGroups(groups: AmTeamPipeInspectionGroup[]) {
@@ -2026,7 +2173,8 @@ function InspectionDetailsDialog({
 }
 
 function SnapshotImageBox({
-  emptyMessage,
+  pickerId,
+  mloId,
   imageUrls,
   mediaMode,
   mediaRoot,
@@ -2034,8 +2182,10 @@ function SnapshotImageBox({
   selectedUrl,
   onSelectedUrlChange,
   currentFrame,
+  picker,
 }: {
-  emptyMessage?: string
+  pickerId: string
+  mloId: string
   imageUrls: string[]
   mediaMode: MediaSourceMode
   mediaRoot: string
@@ -2043,11 +2193,13 @@ function SnapshotImageBox({
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
   currentFrame?: ActiveVideoFrame | null
+  picker: SnapshotPickerController
 }) {
   const [failedSourceUrls, setFailedSourceUrls] = useState<string[]>([])
   const [sourceCandidateIndexes, setSourceCandidateIndexes] = useState<Record<string, number>>({})
   const [internalSelectedUrl, setInternalSelectedUrl] = useState<string | null>(null)
-  const [isPickerOpen, setIsPickerOpen] = useState(false)
+  const [previewImageUrl, setPreviewImageUrl] = useState('')
+  const isPickerOpen = picker.activePickerId === pickerId
   const mediaSources = imageUrls.map((sourceUrl) => ({
     sourceUrl,
     candidates: mediaViewUrls(sourceUrl, mediaMode, mediaRoot),
@@ -2074,111 +2226,128 @@ function SnapshotImageBox({
     setFailedSourceUrls([])
     setSourceCandidateIndexes({})
     setInternalSelectedUrl(null)
-    setIsPickerOpen(false)
+    setPreviewImageUrl('')
   }, [viewUrlKey])
 
   const frameSelected = isFrameSelection(currentSelectedUrl)
   if (visibleUrls.length === 0 && !currentFrame && !frameSelected) {
-    if (!emptyMessage) return null
-
-    return (
-      <span className="amteam-snapshot-link empty">{emptyMessage}</span>
-    )
+    return null
   }
 
   const updateSelectedUrl = (imageUrl: string) => {
     setInternalSelectedUrl(imageUrl)
     onSelectedUrlChange?.(imageUrl)
   }
+  const selectedSummary = frameSelected
+    ? `Selected frame ${formatMediaTime(frameSelectionSeconds(currentSelectedUrl ?? ''))}`
+    : selectedImageUrl
+      ? `Snapshot ${snapshotCountLabel} - ${selectedDisplayName}`
+      : 'No snapshot selected'
+
+  const pickerDialog = (
+    <div
+      className={`amteam-snapshot-picker${picker.host ? ' amteam-snapshot-picker-anchored' : ''}`}
+      role="dialog"
+      aria-modal={picker.host ? undefined : true}
+      aria-label="Select snapshot"
+      onClick={(event) => event.stopPropagation()}
+    >
+      <header>
+        <span className="amteam-snapshot-picker-identity">
+          <Camera size={14} aria-hidden="true" />
+          <span className="amteam-snapshot-picker-mlo-label">MLO {mloId}</span>
+        </span>
+        <strong className="amteam-snapshot-picker-current" title={frameSelected ? selectedSummary : selectedDisplayName || selectedSummary}>
+          {selectedSummary}
+        </strong>
+        <button type="button" aria-label="Close snapshot picker" onClick={() => picker.close(pickerId)}>
+          <X size={16} aria-hidden="true" />
+        </button>
+      </header>
+      <div className="amteam-snapshot-picker-body">
+        {currentFrame && !readOnly ? (
+          <button
+            type="button"
+            className={`amteam-snapshot-frame-option${frameSelected ? ' selected' : ''}`}
+            onClick={() => {
+              updateSelectedUrl(`${VIDEO_FRAME_SELECTION_PREFIX}${currentFrame.timeSeconds}`)
+            }}
+          >
+            <Camera size={14} aria-hidden="true" />
+            Use current video frame ({formatMediaTime(currentFrame.timeSeconds)})
+          </button>
+        ) : null}
+        <div className="amteam-snapshot-picker-grid">
+          {visibleSources.map(({ sourceUrl, candidates, viewUrl: imageUrl }, index) => (
+            <button
+              type="button"
+              key={sourceUrl}
+              className={imageUrl === selectedImageUrl ? 'selected' : ''}
+              aria-label={`${readOnly ? 'Preview' : 'Select and preview'} snapshot ${index + 1}: ${snapshotDisplayName(imageUrl)}`}
+              aria-pressed={imageUrl === selectedImageUrl}
+              title={snapshotDisplayName(imageUrl)}
+              onClick={() => {
+                if (!readOnly) updateSelectedUrl(imageUrl)
+                setPreviewImageUrl(imageUrl)
+              }}
+            >
+              <img
+                alt=""
+                loading="lazy"
+                src={imageUrl}
+                onError={() => {
+                  notifyItpipesMediaError(imageUrl)
+                  const currentCandidateIndex = sourceCandidateIndexes[sourceUrl] ?? 0
+                  if (currentCandidateIndex + 1 < candidates.length) {
+                    setSourceCandidateIndexes((currentIndexes) => ({
+                      ...currentIndexes,
+                      [sourceUrl]: currentCandidateIndex + 1,
+                    }))
+                    return
+                  }
+                  setFailedSourceUrls((current) => (
+                    current.includes(sourceUrl) ? current : [...current, sourceUrl]
+                  ))
+                }}
+              />
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  )
 
   return (
-    <div className="amteam-snapshot-selector">
-      <button
-        type="button"
-        className="amteam-snapshot-link"
-        disabled={readOnly}
-        title={`${selectedDisplayName} (${snapshotCountLabel})`}
-        onClick={() => setIsPickerOpen(true)}
-      >
-        <span>{frameSelected ? `Frame ${formatMediaTime(frameSelectionSeconds(currentSelectedUrl ?? ''))}` : 'Snapshot'}</span>
-        {!frameSelected && visibleUrls.length > 0 ? (
-          <span className="amteam-snapshot-count" title="Current snapshot / total snapshots">
-            ({snapshotCountLabel})
-          </span>
-        ) : null}
-      </button>
-
-      {isPickerOpen && !readOnly ? (
-        <div className="amteam-snapshot-picker-backdrop" role="presentation" onClick={() => setIsPickerOpen(false)}>
+    <>
+      {isPickerOpen ? (
+        picker.host ? createPortal(pickerDialog, picker.host) : (
+          <div className="amteam-snapshot-picker-backdrop" role="presentation" onClick={() => picker.close(pickerId)}>
+            {pickerDialog}
+          </div>
+        )
+      ) : null}
+      {previewImageUrl ? createPortal(
+        <div className="amteam-snapshot-preview-backdrop" role="presentation" onClick={() => setPreviewImageUrl('')}>
           <div
-            className="amteam-snapshot-picker"
+            className="amteam-snapshot-preview-dialog"
             role="dialog"
             aria-modal="true"
-            aria-label="Select snapshot"
+            aria-label={`Snapshot preview for MLO ${mloId}`}
             onClick={(event) => event.stopPropagation()}
           >
             <header>
-              <span>
-                <Camera size={15} aria-hidden="true" />
-                Select Snapshot
-              </span>
-              <strong>{visibleUrls.length.toLocaleString()}</strong>
-              <button type="button" aria-label="Close snapshot picker" onClick={() => setIsPickerOpen(false)}>
-                <X size={16} aria-hidden="true" />
+              <span>MLO {mloId}</span>
+              <strong title={snapshotDisplayName(previewImageUrl)}>{snapshotDisplayName(previewImageUrl)}</strong>
+              <button type="button" aria-label="Close snapshot preview" onClick={() => setPreviewImageUrl('')}>
+                <X size={18} aria-hidden="true" />
               </button>
             </header>
-            {currentFrame ? (
-              <button
-                type="button"
-                className={`amteam-snapshot-frame-option${frameSelected ? ' selected' : ''}`}
-                onClick={() => {
-                  updateSelectedUrl(`${VIDEO_FRAME_SELECTION_PREFIX}${currentFrame.timeSeconds}`)
-                  setIsPickerOpen(false)
-                }}
-              >
-                <Camera size={14} aria-hidden="true" />
-                Use current video frame ({formatMediaTime(currentFrame.timeSeconds)})
-              </button>
-            ) : null}
-            <div className="amteam-snapshot-picker-grid">
-              {visibleSources.map(({ sourceUrl, candidates, viewUrl: imageUrl }, index) => (
-                <button
-                  type="button"
-                  key={sourceUrl}
-                  className={imageUrl === selectedImageUrl ? 'selected' : ''}
-                  aria-label={`Snapshot ${index + 1}: ${snapshotDisplayName(imageUrl)}`}
-                  title={snapshotDisplayName(imageUrl)}
-                  onClick={() => {
-                    updateSelectedUrl(imageUrl)
-                    setIsPickerOpen(false)
-                  }}
-                >
-                  <img
-                    alt=""
-                    loading="lazy"
-                    src={imageUrl}
-                    onError={() => {
-                      notifyItpipesMediaError(imageUrl)
-                      const currentCandidateIndex = sourceCandidateIndexes[sourceUrl] ?? 0
-                      if (currentCandidateIndex + 1 < candidates.length) {
-                        setSourceCandidateIndexes((currentIndexes) => ({
-                          ...currentIndexes,
-                          [sourceUrl]: currentCandidateIndex + 1,
-                        }))
-                        return
-                      }
-                      setFailedSourceUrls((current) => (
-                        current.includes(sourceUrl) ? current : [...current, sourceUrl]
-                      ))
-                    }}
-                  />
-                </button>
-              ))}
-            </div>
+            <img src={previewImageUrl} alt={`Snapshot for MLO ${mloId}`} />
           </div>
-        </div>
+        </div>,
+        document.fullscreenElement ?? document.body,
       ) : null}
-    </div>
+    </>
   )
 }
 
@@ -2190,6 +2359,8 @@ function ObservationImage({
   selectedUrl,
   onSelectedUrlChange,
   currentFrame,
+  picker,
+  pickerId,
 }: {
   mediaMode: MediaSourceMode
   mediaRoot: string
@@ -2198,6 +2369,8 @@ function ObservationImage({
   selectedUrl?: string
   onSelectedUrlChange?: (url: string) => void
   currentFrame?: ActiveVideoFrame | null
+  picker: SnapshotPickerController
+  pickerId: string
 }) {
   const imageUrls = observationImageUrls(observation)
   return (
@@ -2209,6 +2382,9 @@ function ObservationImage({
       selectedUrl={selectedUrl}
       onSelectedUrlChange={onSelectedUrlChange}
       currentFrame={currentFrame}
+      picker={picker}
+      pickerId={pickerId}
+      mloId={displayValue(observation.mlo_id)}
     />
   )
 }
@@ -2297,6 +2473,7 @@ function InspectionVideoPlayer({
   seekRequest,
   onFrameChange,
   trailingAction,
+  snapshotPickerHostRef,
 }: {
   mediaMode: MediaSourceMode
   mediaRoot: string
@@ -2305,13 +2482,17 @@ function InspectionVideoPlayer({
   onFrameChange: (frame: ActiveVideoFrame | null) => void
   /** Rendered at the end of the transport bar, beside the speed selector. */
   trailingAction?: ReactNode
+  snapshotPickerHostRef: (node: HTMLDivElement | null) => void
 }) {
+  const playerRef = useRef<HTMLElement | null>(null)
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const [selectedVideoPath, setSelectedVideoPath] = useState('')
   const [isPlaying, setIsPlaying] = useState(false)
   const [duration, setDuration] = useState(0)
   const [currentTime, setCurrentTime] = useState(0)
   const [playbackRate, setPlaybackRate] = useState(1)
+  const [isFullscreen, setIsFullscreen] = useState(false)
+  const [useLargePlayerFallback, setUseLargePlayerFallback] = useState(false)
   const [pendingSeekRequest, setPendingSeekRequest] = useState<VideoSeekRequest | null>(null)
   const [isUsingApiFallback, setUsingApiFallback] = useState(false)
 
@@ -2321,6 +2502,23 @@ function InspectionVideoPlayer({
   )
   const selectedVideoUrls = selectedVideo ? mediaAssetViewUrls(selectedVideo, mediaMode, mediaRoot) : []
   const selectedVideoUrl = selectedVideoUrls[isUsingApiFallback ? selectedVideoUrls.length - 1 : 0] ?? ''
+
+  useEffect(() => {
+    const updateFullscreenState = () => {
+      setIsFullscreen(document.fullscreenElement === playerRef.current)
+    }
+    document.addEventListener('fullscreenchange', updateFullscreenState)
+    return () => document.removeEventListener('fullscreenchange', updateFullscreenState)
+  }, [])
+
+  useEffect(() => {
+    if (!useLargePlayerFallback) return undefined
+    const closeFallbackWithEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setUseLargePlayerFallback(false)
+    }
+    window.addEventListener('keydown', closeFallbackWithEscape)
+    return () => window.removeEventListener('keydown', closeFallbackWithEscape)
+  }, [useLargePlayerFallback])
 
   useEffect(() => {
     setSelectedVideoPath((currentPath) => {
@@ -2394,7 +2592,54 @@ function InspectionVideoPlayer({
     })
   }, [currentTime, duration, onFrameChange, selectedVideo])
 
+  useEffect(() => {
+    const togglePlaybackWithSpacebar = (event: KeyboardEvent) => {
+      if (event.code !== 'Space' || event.repeat) return
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+      if (isInteractiveEventTarget(event.target)) return
+      if (document.querySelector('[aria-modal="true"], dialog[open]')) return
+
+      const video = videoRef.current
+      if (!video || !selectedVideo) return
+
+      event.preventDefault()
+      if (video.paused || video.ended) {
+        if (video.ended) video.currentTime = 0
+        video.playbackRate = playbackRate
+        void video.play().catch(() => setIsPlaying(false))
+      } else {
+        video.pause()
+      }
+    }
+
+    window.addEventListener('keydown', togglePlaybackWithSpacebar)
+    return () => window.removeEventListener('keydown', togglePlaybackWithSpacebar)
+  }, [playbackRate, selectedVideo])
+
   if (!videos.length || !selectedVideo) return null
+
+  const enterLargePlayer = () => {
+    const player = playerRef.current
+    if (!player) return
+    if (player.requestFullscreen) {
+      void player.requestFullscreen().catch(() => setUseLargePlayerFallback(true))
+      return
+    }
+    setUseLargePlayerFallback(true)
+  }
+
+  const leaveLargePlayer = () => {
+    if (document.fullscreenElement === playerRef.current) {
+      void document.exitFullscreen()
+      return
+    }
+    setUseLargePlayerFallback(false)
+  }
+
+  const toggleLargePlayer = () => {
+    if (isFullscreen || useLargePlayerFallback) leaveLargePlayer()
+    else enterLargePlayer()
+  }
 
   const playVideo = () => {
     const video = videoRef.current
@@ -2432,7 +2677,20 @@ function InspectionVideoPlayer({
   }
 
   return (
-    <section className="amteam-video-player">
+    <>
+      {useLargePlayerFallback ? createPortal(
+        <button
+          type="button"
+          className="amteam-video-large-backdrop"
+          aria-label="Close large video player"
+          onClick={leaveLargePlayer}
+        />,
+        document.body,
+      ) : null}
+    <section
+      className={`amteam-video-player${useLargePlayerFallback ? ' large-player-fallback' : ''}`}
+      ref={playerRef}
+    >
       <header>
         <span>Inspection video</span>
         {videos.length > 1 ? (
@@ -2458,34 +2716,48 @@ function InspectionVideoPlayer({
         )}
       </header>
 
-      <video
-        className="amteam-video-frame"
-        key={selectedVideo.relative_path}
-        preload="metadata"
-        playsInline
-        ref={videoRef}
-        src={selectedVideoUrl}
-        onEnded={() => setIsPlaying(false)}
-        onError={() => {
-          notifyItpipesMediaError(selectedVideoUrl)
-          if (!isUsingApiFallback && selectedVideoUrls.length > 1) {
-            setUsingApiFallback(true)
-          }
-        }}
-        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
-        onPause={() => setIsPlaying(false)}
-        onPlay={() => setIsPlaying(true)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime || 0)}
-      >
-        Your browser does not support video playback.
-      </video>
+      <div className="amteam-video-stage">
+        <video
+          className="amteam-video-frame"
+          key={selectedVideo.relative_path}
+          preload="metadata"
+          playsInline
+          ref={videoRef}
+          src={selectedVideoUrl}
+          onDoubleClick={toggleLargePlayer}
+          onEnded={() => setIsPlaying(false)}
+          onError={() => {
+            notifyItpipesMediaError(selectedVideoUrl)
+            if (!isUsingApiFallback && selectedVideoUrls.length > 1) {
+              setUsingApiFallback(true)
+            }
+          }}
+          onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || 0)}
+          onPause={() => setIsPlaying(false)}
+          onPlay={() => setIsPlaying(true)}
+          onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime || 0)}
+        >
+          Your browser does not support video playback.
+        </video>
+        <button
+          type="button"
+          className="amteam-video-expand-button"
+          aria-label={isFullscreen || useLargePlayerFallback ? 'Close large video player' : 'Open large video player'}
+          title={isFullscreen || useLargePlayerFallback ? 'Exit large player (Esc)' : 'Open large player (double-click video)'}
+          onClick={toggleLargePlayer}
+        >
+          {isFullscreen || useLargePlayerFallback
+            ? <Minimize2 size={20} aria-hidden="true" />
+            : <Maximize2 size={20} aria-hidden="true" />}
+        </button>
+      </div>
 
       <div className="amteam-video-controls">
         <div className="amteam-video-buttons">
-          <button type="button" onClick={playVideo} disabled={isPlaying} title="Play" aria-label="Play">
+          <button type="button" onClick={playVideo} disabled={isPlaying} title="Play (Spacebar)" aria-label="Play">
             <Play size={18} />
           </button>
-          <button type="button" onClick={pauseVideo} disabled={!isPlaying} title="Pause" aria-label="Pause">
+          <button type="button" onClick={pauseVideo} disabled={!isPlaying} title="Pause (Spacebar)" aria-label="Pause">
             <Pause size={18} />
           </button>
           <button type="button" onClick={stopVideo} title="Stop" aria-label="Stop">
@@ -2522,7 +2794,9 @@ function InspectionVideoPlayer({
 
         {trailingAction}
       </div>
+      <div className="amteam-snapshot-picker-host" ref={snapshotPickerHostRef} />
     </section>
+    </>
   )
 }
 
@@ -2549,6 +2823,7 @@ function PipeDefectReviewPanel({
   onNextPipe,
   onGenerateReport,
   generateReportLabel,
+  reportBusy,
   onShow3d,
   canDownloadExport,
   onDownloadExport,
@@ -2576,6 +2851,7 @@ function PipeDefectReviewPanel({
   onNextPipe: () => void
   onGenerateReport: () => void
   generateReportLabel: string
+  reportBusy: boolean
   onShow3d: () => void
   canDownloadExport: boolean
   onDownloadExport: () => void
@@ -2727,14 +3003,14 @@ function PipeDefectReviewPanel({
             3D view
           </button>
           {!readOnly ? (
-            <button type="button" className="report" onClick={onGenerateReport}>
+            <button type="button" className="report" disabled={reportBusy} onClick={onGenerateReport}>
               {generateReportLabel}
             </button>
           ) : null}
           <button
             type="button"
             className="download-export"
-            disabled={!canDownloadExport}
+            disabled={!canDownloadExport || reportBusy}
             onClick={onDownloadExport}
           >
             <Download size={15} aria-hidden="true" />
@@ -2867,11 +3143,15 @@ export default function AMTeamInspectionViewer({
   const [reviewedPipeIds, setReviewedPipeIds] = useState<Record<string, boolean>>({})
   const [distanceGroupValidationFailures, setDistanceGroupValidationFailures] = useState<Record<string, boolean>>({})
   const [reviewNotice, setReviewNotice] = useState<ReviewNotice | null>(null)
+  // Set only while a saved report is open; null puts the viewer back on date filtering.
+  const [savedPipeOrder, setSavedPipeOrder] = useState<string[] | null>(null)
   const [generatedReviewReport, setGeneratedReviewReport] = useState<ReviewReportFile | null>(null)
   const [reportProgressMessage, setReportProgressMessage] = useState('')
+  const [reportRecordRevision, setReportRecordRevision] = useState<string | null>(savedReport?.record_revision ?? null)
   const [collapsedDistanceGroups, setCollapsedDistanceGroups] = useState<Record<string, boolean>>({})
   const [snapshotSelections, setSnapshotSelections] = useState<Record<string, string>>({})
   const [extensiveDefectSelections, setExtensiveDefectSelections] = useState<Record<string, boolean>>({})
+  const [inReportSelections, setInReportSelections] = useState<Record<string, boolean>>({})
   const [observationDefectCallouts, setObservationDefectCallouts] = useState<Record<string, string[]>>({})
   const [observationCodes, setObservationCodes] = useState<PortalDictionaryItem[]>([])
   const [isAddObservationOpen, setAddObservationOpen] = useState(false)
@@ -2879,6 +3159,8 @@ export default function AMTeamInspectionViewer({
   const [addObservationBusy, setAddObservationBusy] = useState(false)
   const [addObservationError, setAddObservationError] = useState('')
   const [activeVideoFrame, setActiveVideoFrame] = useState<ActiveVideoFrame | null>(null)
+  const [snapshotPickerHost, setSnapshotPickerHost] = useState<HTMLDivElement | null>(null)
+  const [activeSnapshotPickerId, setActiveSnapshotPickerId] = useState('')
   const [videoSeekRequest, setVideoSeekRequest] = useState<VideoSeekRequest | null>(null)
   const [focusedObservationKey, setFocusedObservationKey] = useState('')
   const [selectedObservationDetails, setSelectedObservationDetails] = useState<ObservationDetailsSelection | null>(null)
@@ -2890,11 +3172,19 @@ export default function AMTeamInspectionViewer({
   )
   const documentRef = useRef<HTMLDivElement | null>(null)
   const reviewNoticeIdRef = useRef(0)
+  const reportSaveInProgressRef = useRef(false)
   const initialSearchLoadedRef = useRef(false)
 
-  function showReviewNotice(message: string) {
+  const snapshotPicker: SnapshotPickerController = {
+    host: snapshotPickerHost,
+    activePickerId: activeSnapshotPickerId,
+    open: setActiveSnapshotPickerId,
+    close: (pickerId) => setActiveSnapshotPickerId((currentId) => currentId === pickerId ? '' : currentId),
+  }
+
+  function showReviewNotice(message: string, kind: ReviewNotice['kind'] = 'success') {
     reviewNoticeIdRef.current += 1
-    setReviewNotice({ id: reviewNoticeIdRef.current, message })
+    setReviewNotice({ id: reviewNoticeIdRef.current, message, kind })
   }
 
   function clearReviewNotice() {
@@ -2927,6 +3217,7 @@ export default function AMTeamInspectionViewer({
     setCollapsedDistanceGroups({})
     setSnapshotSelections({})
     setExtensiveDefectSelections({})
+    setInReportSelections({})
     setObservationDefectCallouts({})
     setActiveVideoFrame(null)
     setVideoSeekRequest(null)
@@ -2943,7 +3234,7 @@ export default function AMTeamInspectionViewer({
     if (!reviewNotice) return undefined
     const timeoutId = window.setTimeout(() => {
       setReviewNotice((currentNotice) => currentNotice?.id === reviewNotice.id ? null : currentNotice)
-    }, 3000)
+    }, reviewNotice.kind === 'error' ? ERROR_MESSAGE_MINIMUM_DURATION_MS : 3_000)
     return () => window.clearTimeout(timeoutId)
   }, [reviewNotice])
 
@@ -3052,6 +3343,10 @@ export default function AMTeamInspectionViewer({
             [scopedCardKey]: seeded ? [seeded] : [],
           }
         })
+
+        // Rule: a major defect is always in the report. The reverse does not hold, so
+        // the checkbox stays free for every other observation.
+        setInReportSelections((currentInReport) => ({ ...currentInReport, [scopedCardKey]: true }))
 
         return {
           ...currentSelections,
@@ -3284,7 +3579,7 @@ export default function AMTeamInspectionViewer({
       clearGeneratedReviewReport()
       showReviewNotice('Observation removed.')
     } catch (error) {
-      showReviewNotice(error instanceof Error ? error.message : 'The observation could not be removed.')
+      showReviewNotice(error instanceof Error ? error.message : 'The observation could not be removed.', 'error')
     }
   }
 
@@ -3385,6 +3680,26 @@ export default function AMTeamInspectionViewer({
     })
   }
 
+  // A major defect is always published, so its checkbox is fixed rather than toggled.
+  function toggleObservationInReport(cardKey: string) {
+    if (readOnly) return
+    markWorkspaceDirty()
+    clearGeneratedReviewReport()
+    setInReportSelections((currentSelections) => {
+      const nextIncluded = !currentSelections[cardKey]
+      // A published defect prints a Code, so it is seeded the same way a scored one is
+      // rather than reaching the report with nothing to print.
+      if (nextIncluded) {
+        setObservationDefectCallouts((currentCallouts) => {
+          if (currentCallouts[cardKey]?.length) return currentCallouts
+          const seeded = pipeDefectCalloutOptions[0]
+          return { ...currentCallouts, [cardKey]: seeded ? [seeded] : [] }
+        })
+      }
+      return { ...currentSelections, [cardKey]: nextIncluded }
+    })
+  }
+
   function toggleObservationExtensive(cardKey: string) {
     if (readOnly) return
     markWorkspaceDirty()
@@ -3403,7 +3718,11 @@ export default function AMTeamInspectionViewer({
     clearDistanceGroupValidationFailure(groupKey)
     const pipeId = pipeIdFromScopedKey(groupKey)
     const currentSelection = observationDefectSelections[groupKey] ?? emptyObservationDefectSelection()
-    if (!distanceGroupHasHighAmScore(currentSelection) && !currentSelection.noHighScoreConfirmed) {
+    const currentGroup = groupedObservations.find((group) => pipeScopedKey(selectedPipeId, group.key) === groupKey)
+    const currentIncluded = currentGroup
+      ? distanceGroupIncludedCount(pipeId, currentGroup, inReportSelections, currentSelection)
+      : 0
+    if (currentIncluded === 0 && !currentSelection.noHighScoreConfirmed) {
       setCollapsedDistanceGroups((currentGroups) => ({
         ...currentGroups,
         [groupKey]: !currentGroups[groupKey],
@@ -3411,7 +3730,7 @@ export default function AMTeamInspectionViewer({
     }
     setObservationDefectSelections((currentSelections) => {
       const currentGroupSelection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
-      if (distanceGroupHasHighAmScore(currentGroupSelection)) return currentSelections
+      if (currentIncluded > 0) return currentSelections
       const nextIsConfirmed = !currentGroupSelection.noHighScoreConfirmed
       if (nextIsConfirmed) {
         setExtensiveDefectSelections((currentExtensiveSelections) => {
@@ -3465,7 +3784,7 @@ export default function AMTeamInspectionViewer({
     if (currentIndex < 0) return null
     const currentPipeReviewInput = pipeReviewInputs[selectedPipeId] ?? emptyPipeReviewInput()
     if (!isValidCloggingPercent(currentPipeReviewInput.cloggingPercent)) {
-      showReviewNotice('Clogging percent must be 0 through 100 in increments of 5.')
+      showReviewNotice('Clogging percent must be 0 through 100 in increments of 5.', 'error')
       return null
     }
     if (pipeReviewHasClogging(currentPipeReviewInput) && !pipeReviewHasCloggingSnapshot(currentPipeReviewInput)) {
@@ -3473,12 +3792,14 @@ export default function AMTeamInspectionViewer({
         inspectionMedia.videos.length
           ? `Capture the clogging video frame before ${blockedActionLabel}.`
           : 'Clogging percent is greater than 0, but no inspection video is available for the required frame.',
+        'error',
       )
       return null
     }
     const missingConfirmationGroups = groupedObservations.filter((group) => {
       const groupSelection = observationDefectSelections[pipeScopedKey(selectedPipeId, group.key)] ?? emptyObservationDefectSelection()
-      return !distanceGroupHasHighAmScore(groupSelection) && !groupSelection.noHighScoreConfirmed
+      const included = distanceGroupIncludedCount(selectedPipeId, group, inReportSelections, groupSelection)
+      return included === 0 && !groupSelection.noHighScoreConfirmed
     })
 
     if (missingConfirmationGroups.length > 0) {
@@ -3488,9 +3809,10 @@ export default function AMTeamInspectionViewer({
         ...Object.fromEntries(missingConfirmationGroups.map((group) => [pipeScopedKey(selectedPipeId, group.key), false])),
       }))
       showReviewNotice(
-        `Confirm no AM score greater or equal to 3 for ${missingConfirmationGroups.length.toLocaleString()} distance ${
+        `Include a defect in the report, or confirm none, for ${missingConfirmationGroups.length.toLocaleString()} distance ${
           missingConfirmationGroups.length === 1 ? 'group' : 'groups'
         } before ${blockedActionLabel}.`,
+        'error',
       )
       return null
     }
@@ -3525,7 +3847,7 @@ export default function AMTeamInspectionViewer({
       binding_type: reportSaveContext.bindingType,
       binding_text: reportSaveContext.bindingText,
       inspection_date_text: reportSaveContext.inspectionDateText,
-      record_revision: savedReport?.record_revision ?? null,
+      record_revision: reportRecordRevision,
       memo,
       pipes: visiblePipeGroups.map((group) => {
         const pipeId = recordId(group.ml_id)
@@ -3560,12 +3882,15 @@ export default function AMTeamInspectionViewer({
                     ? 'other'
                     : 'none'
                 const defectCallout = formatDefectCallouts(observationDefectCallouts[scopedCardKey] ?? [])
+                const isPublished = defectRole === 'major' || Boolean(inReportSelections[scopedCardKey])
 
                 return {
                   mlo_id: recordId(observation.mlo_id) || null,
                   source_observation_key: cardKey,
                   defect_role: defectRole,
-                  is_extensive: defectRole !== 'none' && Boolean(extensiveDefectSelections[scopedCardKey]),
+                  in_report: isPublished,
+                  is_extensive: (isPublished || defectRole !== 'none')
+                    && Boolean(extensiveDefectSelections[scopedCardKey]),
                   selected_picture_file_name: selectedSnapshotFileName(
                     observation,
                     scopedCardKey,
@@ -3580,7 +3905,9 @@ export default function AMTeamInspectionViewer({
                     selectedMediaMode,
                     mediaRoot,
                   ),
-                  defect_callout: defectRole !== 'none' && defectCallout ? defectCallout : null,
+                  // Published defects carry their own Code in the report, so the callout
+                  // is kept for them as well as for scored ones.
+                  defect_callout: (isPublished || defectRole !== 'none') && defectCallout ? defectCallout : null,
                 }
               }),
             }
@@ -3591,29 +3918,33 @@ export default function AMTeamInspectionViewer({
   }
 
   async function saveReviewDraft() {
-    if (readOnly || !reportSaveContext) return
+    if (readOnly || !reportSaveContext || reportSaveInProgressRef.current) return
+    reportSaveInProgressRef.current = true
     setReportProgressMessage('Saving report draft.')
     try {
       const savePayload = buildCctvReviewReportSavePayload(null)
       if (!savePayload) return
       const saveResponse = await saveCctvReviewReport(savePayload)
+      setReportRecordRevision(saveResponse.report.record_revision)
       onReportSaved?.(saveResponse.report)
       clearReviewNotice()
     } catch (error) {
-      showReviewNotice(error instanceof Error ? error.message : 'Unable to save the report draft.')
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to save the report draft.', 'error')
     } finally {
+      reportSaveInProgressRef.current = false
       setReportProgressMessage('')
     }
   }
 
   async function generateReviewReport() {
-    if (readOnly) return
+    if (readOnly || reportSaveInProgressRef.current) return
     const validation = validateAndMarkCurrentPipeReviewed('generating the report')
     if (!validation) return
     const unvalidatedPipeCount = visiblePipeGroups.filter((group) => !validation.reviewedPipeIds[recordId(group.ml_id)]).length
     if (unvalidatedPipeCount > 0) {
       showReviewNotice(
         `Validate ${unvalidatedPipeCount.toLocaleString()} remaining ${unvalidatedPipeCount === 1 ? 'pipe' : 'pipes'} before generating the report.`,
+        'error',
       )
       return
     }
@@ -3622,11 +3953,13 @@ export default function AMTeamInspectionViewer({
       ? await appPrompt('Memo for this generated report (optional)', { title: 'Generate CCTV review report', confirmLabel: 'Generate report' })
       : ''
     if (reportSaveContext && memo === null) return
+    reportSaveInProgressRef.current = true
     setReportProgressMessage(reportSaveContext ? 'Saving report data.' : 'Generating report file.')
     try {
       const savePayload = buildCctvReviewReportSavePayload(memo)
       if (savePayload) {
         const saveResponse = await saveCctvReviewReport(savePayload)
+        setReportRecordRevision(saveResponse.report.record_revision)
         onReportSaved?.(saveResponse.report)
       }
       setReportProgressMessage('Generating report file.')
@@ -3638,6 +3971,8 @@ export default function AMTeamInspectionViewer({
         observationDefectSelections,
         snapshotSelections,
         extensiveDefectSelections,
+        inReportSelections,
+        observationDefectCallouts,
         mediaMode: selectedMediaMode,
       })
       setGeneratedReviewReport(report)
@@ -3645,17 +3980,24 @@ export default function AMTeamInspectionViewer({
       await saveReviewReportFile(report)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
-      showReviewNotice(error instanceof Error ? error.message : 'Unable to generate report.')
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to generate report.', 'error')
     } finally {
+      reportSaveInProgressRef.current = false
       setReportProgressMessage('')
     }
   }
 
   async function downloadGeneratedReviewExport() {
+    if (reportSaveInProgressRef.current) return
+    reportSaveInProgressRef.current = true
     setReportProgressMessage('Preparing report download.')
     try {
       let reportFile = generatedReviewReport
-      if (!reportFile && readOnly) {
+      // Download is an export-only action in both read-only and edit mode. Build
+      // from the current screen state, but never save a report revision or ask for
+      // a memo here. In edit mode a previously generated file may be stale after
+      // an unsaved change, so always rebuild it before downloading.
+      if (!reportFile || !readOnly) {
         reportFile = await buildReviewReportFile({
           visiblePipeGroups,
           selectedInspectionDateKey,
@@ -3664,6 +4006,8 @@ export default function AMTeamInspectionViewer({
           observationDefectSelections,
           snapshotSelections,
           extensiveDefectSelections,
+          inReportSelections,
+          observationDefectCallouts,
           mediaMode: selectedMediaMode,
         })
         setGeneratedReviewReport(reportFile)
@@ -3672,8 +4016,9 @@ export default function AMTeamInspectionViewer({
       await saveReviewReportFile(reportFile)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
-      showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.')
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.', 'error')
     } finally {
+      reportSaveInProgressRef.current = false
       setReportProgressMessage('')
     }
   }
@@ -3706,6 +4051,7 @@ export default function AMTeamInspectionViewer({
         ? preferredDateKey
         : dateOptions[0]?.key ?? ''
       const sortedRows = sortPipeGroupsByMli(response.rows, nextDateKey)
+      setSavedPipeOrder(null)
       setPipeGroups(response.rows)
       setSelectedInspectionDateKey(nextDateKey)
       setPipeStatus('ready')
@@ -3740,6 +4086,8 @@ export default function AMTeamInspectionViewer({
         const firstPipeId = firstGroup ? recordId(firstGroup.ml_id) : ''
         const firstCachedPipe = firstPipeId ? savedState.pipeObservationCache[firstPipeId] : null
 
+        setReportRecordRevision(savedState.recordRevision)
+        setSavedPipeOrder(savedState.visiblePipeGroups.map((group) => recordId(group.ml_id)))
         setPipeGroups(savedState.pipeGroups)
         setSelectedInspectionDateKey(savedState.selectedInspectionDateKey)
         setSelectedPipeId(firstPipeId)
@@ -3751,6 +4099,7 @@ export default function AMTeamInspectionViewer({
         setObservationDefectSelections(savedState.observationDefectSelections)
         setSnapshotSelections(savedState.snapshotSelections)
         setExtensiveDefectSelections(savedState.extensiveDefectSelections)
+        setInReportSelections(savedState.inReportSelections)
         setObservationDefectCallouts(savedState.observationDefectCallouts)
         setReviewedPipeIds(Object.fromEntries(savedState.visiblePipeGroups.map((group) => [recordId(group.ml_id), true])))
         setCollapsedDistanceGroups({})
@@ -3758,9 +4107,18 @@ export default function AMTeamInspectionViewer({
         setGeneratedReviewReport(null)
         setPipeStatus('ready')
         setObservationStatus(firstCachedPipe ? 'ready' : 'idle')
+        if (savedState.unmatchedPipeIds.length) {
+          const count = savedState.unmatchedPipeIds.length
+          showReviewNotice(
+            `${count} saved pipe${count === 1 ? '' : 's'} could not be loaded from current inspection data `
+            + `(${savedState.unmatchedPipeIds.join(', ')}).`,
+            'error',
+          )
+        }
       })
       .catch((error) => {
         if (cancelled) return
+        setSavedPipeOrder(null)
         setPipeGroups([])
         setSelectedInspection(null)
         setPipeStatus('error')
@@ -3889,12 +4247,24 @@ export default function AMTeamInspectionViewer({
     [pipeGroups],
   )
   const visiblePipeGroups = useMemo(
-    () => sortPipeGroupsByMli(filterPipeGroupsByDate(pipeGroups, selectedInspectionDateKey), selectedInspectionDateKey),
-    [pipeGroups, selectedInspectionDateKey],
+    () => {
+      // A saved report carries its own pipe set. Re-filtering it by the report's date
+      // text drops any pipe whose inspection falls outside that text - the pipe was
+      // still reviewed and saved, and dropping it left the reviewer on "Pipe 1 of 1"
+      // with Next disabled and no way to reach the rest of their own report.
+      if (savedPipeOrder) {
+        const position = new Map(savedPipeOrder.map((pipeId, index) => [pipeId, index]))
+        return [...pipeGroups].sort(
+          (left, right) => (position.get(recordId(left.ml_id)) ?? Number.MAX_SAFE_INTEGER)
+            - (position.get(recordId(right.ml_id)) ?? Number.MAX_SAFE_INTEGER),
+        )
+      }
+      return sortPipeGroupsByMli(filterPipeGroupsByDate(pipeGroups, selectedInspectionDateKey), selectedInspectionDateKey)
+    },
+    [pipeGroups, savedPipeOrder, selectedInspectionDateKey],
   )
-  // Editing a saved report separates the two actions: the primary button is a plain
-  // draft save reviewers can press at any point, and the Download button runs the
-  // fully validated generate-and-download flow when the review is complete.
+  // Editing a saved report separates the two actions: Save persists the draft;
+  // Download only exports the current screen state and never changes saved data.
   const reportDraftMode = Boolean(reportSaveContext) && !readOnly
   const selectedPipeIndex = visiblePipeGroups.findIndex((group) => recordId(group.ml_id) === selectedPipeId)
   const hasPreviousPipe = selectedPipeIndex > 0
@@ -3927,10 +4297,11 @@ export default function AMTeamInspectionViewer({
   const distanceDecisionProgress = useMemo(() => {
     const complete = groupedObservations.reduce((total, group) => {
       const selection = observationDefectSelections[pipeScopedKey(selectedPipeId, group.key)] ?? emptyObservationDefectSelection()
-      return total + (distanceGroupHasHighAmScore(selection) || selection.noHighScoreConfirmed ? 1 : 0)
+      const included = distanceGroupIncludedCount(selectedPipeId, group, inReportSelections, selection)
+      return total + (included > 0 || selection.noHighScoreConfirmed ? 1 : 0)
     }, 0)
     return { complete, total: groupedObservations.length }
-  }, [groupedObservations, observationDefectSelections, selectedPipeId])
+  }, [groupedObservations, inReportSelections, observationDefectSelections, selectedPipeId])
   const candidates = useMemo(() => pipeSearchCandidates(candidatePipes), [candidatePipes])
   const showCandidateList = candidateOpen && searchTerm.trim().length >= 2
   const selectedMediaMode = useMemo<MediaSourceMode>(() => mediaSourceMode(), [])
@@ -4204,9 +4575,10 @@ export default function AMTeamInspectionViewer({
                     onNextPipe={selectNextPipe}
                     onGenerateReport={reportDraftMode ? saveReviewDraft : generateReviewReport}
                     generateReportLabel={reportDraftMode ? 'Save' : 'Generate report'}
+                    reportBusy={Boolean(reportProgressMessage)}
                     onShow3d={() => setConsequence3dOpen(true)}
                     canDownloadExport={reportDraftMode || Boolean(generatedReviewReport) || canBuildReadOnlyExport}
-                    onDownloadExport={reportDraftMode ? generateReviewReport : downloadGeneratedReviewExport}
+                    onDownloadExport={downloadGeneratedReviewExport}
                     readOnly={readOnly}
                   />
                 ) : null}
@@ -4218,6 +4590,7 @@ export default function AMTeamInspectionViewer({
                     videos={inspectionMedia.videos}
                     seekRequest={videoSeekRequest}
                     onFrameChange={setActiveVideoFrame}
+                    snapshotPickerHostRef={setSnapshotPickerHost}
                     trailingAction={canShowDefectTable && !readOnly ? (
                       <button
                         type="button"
@@ -4300,15 +4673,15 @@ export default function AMTeamInspectionViewer({
                     <span className="amteam-defect-header-abbr">Rev.</span>
                     {defectColumnResizer('review', 'Review')}
                   </span>
+                  <span className="amteam-defect-header-cell in-report">
+                    <span className="amteam-defect-header-full">In report</span>
+                    <span className="amteam-defect-header-abbr">Rpt.</span>
+                    {defectColumnResizer('inReport', 'In report')}
+                  </span>
                   <span className="amteam-defect-header-cell extensive">
                     <span className="amteam-defect-header-full">Extensive</span>
                     <span className="amteam-defect-header-abbr">Ext.</span>
                     {defectColumnResizer('extensive', 'Extensive')}
-                  </span>
-                  <span className="amteam-defect-header-cell snapshot">
-                    <span className="amteam-defect-header-full">Snapshot</span>
-                    <span className="amteam-defect-header-abbr">Snap.</span>
-                    {defectColumnResizer('snapshot', 'Snapshot')}
                   </span>
                 </div>
                 {groupedObservations.length === 0 ? (
@@ -4330,14 +4703,19 @@ export default function AMTeamInspectionViewer({
                     observationNumber: previousObservationCount + index + 1,
                   }))
                   const majorObservationEntry = observationEntries.find((entry) => entry.cardKey === groupSelection.majorKey)
-                  const hasDistanceGroupHighAmScore = distanceGroupHasHighAmScore(groupSelection)
+                  const groupIncludedCount = distanceGroupIncludedCount(
+                    selectedPipeId,
+                    group,
+                    inReportSelections,
+                    groupSelection,
+                  )
                   const isNoHighScoreConfirmed = groupSelection.noHighScoreConfirmed
                   const hasDistanceGroupValidationFailure = Boolean(distanceGroupValidationFailures[scopedGroupKey])
                   const distanceConfirmClasses = [
                     'amteam-distance-confirm-button',
-                    hasDistanceGroupHighAmScore ? 'scored' : '',
+                    groupIncludedCount > 0 ? 'scored' : '',
                     isNoHighScoreConfirmed ? 'confirmed' : '',
-                    !hasDistanceGroupHighAmScore && !isNoHighScoreConfirmed ? 'pending' : '',
+                    groupIncludedCount === 0 && !isNoHighScoreConfirmed ? 'pending' : '',
                     hasDistanceGroupValidationFailure ? 'needs-review' : '',
                   ].filter(Boolean).join(' ')
 
@@ -4388,18 +4766,18 @@ export default function AMTeamInspectionViewer({
                               <button
                                 type="button"
                                 className={distanceConfirmClasses}
-                                disabled={readOnly || hasDistanceGroupHighAmScore}
+                                disabled={readOnly || groupIncludedCount > 0}
                               title={
-                                hasDistanceGroupHighAmScore
-                                  ? 'AM score greater or equal to 3 selected'
+                                groupIncludedCount > 0
+                                  ? 'A defect from this group is included in the report'
                                   : isNoHighScoreConfirmed
                                     ? 'No AM score greater or equal to 3 confirmed'
                                     : 'Confirm no AM score greater or equal to 3'
                               }
                               onClick={() => toggleDistanceGroupNoHighScoreConfirmation(scopedGroupKey)}
                             >
-                              {hasDistanceGroupHighAmScore
-                                ? 'Scored 3+'
+                              {groupIncludedCount > 0
+                                ? `${groupIncludedCount} in report`
                                 : isNoHighScoreConfirmed
                                   ? 'No 3+ confirmed'
                                   : 'Decision required'}
@@ -4407,22 +4785,8 @@ export default function AMTeamInspectionViewer({
                           </div>
                         </div>
 
+                        <div className="amteam-defect-cell amteam-defect-distance-in-report-cell" aria-hidden="true" />
                         <div className="amteam-defect-cell amteam-defect-distance-extensive-cell" aria-hidden="true" />
-
-                        <div className="amteam-defect-cell amteam-defect-distance-snapshot-cell">
-                          {majorObservationEntry ? (
-                            <ObservationImage
-                              mediaMode={selectedMediaMode}
-                              mediaRoot={inspectionMedia.media_root}
-                              observation={majorObservationEntry.observation}
-                              selectedUrl={snapshotSelections[pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey)]}
-                              readOnly={readOnly}
-                              onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(pipeScopedKey(selectedPipeId, majorObservationEntry.cardKey), imageUrl)}
-                            />
-                          ) : (
-                            <span>Select major</span>
-                          )}
-                        </div>
                       </div>
 
                       {!isGroupCollapsed ? (
@@ -4434,14 +4798,21 @@ export default function AMTeamInspectionViewer({
                             const isOtherDefect = groupSelection.otherKeys.includes(cardKey)
                             const defectRole: ObservationDefectRole = isMajorDefect ? 'major' : isOtherDefect ? 'other' : ''
                             const canMarkExtensive = isMajorDefect || isOtherDefect
+                            const isInReport = isMajorDefect || Boolean(inReportSelections[scopedCardKey])
                             const isExtensiveDefect = canMarkExtensive && Boolean(extensiveDefectSelections[scopedCardKey])
                             const observationSeekVideo = selectedVideoForObservationJump()
                             const observationSeekTime = observationSeekSeconds(observation, observationSeekVideo)
                             const canJumpToObservationFrame = observationSeekTime !== null
+                            const canOpenSnapshotPicker = observationImageUrls(observation).length > 0 || Boolean(activeVideoFrame)
+                            const canSelectObservation = canJumpToObservationFrame || canOpenSnapshotPicker
+                            const selectObservation = () => {
+                              jumpToObservationFrame(observation, scopedCardKey)
+                              if (canOpenSnapshotPicker) snapshotPicker.open(scopedCardKey)
+                            }
                             const rowClasses = [
                               'amteam-defect-row',
                               'amteam-defect-observation-row',
-                              canJumpToObservationFrame ? 'has-video-frame' : '',
+                              canSelectObservation ? 'has-video-frame' : '',
                               focusedObservationKey === scopedCardKey ? 'video-focused' : '',
                               isMajorDefect ? 'major-defect' : '',
                               isOtherDefect ? 'other-defect' : '',
@@ -4453,17 +4824,21 @@ export default function AMTeamInspectionViewer({
                                 className={rowClasses}
                                 key={cardKey}
                                 role="treeitem"
-                                tabIndex={canJumpToObservationFrame ? 0 : undefined}
-                                title={canJumpToObservationFrame ? `Jump video to ${formatMediaTime(observationSeekTime ?? 0)}` : undefined}
+                                tabIndex={canSelectObservation ? 0 : undefined}
+                                title={canJumpToObservationFrame
+                                  ? `Open snapshots and jump video to ${formatMediaTime(observationSeekTime ?? 0)}`
+                                  : canOpenSnapshotPicker
+                                    ? 'Open snapshots for this observation'
+                                    : undefined}
                                 onClick={(event) => {
-                                  if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
-                              jumpToObservationFrame(observation, scopedCardKey)
+                                  if (!canSelectObservation || isInteractiveEventTarget(event.target)) return
+                                  selectObservation()
                                 }}
                                 onKeyDown={(event) => {
-                                  if (!canJumpToObservationFrame || isInteractiveEventTarget(event.target)) return
+                                  if (!canSelectObservation || isInteractiveEventTarget(event.target)) return
                                   if (event.key === 'Enter' || event.key === ' ') {
                                     event.preventDefault()
-                                    jumpToObservationFrame(observation, scopedCardKey)
+                                    selectObservation()
                                   }
                                 }}
                               >
@@ -4504,7 +4879,7 @@ export default function AMTeamInspectionViewer({
                                       onChange={(value) => updateObservationDefectCallout(scopedCardKey, value)}
                                     />
                                   ) : null}
-                                  {isOtherDefect ? (
+                                  {!isMajorDefect && (isOtherDefect || isInReport) ? (
                                     <div className="amteam-defect-callout-list">
                                       {(observationDefectCallouts[scopedCardKey] ?? []).map((callout) => (
                                         <span className="amteam-defect-callout-chip" key={callout}>
@@ -4528,6 +4903,7 @@ export default function AMTeamInspectionViewer({
                                         disabled={readOnly}
                                         placeholder="Add callout"
                                         value=""
+                                        commitOnEnter
                                         onChange={(value) => addObservationDefectCallout(scopedCardKey, value)}
                                       />
                                     </div>
@@ -4553,6 +4929,23 @@ export default function AMTeamInspectionViewer({
                                   </label>
                                 </div>
 
+                                <div className="amteam-defect-cell amteam-defect-observation-in-report-cell">
+                                  <label
+                                    className={isInReport ? 'selected' : ''}
+                                    aria-label={`Observation ${observationNumber} included in report`}
+                                    title={isMajorDefect
+                                      ? 'A major defect is always included in the report.'
+                                      : 'Include this defect in the generated report.'}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isInReport}
+                                      disabled={readOnly || isMajorDefect}
+                                      onChange={() => toggleObservationInReport(scopedCardKey)}
+                                    />
+                                  </label>
+                                </div>
+
                                 <div className="amteam-defect-cell amteam-defect-observation-extensive-cell">
                                   <label
                                     className={isExtensiveDefect ? 'selected' : !canMarkExtensive ? 'disabled' : ''}
@@ -4566,18 +4959,17 @@ export default function AMTeamInspectionViewer({
                                     />
                                   </label>
                                 </div>
-
-                                <div className="amteam-defect-cell amteam-defect-observation-snapshot-cell">
-                                  <ObservationImage
-                                    mediaMode={selectedMediaMode}
-                                    mediaRoot={inspectionMedia.media_root}
-                                    observation={observation}
-                                    selectedUrl={snapshotSelections[scopedCardKey]}
-                                    readOnly={readOnly}
-                                    currentFrame={activeVideoFrame}
-                                    onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
-                                  />
-                                </div>
+                                <ObservationImage
+                                  mediaMode={selectedMediaMode}
+                                  mediaRoot={inspectionMedia.media_root}
+                                  observation={observation}
+                                  selectedUrl={snapshotSelections[scopedCardKey]}
+                                  readOnly={readOnly}
+                                  currentFrame={activeVideoFrame}
+                                  picker={snapshotPicker}
+                                  pickerId={scopedCardKey}
+                                  onSelectedUrlChange={(imageUrl) => updateObservationSnapshotSelection(scopedCardKey, imageUrl)}
+                                />
                               </article>
                             )
                           })}

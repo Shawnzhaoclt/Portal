@@ -298,6 +298,28 @@ def effective_resource_permission(db: Session, user: User, resource: Resource) -
     return permission_result(permission_mask, sources)
 
 
+def effective_resource_permission_types(db: Session, user: User, resource: Resource) -> set[str]:
+    """Return action-ready permission names for a resource.
+
+    Stored permission masks remain deliberately small and composable.  At the
+    enforcement boundary, every action permission implies View, Manage implies
+    every resource action, and the legacy resource-level Admin bit implies the
+    complete mask.  Callers still check the specific action they need; a nonzero
+    mask is never enough by itself.
+    """
+    effective = effective_resource_permission(db, user, resource)
+    permissions = set(effective.get("permission_types", [])) if effective else set()
+    if not permissions:
+        return set()
+    if "admin" in permissions:
+        return set(PERMISSION_TYPES)
+    if "manage" in permissions:
+        permissions.update({"view", "create", "edit", "review", "delete"})
+    else:
+        permissions.add("view")
+    return permissions
+
+
 def serialize_team(db: Session, team: Team) -> dict[str, Any]:
     manager = db.get(User, team.manager_user_id) if team.manager_user_id else None
     member_count = db.scalar(select(func.count()).select_from(User).where(User.team_id == team.id, User.deleted_at.is_(None))) or 0

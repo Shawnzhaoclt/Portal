@@ -14,18 +14,23 @@ from urllib.parse import quote
 import duckdb
 
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from portal.runtime.transport import APIRouter, Depends, FileResponse, HTTPException, Query, StreamingResponse
 
 from portal.app.core.records import clean_record
 from portal.app.dashboards.amteam import itpipes_cloud, user_observations
-from portal.app.management.models import User
+from portal.app.management.database import get_db
+from portal.app.management.models import Resource, User
 from portal.app.management.router import get_current_user
+from portal.app.management.services import effective_resource_permission_types
 from portal.app.sync.errors import RevisionChanged, SyncError
 from portal.app.sync.physical_entities import MLO_ENTITY_TYPE
 from portal.app.sync.runtime import current_coordinator, sync_identity
 
 router = APIRouter(prefix="/api/amteam", tags=["am-team"])
+CCTV_REVIEW_RESOURCE_ID = "RPT5W1C0"
 
 PIPE_TABLE = "ML"
 INSPECTION_TABLE = "MLI"
@@ -37,6 +42,20 @@ REPORT_EXTENSIONS = {".pdf"}
 MP4_CONTAINER_BOXES = {b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts"}
 
 ColumnMap = dict[str, str]
+
+
+def _require_cctv_review_permission(db: Session, user: User, *required: str) -> set[str]:
+    resource = db.scalar(select(Resource).where(Resource.resource_id == CCTV_REVIEW_RESOURCE_ID))
+    if resource is None or resource.is_active != 1:
+        raise HTTPException(status_code=503, detail="Proactive Team CCTV Review is not registered in the Portal catalog.")
+    permissions = effective_resource_permission_types(db, user, resource)
+    if not permissions.intersection(required):
+        label = " or ".join(required)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Proactive Team CCTV Review requires {label} permission for this action.",
+        )
+    return permissions
 
 
 def normalized_column_key(value: str) -> str:
@@ -792,7 +811,11 @@ def inspection_context(connection: duckdb.DuckDBPyConnection, mli_id: str) -> di
 
 
 @router.get("/source")
-def amteam_source() -> dict[str, Any]:
+def amteam_source(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     connection = connect_amteam_database()
     try:
         tables = {}
@@ -815,7 +838,10 @@ def amteam_source() -> dict[str, Any]:
 def search_pipes(
     search: str = Query(default="", min_length=0),
     limit: int = Query(default=25, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     query = search.strip()
     if not query:
         return {"query": query, "rows": []}
@@ -851,7 +877,10 @@ def search_pipes(
 def search_inspections(
     search: str = Query(default="", min_length=0),
     limit: int = Query(default=250, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     query = search.strip()
     if not query:
         return {"query": query, "pipe_count": 0, "rows": []}
@@ -922,7 +951,10 @@ def search_pipe_groups(
     search: str = Query(default="", min_length=0),
     kind: str | None = Query(default=None),
     pipe_limit: int = Query(default=250, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     query = search.strip()
     if not query:
         return {"query": query, "kind": kind, "rows": []}
@@ -1017,7 +1049,10 @@ def search_pipe_groups(
 def pipe_inspections(
     ml_id: str,
     limit: int = Query(default=100, ge=1, le=500),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     connection = connect_amteam_database()
     try:
         columns = inspection_columns(available_column_lookup(connection, INSPECTION_TABLE))
@@ -1144,7 +1179,9 @@ def inspection_observations(
     mli_id: str,
     limit: int = Query(default=1000, ge=1, le=5000),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     user_rows = [
         user_observations.observation_row(values)
         for values in stored_user_observations(current_user, mli_id)
@@ -1161,7 +1198,9 @@ def inspection_observations_batch(
     mli_id: list[str] | None = Query(default=None),
     limit: int = Query(default=1000, ge=1, le=5000),
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     requested_ids = list(dict.fromkeys(item.strip() for item in (mli_id or []) if item and item.strip()))
     if not requested_ids:
         return {"rows": {}}
@@ -1194,19 +1233,29 @@ class ItpipesManifestRequest(BaseModel):
 
 
 @router.post("/itpipes/session")
-def itpipes_session(payload: ItpipesManifestRequest):
+def itpipes_session(
+    payload: ItpipesManifestRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Is the signed-in ITpipes session still good? Drives the sign-in gate."""
+    _require_cctv_review_permission(db, current_user, "view")
     itpipes_cloud.remember_cookie(payload.cookie)
     return itpipes_cloud.session_state(payload.cookie.strip())
 
 
 @router.post("/itpipes/manifest")
-def itpipes_manifest(payload: ItpipesManifestRequest):
+def itpipes_manifest(
+    payload: ItpipesManifestRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     """Presigned ITpipes media for one inspection, fetched as the signed-in user.
 
     The cookie comes from the ITpipes window the user signed in to; Portal holds no
     credential of its own and stores nothing.
     """
+    _require_cctv_review_permission(db, current_user, "view")
     mli_id = payload.mli_id.strip()
     if not mli_id:
         raise HTTPException(status_code=400, detail={"message": "An MLI ID is required."})
@@ -1432,7 +1481,9 @@ def inspection_distance_limit(
 def list_user_observations(
     mli_id: str,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "view")
     rows = [
         user_observations.observation_row(values)
         for values in stored_user_observations(current_user, mli_id)
@@ -1446,7 +1497,9 @@ def create_user_observation(
     mli_id: str,
     payload: UserObservationRequest,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "create", "edit")
     if payload.continuous and payload.finish_distance is None:
         raise HTTPException(status_code=422, detail="A continuous defect needs a finish distance.")
     if payload.continuous and payload.finish_distance is not None and payload.finish_distance <= payload.distance:
@@ -1558,7 +1611,9 @@ def delete_user_observation(
     mli_id: str,
     mlo_id: str,
     current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
 ) -> dict[str, Any]:
+    _require_cctv_review_permission(db, current_user, "create", "edit")
     if not user_observations.is_user_mlo_id(mlo_id):
         raise HTTPException(
             status_code=400,

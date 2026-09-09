@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from portal.runtime.transport import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portal.app.management.database import get_db
@@ -17,9 +17,8 @@ from portal.app.management.models import Resource, User
 from portal.app.management.router import get_current_user
 from portal.app.management.security import utc_now_text
 from portal.app.management.services import (
-    ADMIN_ROLES,
-    effective_resource_permission,
-    selected_user_role,
+    PERMISSION_TYPES,
+    effective_resource_permission_types,
 )
 from portal.app.sync.errors import LockTimeout, RevisionChanged, SharedRootUnavailable, SnapshotRequired, SyncError
 from portal.app.sync.models import Mutation
@@ -43,7 +42,7 @@ router = APIRouter(tags=["cctv-review-report"])
 
 
 class ReportStatusActionRequest(BaseModel):
-    action: Literal["submit_to_review", "return_to_edit", "complete"]
+    action: Literal["submit_to_review", "return_to_edit", "complete", "reopen"]
     record_revision: str = Field(min_length=1)
     memo: str | None = None
 
@@ -52,6 +51,9 @@ class ReportObservationSaveRequest(BaseModel):
     mlo_id: str | None = None
     source_observation_key: str
     defect_role: Literal["none", "major", "other"] = "none"
+    # Whether the defect is published in the generated report. Older clients omit it, so
+    # it falls back to the decision their defect role already carried.
+    in_report: bool | None = None
     is_extensive: bool = False
     selected_picture_file_name: str | None = None
     selected_picture_media_id: str | None = None
@@ -133,11 +135,26 @@ def _resource(db: Session) -> Resource:
     return resource
 
 
-def _require_resource_access(db: Session, user: User) -> None:
-    if selected_user_role(user) in ADMIN_ROLES:
-        return
-    if effective_resource_permission(db, user, _resource(db)) is None:
+def _resource_permission_types(db: Session, user: User) -> set[str]:
+    permissions = effective_resource_permission_types(db, user, _resource(db))
+    if not permissions:
         raise HTTPException(status_code=403, detail="You do not have permission to use Proactive Team CCTV Review.")
+    return permissions
+
+
+def _require_resource_permission(db: Session, user: User, *required: str) -> set[str]:
+    permissions = _resource_permission_types(db, user)
+    _require_permission_types(permissions, *required)
+    return permissions
+
+
+def _require_permission_types(permissions: set[str], *required: str) -> None:
+    if not permissions.intersection(required):
+        label = " or ".join(required)
+        raise HTTPException(
+            status_code=403,
+            detail=f"Proactive Team CCTV Review requires {label} permission for this action.",
+        )
 
 
 def _pipe_value(value: ReportPipeSaveRequest | dict[str, Any], field: str) -> Any:
@@ -357,46 +374,57 @@ def _find_by_report_id(user: User, report_id: int) -> tuple[dict[str, object], d
     return entity, _report_values(coordinator, entity)
 
 
-def _manager_can_delete_report(db: Session, user: User, created_by_user_id: int | None) -> bool:
-    if created_by_user_id is None:
-        return False
-    manager_id = db.execute(
-        text(
-            """
-            SELECT team.manager_user_id
-            FROM SYS_USERS creator
-            INNER JOIN SYS_TEAMS team ON team.id = creator.team_id
-            WHERE creator.id = :created_by_user_id
-            """
-        ),
-        {"created_by_user_id": created_by_user_id},
-    ).scalar()
-    return manager_id is not None and int(manager_id) == user.id
+def _integer_id(value: Any) -> int | None:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
 
 
-def _is_manager_or_admin(db: Session, user: User) -> bool:
-    if selected_user_role(user) in ADMIN_ROLES:
-        return True
-    return db.execute(
-        text("SELECT 1 FROM SYS_TEAMS WHERE manager_user_id = :user_id LIMIT 1"),
-        {"user_id": user.id},
-    ).scalar() is not None
+def _report_team_id(db: Session, report: dict[str, Any]) -> int | None:
+    """Team captured on the report, with a safe fallback for legacy reports."""
+    for field in ("assigned_team_id", "created_by_team_id"):
+        if team_id := _integer_id(report.get(field)):
+            return team_id
+    creator_id = _integer_id(report.get("created_by_user_id"))
+    creator = db.get(User, creator_id) if creator_id is not None else None
+    return _integer_id(creator.team_id) if creator is not None else None
 
 
-def _can_delete_report(db: Session, user: User, report: dict[str, Any]) -> bool:
-    if selected_user_role(user) in ADMIN_ROLES:
-        return True
-    if report.get("status") != "pending":
-        return False
-    if report.get("created_by_user_id") == user.id:
-        return True
-    return _manager_can_delete_report(db, user, report.get("created_by_user_id"))
+def _report_capabilities(
+    db: Session,
+    user: User,
+    report: dict[str, Any],
+    permissions: set[str],
+) -> dict[str, bool]:
+    status = str(report.get("status") or "pending")
+    can_view = "view" in permissions
+    return {
+        "can_view": can_view,
+        "can_edit": status == "pending" and "edit" in permissions,
+        "can_submit": status == "pending" and "edit" in permissions,
+        "can_return_to_edit": status == "ready_to_review" and "review" in permissions,
+        "can_complete": status == "ready_to_review" and "review" in permissions,
+        "can_reopen": status == "completed" and "review" in permissions,
+        "can_delete": status == "pending" and "delete" in permissions,
+        "can_view_events": can_view,
+        "can_download": can_view,
+    }
 
 
-def _report_row(values: dict[str, Any], can_delete: bool | None = None) -> dict[str, Any]:
+def _resource_capabilities(permissions: set[str]) -> dict[str, Any]:
+    return {
+        "can_view": "view" in permissions,
+        "can_create": "create" in permissions,
+        "permission_types": [name for name in PERMISSION_TYPES if name in permissions],
+    }
+
+
+def _report_row(values: dict[str, Any], capabilities: dict[str, bool] | None = None) -> dict[str, Any]:
     report = dict(values["report"])
-    if can_delete is not None:
-        report["can_delete"] = can_delete
+    if capabilities is not None:
+        report.update(capabilities)
     return report
 
 
@@ -414,6 +442,11 @@ def _saved_pipes(pipes: list[ReportPipeSaveRequest], report_id: int) -> list[dic
                     "mlo_id": observation.mlo_id,
                     "source_observation_key": observation.source_observation_key,
                     "defect_role": observation.defect_role,
+                    "in_report": (
+                        observation.defect_role in {"major", "other"}
+                        if observation.in_report is None
+                        else observation.in_report
+                    ),
                     "is_extensive": observation.is_extensive,
                     "selected_picture_file_name": observation.selected_picture_file_name,
                     "selected_picture_media_id": observation.selected_picture_media_id,
@@ -737,34 +770,27 @@ def list_reports(
     limit: int = Query(default=500, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
-    coordinator = _coordinator(current_user)
-    page = coordinator.query_entities(
-        ENTITY_TYPE,
-        order_by=(("updated_at", True), ("id", True)),
-        limit=limit,
-        offset=offset,
-    )
-    reports = [
-        (
-            entity,
-            {
-                **values,
-                "record_revision": str(entity.get("record_revision") or ""),
-            },
-        )
-        for entity in page
-        if (values := _entity_values(entity)) is not None
-    ]
-    return {
-        "reports": [
+    permissions = _require_resource_permission(db, current_user, "view")
+    reports = []
+    for entity in _report_entities(current_user):
+        values = _entity_values(entity)
+        if values is None:
+            continue
+        report = {
+            **values,
+            "record_revision": str(entity.get("record_revision") or ""),
+        }
+        reports.append(
             _report_row(
                 {"report": report},
-                _can_delete_report(db, current_user, report),
+                _report_capabilities(db, current_user, report, permissions),
             )
-            for _entity, report in reports
-        ],
-        "total": coordinator.count_entities(ENTITY_TYPE),
+        )
+    page = reports[offset:offset + limit]
+    return {
+        "reports": page,
+        "total": len(reports),
+        "capabilities": _resource_capabilities(permissions),
     }
 
 
@@ -774,13 +800,14 @@ def get_report_detail(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
+    permissions = _require_resource_permission(db, current_user, "view")
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
     _entity, values = found
+    report = dict(values["report"])
     return {
-        "report": _report_row(values, _can_delete_report(db, current_user, dict(values["report"]))),
+        "report": _report_row(values, _report_capabilities(db, current_user, report, permissions)),
         "pipes": values.get("pipes", []),
     }
 
@@ -791,7 +818,7 @@ def save_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
+    permissions = _resource_permission_types(db, current_user)
     binding_text = payload.binding_text.strip()
     report_key, report_name, inspection_date_text = _report_identity(
         binding_text,
@@ -812,6 +839,7 @@ def save_report(
     now = utc_now_text()
     report_id = _report_id(report_key)
     if created:
+        _require_permission_types(permissions, "create")
         report = {
             "id": report_id,
             "report_key": report_key,
@@ -821,6 +849,7 @@ def save_report(
             "inspection_date_text": inspection_date_text,
             "status": "pending",
             "created_by_user_id": current_user.id,
+            "created_by_team_id": current_user.team_id,
             "created_by_name": _display_name(current_user),
             "created_at": now,
             "updated_by_user_id": current_user.id,
@@ -836,12 +865,15 @@ def save_report(
         from_status = None
     else:
         report = copy.deepcopy(existing_report)
+        _require_permission_types(permissions, "edit")
         from_status = str(report.get("status") or "pending")
         _validated_record_revision(existing, payload.record_revision, action="saving")
         if from_status == "ready_to_review":
             raise HTTPException(status_code=400, detail="Return the report to edit before saving changes.")
         if from_status == "completed":
             raise HTTPException(status_code=400, detail="Completed reports cannot be edited.")
+        if not _integer_id(report.get("created_by_team_id")):
+            report["created_by_team_id"] = _report_team_id(db, report)
         report.update(
             {
                 "report_name": report_name,
@@ -899,7 +931,7 @@ def save_report(
         "created": created,
         "report": _report_row(
             {"report": saved_report},
-            _can_delete_report(db, current_user, saved_report),
+            _report_capabilities(db, current_user, saved_report, permissions),
         ),
     }
 
@@ -957,14 +989,14 @@ def delete_report(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
+    permissions = _require_resource_permission(db, current_user, "delete")
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
     entity, values = found
     report = dict(values["report"])
-    if not _can_delete_report(db, current_user, report):
-        raise HTTPException(status_code=403, detail="Only the owner, the owner's manager, or an administrator can delete this report.")
+    if report.get("status") != "pending":
+        raise HTTPException(status_code=400, detail="Only pending reports can be deleted.")
     report_global_id = str(entity["entity_id"])
     report_key = str(report.get("report_key") or "")
     coordinator = _coordinator(current_user)
@@ -1025,10 +1057,11 @@ def list_report_events(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
+    permissions = _require_resource_permission(db, current_user, "view")
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
+    report = dict(found[1]["report"])
     events = list(found[1].get("events") or [])
     events.sort(
         key=lambda event: (str(event.get("event_at") or ""), str(event.get("id") or "")),
@@ -1044,15 +1077,21 @@ def update_report_status(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    _require_resource_access(db, current_user)
+    permissions = _resource_permission_types(db, current_user)
     found = _find_by_report_id(current_user, report_id)
     if found is None:
         raise HTTPException(status_code=404, detail="Report was not found.")
     entity, current = found
     values = copy.deepcopy(current)
     report = dict(values["report"])
+    if payload.action == "submit_to_review":
+        _require_permission_types(permissions, "edit")
+    else:
+        _require_permission_types(permissions, "review")
     _validated_record_revision(entity, payload.record_revision, action="changing status")
     report.pop("record_revision", None)
+    if not _integer_id(report.get("created_by_team_id")):
+        report["created_by_team_id"] = _report_team_id(db, report)
     from_status = str(report.get("status") or "pending")
     now = utc_now_text()
     if payload.action == "submit_to_review":
@@ -1066,13 +1105,16 @@ def update_report_status(
             raise HTTPException(status_code=400, detail="Only ready-to-review reports can be returned to edit.")
         to_status, event_type = "pending", "returned_to_edit"
         report.update({"submitted_by_user_id": None, "submitted_by_name": None, "submitted_at": None, "reviewed_by_user_id": None, "reviewed_by_name": None, "reviewed_at": None})
-    else:
+    elif payload.action == "complete":
         if from_status != "ready_to_review":
             raise HTTPException(status_code=400, detail="Only ready-to-review reports can be completed.")
-        if not _is_manager_or_admin(db, current_user):
-            raise HTTPException(status_code=403, detail="Only a manager or administrator can complete a report.")
         to_status, event_type = "completed", "completed"
         report.update({"reviewed_by_user_id": current_user.id, "reviewed_by_name": _display_name(current_user), "reviewed_at": now})
+    else:
+        if from_status != "completed":
+            raise HTTPException(status_code=400, detail="Only completed reports can be reopened.")
+        to_status, event_type = "pending", "reopened"
+        report.update({"submitted_by_user_id": None, "submitted_by_name": None, "submitted_at": None, "reviewed_by_user_id": None, "reviewed_by_name": None, "reviewed_at": None})
     report.update({"status": to_status, "updated_by_user_id": current_user.id, "updated_by_name": _display_name(current_user), "updated_at": now})
     events = list(values.get("events") or [])
     event = _event(

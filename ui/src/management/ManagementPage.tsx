@@ -175,6 +175,14 @@ const PERMISSION_OPTIONS = [
   { value: 64, label: 'Admin' },
 ]
 
+const CCTV_REVIEW_RESOURCE_ID = 'RPT5W1C0'
+const CCTV_REVIEW_PERMISSION_PRESETS = [
+  { label: 'Viewer', value: 1, description: 'View reports, media, events, and downloads.' },
+  { label: 'Report author', value: 1 | 2 | 8, description: 'Create, edit, save, and submit reports.' },
+  { label: 'Reviewer', value: 1 | 4, description: 'Review, return, and complete submitted reports.' },
+  { label: 'Team lead', value: 1 | 2 | 4 | 8 | 16 | 32, description: 'Full report workflow within the authorized team scope.' },
+]
+
 function permissionLabelsFromMask(mask: number | null | undefined) {
   if (!mask) return []
   return PERMISSION_OPTIONS.filter((option) => (mask & option.value) !== 0).map((option) => option.label)
@@ -2382,6 +2390,8 @@ function PermissionsPanel({
   const [bulkLoading, setBulkLoading] = useState(false)
   const [bulkLoaded, setBulkLoaded] = useState(false)
   const bulkSubjects = bulkSubjectType === 'team' ? teams : users
+  const selectedResource = resources.find((resource) => resource.id === selectedResourceId) ?? null
+  const isCctvReviewResource = selectedResource?.resource_id === CCTV_REVIEW_RESOURCE_ID
   const categoryOptions = useMemo(
     () => Array.from(new Set(resources.map((resource) => resource.category).filter(Boolean) as string[])).sort(),
     [resources],
@@ -2650,6 +2660,28 @@ function PermissionsPanel({
         </>
       ) : (
         <>
+          {isCctvReviewResource ? (
+            <div className="management-cctv-permission-presets">
+              <div>
+                <strong>CCTV review permission presets</strong>
+                <span>Choose a starting role, then refine the individual permissions if needed.</span>
+              </div>
+              <div className="management-cctv-permission-preset-actions">
+                {CCTV_REVIEW_PERMISSION_PRESETS.map((preset) => (
+                  <button
+                    key={preset.label}
+                    type="button"
+                    title={preset.description}
+                    onClick={() => onLevelChange(preset.value)}
+                  >
+                    <strong>{preset.label}</strong>
+                    <span>{preset.description}</span>
+                  </button>
+                ))}
+              </div>
+              <small>Manage is the resource-level lead permission. Portal Admin and System Admin remain account roles.</small>
+            </div>
+          ) : null}
           <div className="management-permission-toolbar">
             <select value={selectedResourceId ?? ''} onChange={(event) => onResourceChange(event.target.value)}>
               {resources.map((resource) => <option key={resource.id} value={resource.id}>{resource.name}</option>)}

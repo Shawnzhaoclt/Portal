@@ -29,16 +29,14 @@ import {
 } from 'lucide-react'
 import {
   deleteCctvReviewReport,
-  fetchMe,
   fetchCctvReviewReportEvents,
   fetchCctvReviewReports,
   pullBusinessDataNow,
   updateCctvReviewReportStatus,
-  storedManagementUser,
   type CctvReviewReportEvent,
   type CctvReviewReport,
+  type CctvReviewResourceCapabilities,
   type CctvReviewReportStatus,
-  type PortalUser,
 } from '../../management/api'
 import { isDesktopRuntime } from '../../desktop/runtime'
 import {
@@ -81,15 +79,19 @@ type LoadStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 type ReportActionButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   tooltip: string
+  emphasis?: 'submit' | 'return' | 'complete' | 'reopen'
+  label?: string
 }
 
-function ReportActionButton({ children, tooltip, ...buttonProps }: ReportActionButtonProps) {
+function ReportActionButton({ children, emphasis, label, tooltip, className, ...buttonProps }: ReportActionButtonProps) {
+  const buttonClassName = [className, emphasis ? `workflow ${emphasis}` : ''].filter(Boolean).join(' ')
   return (
     <Tooltip.Root>
       <Tooltip.Trigger asChild>
-        <span className="cctv-report-action-tooltip-trigger">
-          <button {...buttonProps} aria-label={tooltip}>
+        <span className={`cctv-report-action-tooltip-trigger${emphasis ? ' is-workflow' : ''}`}>
+          <button {...buttonProps} aria-label={tooltip} className={buttonClassName || undefined}>
             {children}
+            {label ? <span className="cctv-report-action-label">{label}</span> : null}
           </button>
         </span>
       </Tooltip.Trigger>
@@ -159,7 +161,7 @@ const DEFAULT_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
   submitted_at: 100,
   reviewed_by_name: 100,
   reviewed_at: 100,
-  operations: 208,
+  operations: 360,
 }
 
 const MIN_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
@@ -176,7 +178,7 @@ const MIN_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
   submitted_at: 100,
   reviewed_by_name: 100,
   reviewed_at: 100,
-  operations: 208,
+  operations: 220,
 }
 
 const REPORT_PAGE_SIZE_OPTIONS = [10, 25, 50, 100]
@@ -530,7 +532,11 @@ function ReportDownloadProgress({ reportName }: { reportName: string }) {
 
 function ProactiveTeamCCTVReviewContent() {
   const [reports, setReports] = useState<CctvReviewReport[]>([])
-  const [currentUser, setCurrentUser] = useState<PortalUser | null>(null)
+  const [resourceCapabilities, setResourceCapabilities] = useState<CctvReviewResourceCapabilities>({
+    can_view: false,
+    can_create: false,
+    permission_types: [],
+  })
   const [loading, setLoading] = useState(false)
   const [filters, setFilters] = useState<Record<string, string>>({})
   const [sort, setSort] = useState<SortState>({ field: 'updated_at', direction: 'desc' })
@@ -549,13 +555,9 @@ function ProactiveTeamCCTVReviewContent() {
       if (options.forceSync) {
         await pullBusinessDataNow()
       }
-      const cachedUser = isDesktopRuntime() ? storedManagementUser() : null
-      const [meResponse, reportsResponse] = await Promise.all([
-        cachedUser ? Promise.resolve({ user: cachedUser }) : fetchMe(),
-        fetchCctvReviewReports(),
-      ])
-      setCurrentUser(meResponse.user)
+      const reportsResponse = await fetchCctvReviewReports()
       setReports(reportsResponse.reports)
+      setResourceCapabilities(reportsResponse.capabilities)
       if (options.forceSync) toast.success('Report data refreshed from the shared repository.')
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unable to load reports.'
@@ -598,11 +600,13 @@ function ProactiveTeamCCTVReviewContent() {
   function handleReportSaved(report: CctvReviewReport) {
     toast.success('Report saved.')
     setWorkspaceDirty(false)
-    setWorkspaceModal((currentWorkspace) => (
-      currentWorkspace && 'report' in currentWorkspace && currentWorkspace.report.id === report.id
+    setWorkspaceModal((currentWorkspace) => {
+      if (!currentWorkspace) return currentWorkspace
+      if (currentWorkspace.mode === 'new') return report.can_edit ? { mode: 'edit', report } : { mode: 'view', report }
+      return currentWorkspace.report.id === report.id
         ? { ...currentWorkspace, report }
         : currentWorkspace
-    ))
+    })
     setReports((currentReports) => {
       const existingIndex = currentReports.findIndex((currentReport) => currentReport.id === report.id)
       if (existingIndex < 0) return [report, ...currentReports]
@@ -720,7 +724,7 @@ function ProactiveTeamCCTVReviewContent() {
     )
   }
 
-  async function runStatusAction(report: CctvReviewReport, action: 'submit_to_review' | 'return_to_edit' | 'complete') {
+  async function runStatusAction(report: CctvReviewReport, action: 'submit_to_review' | 'return_to_edit' | 'complete' | 'reopen') {
     try {
       await updateCctvReviewReportStatus(report.id, { action, record_revision: report.record_revision })
       toast.success('Report status updated.')
@@ -772,21 +776,15 @@ function ProactiveTeamCCTVReviewContent() {
   async function downloadReport(report: CctvReviewReport) {
     setDownloadingReportId(report.id)
     try {
-      await downloadSavedCctvReviewReport(report)
-      toast.success('Report download started.')
+      const savedPath = await downloadSavedCctvReviewReport(report)
+      if (savedPath === null) return
+      toast.success(isDesktopRuntime() ? 'Report saved and opened in Word.' : 'Report download started.')
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return
       toast.error(err instanceof Error ? err.message : 'Unable to download report.')
     } finally {
       setDownloadingReportId(null)
     }
-  }
-
-  function canDeleteReport(report: CctvReviewReport) {
-    if (report.can_delete) return true
-    if (!currentUser) return false
-    if (currentUser.selected_role === 'admin' || currentUser.selected_role === 'system_admin') return true
-    return report.status === 'pending' && report.created_by_user_id === currentUser.id
   }
 
   function renderFilter(column: (typeof REPORT_COLUMNS)[number]) {
@@ -821,63 +819,98 @@ function ProactiveTeamCCTVReviewContent() {
   }
 
   function renderActions(report: CctvReviewReport) {
-    const isPending = report.status === 'pending'
-    const isReady = report.status === 'ready_to_review'
-    const hasDeleteAction = canDeleteReport(report)
+    const hasDeleteAction = report.can_delete
+    const hasEventAction = report.can_view_events
+    const inlineActionCount = [
+      report.can_view,
+      report.can_edit,
+      report.can_download,
+      report.can_submit,
+      report.can_return_to_edit,
+      report.can_complete,
+      report.can_reopen,
+      hasEventAction,
+      hasDeleteAction,
+    ].filter(Boolean).length
 
     return (
       <Tooltip.Provider delayDuration={250} skipDelayDuration={100}>
         <div className="cctv-report-actions">
-          <ReportActionButton onClick={() => openWorkspace({ mode: 'view', report })} tooltip="View report" type="button">
-            <Eye size={15} />
-          </ReportActionButton>
-          {isPending ? (
-            <ReportActionButton onClick={() => openWorkspace({ mode: 'edit', report })} tooltip="Edit report" type="button">
-              <Edit3 size={15} />
-            </ReportActionButton>
-          ) : null}
-          <ReportActionButton
-            disabled={downloadingReportId === report.id}
-            onClick={() => void downloadReport(report)}
-            tooltip="Download report"
-            type="button"
-          >
-            {downloadingReportId === report.id ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
-          </ReportActionButton>
-          {isPending ? (
-            <ReportActionButton onClick={() => void runStatusAction(report, 'submit_to_review')} tooltip="Submit to review" type="button">
-              <Send size={15} />
-            </ReportActionButton>
-          ) : null}
-          {isReady ? (
-            <>
-              <ReportActionButton onClick={() => void runStatusAction(report, 'return_to_edit')} tooltip="Return to edit" type="button">
+          <div className="cctv-report-actions-row">
+            {report.can_view ? (
+              <ReportActionButton onClick={() => openWorkspace({ mode: 'view', report })} tooltip="View report" type="button">
+                <Eye size={15} />
+              </ReportActionButton>
+            ) : null}
+            {report.can_edit ? (
+              <ReportActionButton onClick={() => openWorkspace({ mode: 'edit', report })} tooltip="Edit report" type="button">
+                <Edit3 size={15} />
+              </ReportActionButton>
+            ) : null}
+            {report.can_download ? (
+              <ReportActionButton
+                disabled={downloadingReportId === report.id}
+                onClick={() => void downloadReport(report)}
+                tooltip="Download report"
+                type="button"
+              >
+                {downloadingReportId === report.id ? <Loader2 className="spin" size={15} /> : <Download size={15} />}
+              </ReportActionButton>
+            ) : null}
+            {report.can_submit ? (
+              <ReportActionButton emphasis="submit" label="Submit" onClick={() => void runStatusAction(report, 'submit_to_review')} tooltip="Submit to review" type="button">
+                <Send size={15} />
+              </ReportActionButton>
+            ) : null}
+            {report.can_return_to_edit ? (
+              <ReportActionButton emphasis="return" label="Return" onClick={() => void runStatusAction(report, 'return_to_edit')} tooltip="Return to edit" type="button">
                 <RotateCcw size={15} />
               </ReportActionButton>
-              <ReportActionButton onClick={() => void runStatusAction(report, 'complete')} tooltip="Complete review" type="button">
+            ) : null}
+            {report.can_complete ? (
+              <ReportActionButton emphasis="complete" label="Complete" onClick={() => void runStatusAction(report, 'complete')} tooltip="Complete review" type="button">
                 <CheckCircle2 size={15} />
               </ReportActionButton>
-            </>
-          ) : null}
-          {hasDeleteAction ? (
-            <details className="cctv-report-action-menu">
-              <summary aria-label="More report actions" title="More report actions">
-                <Ellipsis size={17} />
-              </summary>
-              <div className="cctv-report-action-menu-panel">
-                <button onClick={() => void openReportEvents(report)} type="button">
-                  <History size={15} /> Events
-                </button>
-                <button className="danger" onClick={() => void deleteReport(report)} type="button">
-                  <Trash2 size={15} /> Delete report
-                </button>
-              </div>
-            </details>
-          ) : (
-            <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
-              <History size={15} />
-            </ReportActionButton>
-          )}
+            ) : null}
+            {report.can_reopen ? (
+              <ReportActionButton emphasis="reopen" label="Reopen" onClick={() => void runStatusAction(report, 'reopen')} tooltip="Reopen report for editing" type="button">
+                <RotateCcw size={15} />
+              </ReportActionButton>
+            ) : null}
+            {hasDeleteAction ? (
+              <>
+                <span className="cctv-report-actions-inline" data-action-count={inlineActionCount}>
+                  {hasEventAction ? (
+                    <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
+                      <History size={15} />
+                    </ReportActionButton>
+                  ) : null}
+                  <ReportActionButton className="danger" onClick={() => void deleteReport(report)} tooltip="Delete report" type="button">
+                    <Trash2 size={15} />
+                  </ReportActionButton>
+                </span>
+                <details className="cctv-report-action-menu" data-action-count={inlineActionCount}>
+                  <summary aria-label="More report actions" title="More report actions">
+                    <Ellipsis size={17} />
+                  </summary>
+                  <div className="cctv-report-action-menu-panel">
+                    {hasEventAction ? (
+                      <button onClick={() => void openReportEvents(report)} type="button">
+                        <History size={15} /> Events
+                      </button>
+                    ) : null}
+                    <button className="danger" onClick={() => void deleteReport(report)} type="button">
+                      <Trash2 size={15} /> Delete report
+                    </button>
+                  </div>
+                </details>
+              </>
+            ) : hasEventAction ? (
+              <ReportActionButton onClick={() => void openReportEvents(report)} tooltip="Report events" type="button">
+                <History size={15} />
+              </ReportActionButton>
+            ) : null}
+          </div>
         </div>
       </Tooltip.Provider>
     )
@@ -950,7 +983,7 @@ function ProactiveTeamCCTVReviewContent() {
               <span className={`cctv-report-workspace-draft-state${workspaceDirty ? ' is-dirty' : ''}`}>
                 {workspaceModal.mode === 'view' ? 'Read-only' : workspaceDirty ? 'Draft changes pending' : 'All changes saved'}
               </span>
-              {'report' in workspaceModal ? (
+              {'report' in workspaceModal && workspaceModal.report.can_view_events ? (
                 <button onClick={() => void openReportEvents(workspaceModal.report)} type="button">
                   <History size={16} /> Events
                 </button>
@@ -975,9 +1008,11 @@ function ProactiveTeamCCTVReviewContent() {
             >
               {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />} Refresh
             </button>
-            <button className="primary" onClick={() => setCreateModalOpen(true)} type="button">
-              <Plus size={17} /> New Report
-            </button>
+            {resourceCapabilities.can_create ? (
+              <button className="primary" onClick={() => setCreateModalOpen(true)} type="button">
+                <Plus size={17} /> New Report
+              </button>
+            ) : null}
           </div>
         </div>
 
@@ -1079,7 +1114,7 @@ function ProactiveTeamCCTVReviewContent() {
       </section>
       )}
 
-      {isCreateModalOpen ? (
+      {isCreateModalOpen && resourceCapabilities.can_create ? (
         <div className="cctv-report-modal cctv-report-create-modal" role="dialog" aria-modal="true" aria-label="Create report">
           <div className="cctv-report-modal-backdrop" onClick={() => setCreateModalOpen(false)} />
           <aside className="cctv-report-popup-window cctv-report-create-window" aria-label="Create report">

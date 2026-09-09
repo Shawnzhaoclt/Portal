@@ -145,6 +145,7 @@ OBSERVATION_COLUMNS = (
     "is_extensive",
     "selected_picture_file_name",
     "defect_callout",
+    "in_report",
 )
 REVIEW_EVENT_COLUMNS = (
     "resource_id",
@@ -322,9 +323,9 @@ PHYSICAL_ENTITY_SPECS = {
         "CCTV_REVIEW_OBSERVATIONS",
         OBSERVATION_COLUMNS,
         130,
-        integer_columns=frozenset({"id", "report_id", "pipe_review_id", "distance_group_id", "is_extensive"}),
+        integer_columns=frozenset({"id", "report_id", "pipe_review_id", "distance_group_id", "is_extensive", "in_report"}),
         real_columns=frozenset({"distance_feet"}),
-        boolean_columns=frozenset({"is_extensive"}),
+        boolean_columns=frozenset({"is_extensive", "in_report"}),
         indexes=(
             ("group", ("distance_group_global_id", "id"), False),
             ("report", ("report_global_id", "pipe_review_id", "distance_group_id", "id"), False),
@@ -683,6 +684,7 @@ CREATE TABLE IF NOT EXISTS CCTV_REVIEW_OBSERVATIONS (
     source_observation_key TEXT NOT NULL,
     defect_role TEXT NOT NULL DEFAULT 'none' CHECK (defect_role IN ('none', 'major', 'other')),
     is_extensive INTEGER NOT NULL DEFAULT 0 CHECK (is_extensive IN (0, 1)),
+    in_report INTEGER NOT NULL DEFAULT 0 CHECK (in_report IN (0, 1)),
     selected_picture_file_name TEXT,
     defect_callout TEXT,
     record_revision TEXT NOT NULL,
@@ -961,6 +963,7 @@ def initialize_physical_schema(connection: sqlite3.Connection) -> None:
     for spec in all_physical_specs():
         _create_registered_table(connection, spec)
     migrate_legacy_cctv_aggregates(connection)
+    backfill_cctv_observation_in_report(connection)
     migrate_registered_generic_entities(connection)
     connection.execute(
         "UPDATE PORTAL_USER_FAVORITES SET category='all' "
@@ -1389,6 +1392,28 @@ def migrate_registered_generic_entities(connection: sqlite3.Connection) -> int:
             (entity_type, entity_id),
         )
     return migrated
+
+
+def backfill_cctv_observation_in_report(connection: sqlite3.Connection) -> None:
+    """Give rows written before `in_report` existed the answer their role already implies.
+
+    `_create_registered_table` adds the column with `ALTER TABLE`, which cannot carry the
+    DDL's `NOT NULL DEFAULT 0`, so existing observations arrive NULL. Leaving them that
+    way would read as "no defect is in the report" and empty every saved report, when the
+    reviewer's decision was recorded all along as a defect role.
+    """
+
+    columns = {
+        str(row[1])
+        for row in connection.execute('PRAGMA table_info("CCTV_REVIEW_OBSERVATIONS")')
+    }
+    if "in_report" not in columns or "defect_role" not in columns:
+        return
+    connection.execute(
+        "UPDATE CCTV_REVIEW_OBSERVATIONS "
+        "SET in_report = CASE WHEN defect_role IN ('major', 'other') THEN 1 ELSE 0 END "
+        "WHERE in_report IS NULL"
+    )
 
 
 def migrate_legacy_cctv_aggregates(connection: sqlite3.Connection) -> None:

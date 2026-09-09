@@ -146,6 +146,12 @@ export type BulkPermissionAssignment = {
 
 export type CctvReviewReportStatus = 'pending' | 'ready_to_review' | 'completed'
 
+export type CctvReviewResourceCapabilities = {
+  can_view: boolean
+  can_create: boolean
+  permission_types: string[]
+}
+
 export type CctvReviewReport = {
   id: number
   record_revision: string
@@ -156,6 +162,7 @@ export type CctvReviewReport = {
   inspection_date_text: string
   status: CctvReviewReportStatus
   created_by_user_id: number | null
+  created_by_team_id?: number | null
   created_by_name: string | null
   created_at: string
   updated_by_user_id: number | null
@@ -167,7 +174,15 @@ export type CctvReviewReport = {
   reviewed_by_user_id: number | null
   reviewed_by_name: string | null
   reviewed_at: string | null
-  can_delete?: boolean
+  can_view: boolean
+  can_edit: boolean
+  can_submit: boolean
+  can_return_to_edit: boolean
+  can_complete: boolean
+  can_reopen: boolean
+  can_delete: boolean
+  can_view_events: boolean
+  can_download: boolean
 }
 
 export type CctvReviewReportEvent = {
@@ -186,6 +201,8 @@ export type CctvReviewObservationSave = {
   mlo_id: string | null
   source_observation_key: string
   defect_role: 'none' | 'major' | 'other'
+  /** Whether the defect is published in the generated report. */
+  in_report?: boolean
   is_extensive: boolean
   selected_picture_file_name: string | null
   selected_picture_media_id?: string | null
@@ -736,7 +753,11 @@ export function updatePermissionMatrix(payload: {
 }
 
 export function fetchCctvReviewReports() {
-  return requestJson<{ reports: CctvReviewReport[]; total: number }>('/api/reports/proactive-team-cctv-review/reports')
+  return requestJson<{
+    reports: CctvReviewReport[]
+    total: number
+    capabilities: CctvReviewResourceCapabilities
+  }>('/api/reports/proactive-team-cctv-review/reports')
 }
 
 export function pullBusinessDataNow() {
@@ -771,7 +792,7 @@ export function saveCctvReviewReport(payload: CctvReviewReportSavePayload) {
 
 export function updateCctvReviewReportStatus(
   reportId: number,
-  payload: { action: 'submit_to_review' | 'return_to_edit' | 'complete'; record_revision: string; memo?: string },
+  payload: { action: 'submit_to_review' | 'return_to_edit' | 'complete' | 'reopen'; record_revision: string; memo?: string },
 ) {
   return requestJson<{ ok: boolean; report_id: number; from_status: CctvReviewReportStatus; to_status: CctvReviewReportStatus }>(
     `/api/reports/proactive-team-cctv-review/reports/${reportId}/status`,

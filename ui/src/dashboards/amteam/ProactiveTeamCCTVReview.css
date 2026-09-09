@@ -416,12 +416,57 @@
 
 .cctv-report-actions {
   min-width: 0;
+  width: 100%;
+  container-name: cctv-report-actions;
+  container-type: inline-size;
+  height: 30px;
+}
+
+.cctv-report-actions-row {
   display: flex;
+  align-items: center;
   flex-wrap: nowrap;
   gap: 4px;
   justify-content: center;
   height: 30px;
   white-space: nowrap;
+}
+
+.cctv-report-actions-inline {
+  display: none;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 4px;
+}
+
+@container cctv-report-actions (min-width: 140px) {
+  .cctv-report-actions-inline[data-action-count="4"] {
+    display: inline-flex;
+  }
+
+  .cctv-report-action-menu[data-action-count="4"] {
+    display: none;
+  }
+}
+
+@container cctv-report-actions (min-width: 176px) {
+  .cctv-report-actions-inline[data-action-count="5"] {
+    display: inline-flex;
+  }
+
+  .cctv-report-action-menu[data-action-count="5"] {
+    display: none;
+  }
+}
+
+@container cctv-report-actions (min-width: 212px) {
+  .cctv-report-actions-inline[data-action-count="6"] {
+    display: inline-flex;
+  }
+
+  .cctv-report-action-menu[data-action-count="6"] {
+    display: none;
+  }
 }
 
 .cctv-report-table td.cctv-report-operations-col {
@@ -433,6 +478,10 @@
   display: inline-flex;
   flex: 0 0 32px;
   width: 32px;
+}
+
+.cctv-report-action-tooltip-trigger.is-workflow {
+  flex-basis: 32px;
 }
 
 .cctv-report-action-tooltip {
@@ -458,6 +507,61 @@
   min-height: 30px;
   padding: 0;
   font-size: 13px;
+}
+
+.cctv-report-actions button.workflow {
+  border-color: transparent;
+  color: #fff;
+  font-weight: 850;
+  box-shadow: 0 1px 2px rgba(15, 42, 67, 0.2);
+}
+
+.cctv-report-actions button.workflow.submit {
+  background: #1769aa;
+}
+
+.cctv-report-actions button.workflow.submit:hover {
+  background: #0e568f;
+}
+
+.cctv-report-actions button.workflow.return,
+.cctv-report-actions button.workflow.reopen {
+  background: #a85d00;
+}
+
+.cctv-report-actions button.workflow.return:hover,
+.cctv-report-actions button.workflow.reopen:hover {
+  background: #824700;
+}
+
+.cctv-report-actions button.workflow.complete {
+  background: #187744;
+}
+
+.cctv-report-actions button.workflow.complete:hover {
+  background: #105e34;
+}
+
+.cctv-report-action-label {
+  display: none;
+}
+
+@container cctv-report-actions (min-width: 300px) {
+  .cctv-report-action-tooltip-trigger.is-workflow {
+    flex-basis: auto;
+    width: auto;
+  }
+
+  .cctv-report-actions button.workflow {
+    width: auto;
+    min-width: 76px;
+    gap: 6px;
+    padding: 0 10px;
+  }
+
+  .cctv-report-action-label {
+    display: inline;
+  }
 }
 
 .cctv-report-actions button.danger {

@@ -28,9 +28,10 @@ type Props = {
   error: string;
   loading: boolean;
   result: FailureConsequenceResult | null;
-  flashedFeatureId: string | null;
-  flashTargetLabel: string;
-  onFlashFeature: (featureId: string) => void;
+  /** Stays set until the row is clicked again, so the map keeps the feature highlighted. */
+  selectedFeatureId: string | null;
+  mapLabel: string;
+  onSelectFeature: (featureId: string) => void;
   onSelectDefect: (defect: FailureDefect) => void;
   simulation?: SimulationControls;
 };
@@ -39,9 +40,9 @@ export default function ConsequenceInspector({
   error,
   loading,
   result,
-  flashedFeatureId,
-  flashTargetLabel,
-  onFlashFeature,
+  selectedFeatureId,
+  mapLabel,
+  onSelectFeature,
   onSelectDefect,
   simulation,
 }: Props) {
@@ -143,15 +144,23 @@ export default function ConsequenceInspector({
               <button
                 type="button"
                 key={feature.id}
-                className={flashedFeatureId === feature.id ? "flashing" : ""}
-                onClick={() => onFlashFeature(feature.id)}
-                title={`Flash ${feature.label} on the ${flashTargetLabel}`}
+                className={selectedFeatureId === feature.id ? "selected" : ""}
+                aria-pressed={selectedFeatureId === feature.id}
+                onClick={() => onSelectFeature(feature.id)}
+                title={selectedFeatureId === feature.id
+                  ? `Clear the ${feature.label} highlight`
+                  : `Highlight ${feature.label} on the ${mapLabel}`}
               >
                 <MapPinned size={17} />
                 <div>
                   <strong>{feature.label}</strong>
                   <span>{feature.relationship === "direct" ? "Direct contact" : "Within zone of influence"}</span>
-                  <small>{influenceMeasurementLabel(feature)}</small>
+                  <small title={influenceMeasurementTitle(feature)}>{influenceMeasurementLabel(feature)}</small>
+                  {feature.extends_beyond_extent ? (
+                    <em title="Only the part inside the selected map extent is drawn. The dashed outline marks where it is cut.">
+                      Extends beyond the map extent
+                    </em>
+                  ) : null}
                 </div>
                 <small>{feature.source_table}</small>
               </button>
@@ -164,6 +173,12 @@ export default function ConsequenceInspector({
             <div className="failure-method-formula">
               <span>Zone of influence</span>
               <strong>{result?.method.zoi_formula ?? "3 ft + (2 × relative depth)"}</strong>
+            </div>
+            <div className="failure-method-note">
+              <strong>Selected map extent</strong>
+              <p>
+                Consequence layers are loaded and clipped to the selected {result?.analysis?.display_extent_miles.toFixed(1) ?? "0.2"} × {result?.analysis?.display_extent_miles.toFixed(1) ?? "0.2"} mile map extent. The ZOI identifies affected portions but does not clip context features.
+              </p>
             </div>
             <div className="failure-method-note">
               <strong>Latest inspections only</strong>
@@ -179,6 +194,23 @@ export default function ConsequenceInspector({
       </section>
     </aside>
   );
+}
+
+/**
+ * The percentage is measured against the feature's own full size, which for a cut
+ * feature is larger than the shape on the map - worth saying so on hover.
+ */
+function influenceMeasurementTitle(feature: ImpactedFeature): string {
+  if (feature.influenced_percent == null) return "Measured inside the scenario zone of influence.";
+  const total = feature.measurement_type === "length"
+    ? feature.feature_length_feet == null
+      ? null
+      : `${feature.feature_length_feet.toLocaleString(undefined, { maximumFractionDigits: 1 })} ft`
+    : feature.feature_area_sqft == null
+      ? null
+      : `${feature.feature_area_sqft.toLocaleString(undefined, { maximumFractionDigits: 1 })} sq ft`;
+  const scope = total ? ` (${total})` : "";
+  return `${feature.influenced_percent.toFixed(1)}% of the feature's full size${scope}, not of the part drawn inside the map extent.`;
 }
 
 export function influenceMeasurementLabel(feature: ImpactedFeature): string {

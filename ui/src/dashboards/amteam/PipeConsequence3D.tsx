@@ -1,9 +1,11 @@
 import { ShieldAlert, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 
 import ConsequenceInspector from '../../resources/maps/stm-risk-map/ConsequenceInspector'
+import FailureConsequenceExtentControl from '../../resources/maps/stm-risk-map/FailureConsequenceExtentControl'
 import FailureConsequenceScene3D from '../../resources/maps/stm-risk-map/FailureConsequenceScene3D'
 import {
+  DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES,
   fetchFailureConsequence,
   type FailureConsequenceResult,
   type FailureDefect,
@@ -20,10 +22,9 @@ import '../../resources/maps/stm-risk-map/MapTilesViewer.css'
  *
  * Full parity with the risk map resource except for what needs a 2D map: the scene is
  * always 3D, and simulated-defect placement is unavailable because placing one means
- * clicking a map. Scenario selection, the summary KPIs, affected features with flashing,
- * and the method notes are the same shared inspector the risk map renders.
+ * clicking a map. Scenario selection, the summary KPIs, affected features with their
+ * highlight, and the method notes are the same shared inspector the risk map renders.
  */
-const FEATURE_FLASH_DURATION_MS = 2_600
 
 export type PipeConsequence3DProps = {
   open: boolean
@@ -68,9 +69,9 @@ export function PipeConsequence3D({
   const [errorMessage, setErrorMessage] = useState('')
   const [loading, setLoading] = useState(false)
   const [scenario, setScenario] = useState<FailureScenario | undefined>(undefined)
-  const [flashedFeatureId, setFlashedFeatureId] = useState<string | null>(null)
-  const [flashToken, setFlashToken] = useState(0)
-  const flashClearTimerRef = useRef<number | null>(null)
+  const [extentMiles, setExtentMiles] = useState(DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES)
+  const [selectedFeatureId, setSelectedFeatureId] = useState<string | null>(null)
+  const [locateToken, setLocateToken] = useState(0)
 
   useEffect(() => {
     setScenario(undefined)
@@ -81,9 +82,14 @@ export function PipeConsequence3D({
     const controller = new AbortController()
     setErrorMessage('')
     setLoading(true)
-    fetchFailureConsequence(assetId, 'pipe', scenario, controller.signal, {
-      observations: reviewedObservations(observations),
-      inspection_direction: inspectionDirection === null ? null : String(inspectionDirection),
+    fetchFailureConsequence(assetId, 'pipe', {
+      scenario,
+      signal: controller.signal,
+      extentMiles,
+      reviewed: {
+        observations: reviewedObservations(observations),
+        inspection_direction: inspectionDirection === null ? null : String(inspectionDirection),
+      },
     })
       .then((response) => setResult(response))
       .catch((error) => {
@@ -94,7 +100,7 @@ export function PipeConsequence3D({
         if (!controller.signal.aborted) setLoading(false)
       })
     return () => controller.abort()
-  }, [assetId, inspectionDirection, observations, open, scenario])
+  }, [assetId, extentMiles, inspectionDirection, observations, open, scenario])
 
   useEffect(() => {
     if (!open) return undefined
@@ -105,25 +111,22 @@ export function PipeConsequence3D({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [onClose, open])
 
-  useEffect(() => () => {
-    if (flashClearTimerRef.current != null) window.clearTimeout(flashClearTimerRef.current)
-  }, [])
-
   if (!open) return null
+
+  // A re-analysis can drop the selected feature, so the highlight follows what the
+  // current result still contains rather than a remembered id.
+  const activeFeatureId = (result?.analysis?.impacted_features ?? []).some((feature) => feature.id === selectedFeatureId)
+    ? selectedFeatureId
+    : null
 
   function selectDefect(defect: FailureDefect) {
     if (defect.source === 'simulated') return
     setScenario({ source: defect.source, id: defect.id })
   }
 
-  function flashAffectedFeature(featureId: string) {
-    setFlashedFeatureId(featureId)
-    setFlashToken((value) => value + 1)
-    if (flashClearTimerRef.current != null) window.clearTimeout(flashClearTimerRef.current)
-    flashClearTimerRef.current = window.setTimeout(() => {
-      setFlashedFeatureId(null)
-      flashClearTimerRef.current = null
-    }, FEATURE_FLASH_DURATION_MS)
+  function selectAffectedFeature(featureId: string) {
+    setSelectedFeatureId((current) => (current === featureId ? null : featureId))
+    setLocateToken((value) => value + 1)
   }
 
   return (
@@ -140,6 +143,11 @@ export function PipeConsequence3D({
             <strong>{String(result?.asset.asset_id ?? assetId ?? 'Loading…')}</strong>
           </div>
           <span className="failure-consequence-type">{String(result?.asset.asset_type ?? 'pipe')}</span>
+          <FailureConsequenceExtentControl
+            disabled={loading}
+            value={extentMiles}
+            onChange={setExtentMiles}
+          />
           <div className="failure-consequence-mode-toggle" role="group" aria-label="Map dimension">
             <button type="button" className="active" disabled>3D</button>
           </div>
@@ -151,8 +159,8 @@ export function PipeConsequence3D({
             <FailureConsequenceScene3D
               result={result}
               basemapTextureUrl={null}
-              flashedFeatureId={flashedFeatureId}
-              flashToken={flashToken}
+              selectedFeatureId={activeFeatureId}
+              locateToken={locateToken}
             />
           </div>
 
@@ -160,9 +168,9 @@ export function PipeConsequence3D({
             error={errorMessage}
             loading={loading}
             result={result}
-            flashedFeatureId={flashedFeatureId}
-            flashTargetLabel="3D map"
-            onFlashFeature={flashAffectedFeature}
+            selectedFeatureId={activeFeatureId}
+            mapLabel="3D map"
+            onSelectFeature={selectAffectedFeature}
             onSelectDefect={selectDefect}
           />
         </div>

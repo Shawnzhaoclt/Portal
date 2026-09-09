@@ -2,7 +2,7 @@
 
 ## 1. Purpose
 
-The Storm Water Asset Risk Map includes a focused, read-only consequence-analysis tool for storm structures, pipes, and drainage assets. It helps a user understand which nearby roadway, property, building, impervious-surface, and easement features may be affected by an observed or simulated asset defect.
+The Storm Water Asset Risk Map includes a focused, read-only consequence-analysis tool for storm structures, pipes, and drainage assets. It helps a user understand which nearby roadway, parcel, building, impervious-surface, and easement features may be affected by an observed or simulated asset defect.
 
 This is a screening tool. It does not replace field verification, survey data, hydraulic modeling, or engineering judgment.
 
@@ -77,7 +77,9 @@ The tool queries versioned local DuckDB sources in read-only mode. It always app
 Configured sources include:
 
 - `reference.consequence` for City ROW and city/state edge-of-pavement layers.
-- `mirror.virt-sdw-sdw` for buildings, accessory structures, paved/driveway surfaces, other impervious surfaces, and storm-water easement records.
+- `mirror.virt-sdw-sdw` (daily SQL Server mirror, ten curated SDW tables) for accessory structures, paved/driveway surfaces, other impervious surfaces, and storm-water easement points.
+- `mirror.sdw-spatial` (weekly 68-layer spatial mirror, ST_Hilbert ordered with R-Tree indexes) for buildings, parcels (`ParcelJoin_py`), and storm-water conservation easements. The daily mirror does not clone those two layers, so they are read here.
+  A layer a mirror has not published yet is reported as a warning and skipped, so the remaining layers still load.
 - `mirror.virt-sdw-stm` remains registered for storm-water warehouse context and future Step 300 contract expansion.
 
 All configured features that intersect the asset-wide context ZOI remain available as muted spatial context. When an active located defect exists, the backend intersects each context feature with that defect's scenario ZOI. A feature is marked **Direct contact** when it intersects the inner three-foot base zone; other nonempty intersections are marked **Within zone of influence**. Context features with no scenario intersection are not counted as affected.

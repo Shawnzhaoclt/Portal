@@ -16,6 +16,7 @@ import {
   exitDesktopApplication,
   installPortalUpdate,
   isDesktopRuntime,
+  prepareNetworkAccess,
   restartDesktopApplication,
   startDataCache,
   startDesktopSession,
@@ -32,7 +33,10 @@ import {
   switchRole,
   type PortalUser,
 } from './management/api'
+import { configureErrorToastDuration } from './lib/errorToast'
 import { applyAppTheme, getInitialTheme } from './theme'
+
+configureErrorToastDuration()
 
 const root = createRoot(document.getElementById('root')!)
 const MAINTENANCE_MONITOR_INTERVAL_MS = 5_000
@@ -172,6 +176,7 @@ async function bootstrap() {
       const activeSessionRole = sessionManagementRole()
       clearManagementToken()
       await initializeClientSettings()
+      await prepareNetworkAccess()
       await listen<DataCacheUpdateCompleted>('portal-data-cache-updated', (event) => {
         void promptForDataRestart(event.payload)
       })

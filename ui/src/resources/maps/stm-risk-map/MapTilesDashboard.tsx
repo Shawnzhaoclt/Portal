@@ -48,6 +48,7 @@ import type { AssetExtractArea, AssetExtractPreview } from "./assetExtract";
 import TerrainProfilePanel from "./TerrainProfilePanel";
 import FailureConsequencePanel from "./FailureConsequencePanel";
 import {
+  DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES,
   fetchFailureConsequence,
   type FailureConsequenceResult,
   type FailureDefect,
@@ -482,8 +483,10 @@ const FAILURE_CONSEQUENCE_LAYER_IDS = {
   clipBoundary: `${FAILURE_CONSEQUENCE_SOURCE_ID}-clip-boundary`,
   analysisVolume: `${FAILURE_CONSEQUENCE_SOURCE_ID}-analysis-volume`,
   impactFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-fill`,
+  parcelCasing: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-parcel-casing`,
   impactLine: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-line`,
   impactPoint: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-point`,
+  easementFlag: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-easement-flag`,
   impact3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-3d`,
   impactPoint3d: `${FAILURE_CONSEQUENCE_SOURCE_ID}-impact-point-3d`,
   influenceFill: `${FAILURE_CONSEQUENCE_SOURCE_ID}-influence-fill`,
@@ -794,6 +797,8 @@ export default function App() {
   const failureConsequenceResultRef = useRef<FailureConsequenceResult | null>(null);
   const failureConsequenceMapRef = useRef<MapLibreMap | null>(null);
   const failureConsequence3dRef = useRef(FAILURE_CONSEQUENCE_DEFAULT_3D);
+  const failureConsequenceExtentMilesRef = useRef(DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES);
+  const failureConsequenceScenarioRef = useRef<FailureScenario | undefined>(undefined);
   const failureConsequenceAbortRef = useRef<AbortController | null>(null);
   const polygonClickRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const swipeDragRef = useRef<{ pointerId: number } | null>(null);
@@ -850,6 +855,7 @@ export default function App() {
   const [failureConsequenceError, setFailureConsequenceError] = useState("");
   const [failureConsequenceSimulating, setFailureConsequenceSimulating] = useState(false);
   const [failureConsequence3d, setFailureConsequence3d] = useState(FAILURE_CONSEQUENCE_DEFAULT_3D);
+  const [failureConsequenceExtentMiles, setFailureConsequenceExtentMiles] = useState(DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES);
   const [map3dEnabled, setMap3dEnabled] = useState(false);
   const [map3dTransitioning, setMap3dTransitioning] = useState(false);
   const [mapDataWarning, setMapDataWarning] = useState("");
@@ -2273,10 +2279,13 @@ export default function App() {
     failureConsequenceSimulatingRef.current = false;
     failureConsequenceResultRef.current = null;
     failureConsequence3dRef.current = FAILURE_CONSEQUENCE_DEFAULT_3D;
+    failureConsequenceExtentMilesRef.current = DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES;
+    failureConsequenceScenarioRef.current = undefined;
     setFailureConsequenceOpen(false);
     setFailureConsequenceSimulating(false);
     setFailureConsequenceResult(null);
     setFailureConsequence3d(FAILURE_CONSEQUENCE_DEFAULT_3D);
+    setFailureConsequenceExtentMiles(DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES);
     setFailureConsequenceLoading(false);
     setFailureConsequenceError("");
     updateFailureConsequenceGraphicsOnMaps([failureConsequenceMapRef.current], null, false);
@@ -2287,13 +2296,18 @@ export default function App() {
     assetType: "pipe" | "structure" | "channel",
     scenario?: FailureScenario,
   ) => {
+    failureConsequenceScenarioRef.current = scenario;
     failureConsequenceAbortRef.current?.abort();
     const controller = new AbortController();
     failureConsequenceAbortRef.current = controller;
     setFailureConsequenceLoading(true);
     setFailureConsequenceError("");
     try {
-      const result = await fetchFailureConsequence(assetId, assetType, scenario, controller.signal);
+      const result = await fetchFailureConsequence(assetId, assetType, {
+        scenario,
+        signal: controller.signal,
+        extentMiles: failureConsequenceExtentMilesRef.current,
+      });
       if (controller.signal.aborted) return;
       failureConsequenceResultRef.current = result;
       setFailureConsequenceResult(result);
@@ -2314,6 +2328,18 @@ export default function App() {
       }
     }
   }, []);
+
+  const changeFailureConsequenceExtent = useCallback((extentMiles: number) => {
+    failureConsequenceExtentMilesRef.current = extentMiles;
+    setFailureConsequenceExtentMiles(extentMiles);
+    const current = failureConsequenceResultRef.current;
+    if (!current) return;
+    void requestFailureConsequence(
+      current.asset.asset_id,
+      current.asset.asset_type,
+      failureConsequenceScenarioRef.current,
+    );
+  }, [requestFailureConsequence]);
 
   const openFailureConsequence = useCallback((context?: SelectedFeature["assetHistory"]) => {
     if (assetExtractOpenRef.current) closeAssetExtract();
@@ -4522,11 +4548,13 @@ export default function App() {
           result={failureConsequenceResult}
           simulating={failureConsequenceSimulating}
           is3d={failureConsequence3d}
+          extentMiles={failureConsequenceExtentMiles}
           terrainStyle={activeStyle}
           activeBasemapId={activeBasemapId}
           basemapEnabled={basemapEnabled}
           aerialBasemapUrl={AERIAL_2025_EXPORT_URL}
           onClose={closeFailureConsequence}
+          onExtentMilesChange={changeFailureConsequenceExtent}
           onMapClick={handleFailureConsequenceMapClick}
           onMapReady={handleFailureConsequenceMapReady}
           onSelectDefect={selectFailureDefect}
@@ -9473,6 +9501,54 @@ function updateFailureConsequenceGraphicsOnMaps(
   });
 }
 
+const EASEMENT_FLAG_IMAGE_ID = "failure-consequence-easement-flag";
+
+/**
+ * Draws the easement flag into the map's image cache. The consequence panel builds its
+ * own minimal style with no sprite, so the icon is generated here rather than referenced
+ * from one - which also keeps it in step with the 3D scene's flag. Images do not survive
+ * a style reload, hence the `hasImage` guard on every call.
+ */
+function ensureEasementFlagImage(map: MapLibreMap): void {
+  if (map.hasImage(EASEMENT_FLAG_IMAGE_ID)) return;
+  const size = 32;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  // White casing first, so the flag reads on the aerial basemap as well as the street one.
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  context.strokeStyle = "#ffffff";
+  context.lineWidth = 4.5;
+  context.beginPath();
+  context.moveTo(9, 30);
+  context.lineTo(9, 3);
+  context.stroke();
+  context.beginPath();
+  context.moveTo(10, 4);
+  context.lineTo(26, 8.5);
+  context.lineTo(10, 13);
+  context.closePath();
+  context.stroke();
+  context.fillStyle = "#d62828";
+  context.fill();
+  context.strokeStyle = "#7f1d1d";
+  context.lineWidth = 1.6;
+  context.beginPath();
+  context.moveTo(9, 30);
+  context.lineTo(9, 3);
+  context.stroke();
+  context.beginPath();
+  context.moveTo(10, 4);
+  context.lineTo(26, 8.5);
+  context.lineTo(10, 13);
+  context.closePath();
+  context.stroke();
+  map.addImage(EASEMENT_FLAG_IMAGE_ID, context.getImageData(0, 0, size, size), { pixelRatio: 2 });
+}
+
 function ensureFailureConsequenceLayers(map: MapLibreMap): void {
   if (!map.getSource(FAILURE_CONSEQUENCE_SOURCE_ID)) {
     map.addSource(FAILURE_CONSEQUENCE_SOURCE_ID, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
@@ -9485,7 +9561,12 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
     "city_row", "#0ea5e9",
     "driveway", "#9ca3af",
     "paved_surface", "#7c8a99",
-    "stormwater_easement", "#16a34a",
+    "stormwater_easement", "#d62828",
+    "conservation_easement", "#0f766e",
+    // Parcels tile the whole extent, so they are drawn as a cadastral boundary: no fill,
+    // and white over a dark casing, which is the only pairing that reads on the aerial,
+    // the street basemap and the plain background alike.
+    "parcel", "#ffffff",
     "#8b5cf6",
   ] as unknown as string;
   const zoiColor = [
@@ -9528,7 +9609,29 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
       type: "fill",
       source: FAILURE_CONSEQUENCE_SOURCE_ID,
       filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Polygon"]],
-      paint: { "fill-color": categoryColor, "fill-opacity": 0.055 },
+      paint: {
+        "fill-color": categoryColor,
+        // Parcels cover the extent edge to edge, so a fill on top of every other
+        // context layer would grey the whole scene out. They carry their outline only.
+        "fill-opacity": ["case", ["==", ["get", "category"], "parcel"], 0, 0.055] as unknown as number,
+      },
+      metadata: { runtime_helper: true },
+    });
+  }
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.parcelCasing)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.parcelCasing,
+      type: "line",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      // The white parcel hairline would vanish into the street basemap and into the
+      // plain background when no basemap is on; this carries it on both.
+      filter: [
+        "all",
+        ["==", ["get", "role"], "impact"],
+        ["==", ["get", "category"], "parcel"],
+        ["!=", ["geometry-type"], "Point"],
+      ],
+      paint: { "line-color": "#33404d", "line-width": 2.4, "line-opacity": 0.45 },
       metadata: { runtime_helper: true },
     });
   }
@@ -9538,7 +9641,13 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
       type: "line",
       source: FAILURE_CONSEQUENCE_SOURCE_ID,
       filter: ["all", ["==", ["get", "role"], "impact"], ["!=", ["geometry-type"], "Point"]],
-      paint: { "line-color": categoryColor, "line-width": 1.15, "line-opacity": 0.42 },
+      paint: {
+        "line-color": categoryColor,
+        "line-width": ["case", ["==", ["get", "category"], "parcel"], 0.9, 1.15] as unknown as number,
+        // The parcel boundary is the whole of that layer's presence, so it is drawn at
+        // an opacity that reads; the other categories also have their fill.
+        "line-opacity": ["case", ["==", ["get", "category"], "parcel"], 0.8, 0.42] as unknown as number,
+      },
       metadata: { runtime_helper: true },
     });
   }
@@ -9547,8 +9656,40 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
       id: FAILURE_CONSEQUENCE_LAYER_IDS.impactPoint,
       type: "circle",
       source: FAILURE_CONSEQUENCE_SOURCE_ID,
-      filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Point"]],
+      // Easement points carry the flag symbol below instead, so they are excluded here
+      // rather than drawn twice.
+      filter: [
+        "all",
+        ["==", ["get", "role"], "impact"],
+        ["==", ["geometry-type"], "Point"],
+        ["!=", ["get", "category"], "stormwater_easement"],
+      ],
       paint: { "circle-color": categoryColor, "circle-radius": 4, "circle-opacity": 0.58, "circle-stroke-color": "#ffffff", "circle-stroke-width": 1 },
+      metadata: { runtime_helper: true },
+    });
+  }
+  ensureEasementFlagImage(map);
+  if (!map.getLayer(FAILURE_CONSEQUENCE_LAYER_IDS.easementFlag)) {
+    map.addLayer({
+      id: FAILURE_CONSEQUENCE_LAYER_IDS.easementFlag,
+      type: "symbol",
+      source: FAILURE_CONSEQUENCE_SOURCE_ID,
+      filter: [
+        "all",
+        ["==", ["get", "role"], "impact"],
+        ["==", ["geometry-type"], "Point"],
+        ["==", ["get", "category"], "stormwater_easement"],
+      ],
+      layout: {
+        "icon-image": EASEMENT_FLAG_IMAGE_ID,
+        "icon-anchor": "bottom",
+        // The flag marks a surveyed location, so every one is drawn: dropping some to
+        // collision would misreport how many easement records the extent holds.
+        "icon-allow-overlap": true,
+        "icon-ignore-placement": true,
+      },
+      // Set explicitly so the focus pass has a base value to fade from.
+      paint: { "icon-opacity": 1 },
       metadata: { runtime_helper: true },
     });
   }
@@ -9591,7 +9732,14 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
       id: FAILURE_CONSEQUENCE_LAYER_IDS.impact3d,
       type: "fill-extrusion",
       source: FAILURE_CONSEQUENCE_SOURCE_ID,
-      filter: ["all", ["==", ["get", "role"], "impact"], ["==", ["geometry-type"], "Polygon"]],
+      // Parcels are excluded: extruding a layer that tiles the extent would bury every
+      // other context feature under a continuous slab. Their flat outline still draws.
+      filter: [
+        "all",
+        ["==", ["get", "role"], "impact"],
+        ["==", ["geometry-type"], "Polygon"],
+        ["!=", ["get", "category"], "parcel"],
+      ],
       layout: { visibility: "none" },
       paint: {
         "fill-extrusion-color": categoryColor,
@@ -9604,6 +9752,10 @@ function ensureFailureConsequenceLayers(map: MapLibreMap): void {
           "driveway", 0.6,
           "paved_surface", 0.5,
           "stormwater_easement", 0.35,
+          "conservation_easement", 0.3,
+          // Parcels are a ground reference, not an object: keep them as flat as the
+          // extrusion allows so they never read as low walls.
+          "parcel", 0.2,
           4,
         ],
         "fill-extrusion-base": 0,

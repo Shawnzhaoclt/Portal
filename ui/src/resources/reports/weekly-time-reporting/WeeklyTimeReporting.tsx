@@ -1051,8 +1051,8 @@ export default function WeeklyTimeReporting() {
           + (statsTeam ? `&team=${encodeURIComponent(statsTeam)}` : ''),
       )
       const name = `Weekly-Time-Statistics-${statsStart}-to-${statsEnd}.xlsx`
-      await saveExportAs(name, file.bytes, 'excel')
-      toast.success(`Exported ${name}.`)
+      const savedPath = await saveExportAs(name, file.bytes, 'excel', true)
+      if (savedPath) toast.success(`Exported and opened ${name}.`)
     } catch (error) {
       if (!(error instanceof Error && /cancel/i.test(error.message))) toast.error(errorText(error))
     } finally {

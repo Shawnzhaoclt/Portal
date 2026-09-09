@@ -177,14 +177,18 @@
                                                                           "databaseSourceId":  "reference.consequence",
                                                                           "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/reference.consequence/consequence.duckdb"
                                                                       },
-                                                       "spatialWarehouse":  {
-                                                                                "databaseSourceId":  "mirror.virt-sdw-sdw",
-                                                                                "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-sdw/virt_sdw_01_sdw.duckdb"
-                                                                            },
-                                                       "stormWaterWarehouse":  {
-                                                                                   "databaseSourceId":  "mirror.virt-sdw-stm",
-                                                                                   "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-stm/virt_sdw_01_stm.duckdb"
-                                                                               }
+                                                        "spatialWarehouse":  {
+                                                                                 "databaseSourceId":  "mirror.virt-sdw-sdw",
+                                                                                 "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-sdw/virt_sdw_01_sdw.duckdb"
+                                                                             },
+                                                        "buildings":  {
+                                                                          "databaseSourceId":  "mirror.sdw-spatial",
+                                                                          "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.sdw-spatial/virt_sdw_01_sdw_spatial_warehouse.duckdb"
+                                                                      },
+                                                        "stormWaterWarehouse":  {
+                                                                                    "databaseSourceId":  "mirror.virt-sdw-stm",
+                                                                                    "database":  "${PORTAL_DATA_ROOT}/data/source-cache/unavailable/mirror.virt-sdw-stm/virt_sdw_01_stm.duckdb"
+                                                                                }
                                                    },
                  "pmtilesDetailSources":  {
                                                      "spatial-data-warehouse":  {

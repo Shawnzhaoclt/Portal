@@ -3,6 +3,12 @@ import { portalRequestJson } from "../../../desktop/request";
 export type FailureAssetType = "pipe" | "structure" | "channel";
 export type FailureDefectSource = "itpipes" | "cityworks" | "inventory" | "simulated";
 
+export const DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES = 0.2;
+export const FAILURE_CONSEQUENCE_EXTENT_OPTIONS = Array.from(
+  { length: 10 },
+  (_, index) => Number(((index + 1) / 10).toFixed(1)),
+);
+
 export type FailureDefect = {
   id: string;
   source: FailureDefectSource;
@@ -29,6 +35,8 @@ export type ImpactedFeature = {
   influenced_length_feet: number | null;
   feature_length_feet: number | null;
   influenced_percent: number | null;
+  /** True when the map extent cut the feature, so `geometry` is not its full outline. */
+  extends_beyond_extent: boolean;
   geometry: GeoJSON.Geometry;
   influenced_geometry: GeoJSON.Geometry | null;
   attributes: Record<string, unknown>;
@@ -71,7 +79,8 @@ export type FailureConsequenceResult = {
     scenario_zoi_geometry: GeoJSON.Geometry | null;
     influence_footprint_geometry: GeoJSON.Geometry | null;
     display_extent_geometry: GeoJSON.Geometry;
-    clip_basis: "zoi";
+    display_extent_miles: number;
+    clip_basis: "map_extent";
     impacted_features: ImpactedFeature[];
     counts: Record<string, number>;
     total_impacted: number;
@@ -79,6 +88,7 @@ export type FailureConsequenceResult = {
   };
   method: {
     zoi_formula: string;
+    context_clip: string;
     latest_itpipes_only: boolean;
     latest_cityworks_only: boolean;
     fallback_to_older_inspections: boolean;
@@ -106,16 +116,33 @@ export type ReviewedObservation = {
   origin?: string;
 };
 
+type FailureConsequenceRequestOptions = {
+  scenario?: FailureScenario;
+  signal?: AbortSignal;
+  reviewed?: { observations: ReviewedObservation[]; inspection_direction: string | null };
+  extentMiles?: number;
+};
+
 export async function fetchFailureConsequence(
   assetId: string,
   assetType: FailureAssetType,
-  scenario?: FailureScenario,
-  signal?: AbortSignal,
-  reviewed?: { observations: ReviewedObservation[]; inspection_direction: string | null },
+  options: FailureConsequenceRequestOptions = {},
 ): Promise<FailureConsequenceResult> {
+  const {
+    scenario,
+    signal,
+    reviewed,
+    extentMiles = DEFAULT_FAILURE_CONSEQUENCE_EXTENT_MILES,
+  } = options;
   return portalRequestJson<FailureConsequenceResult>("/api/map/failure-consequence", {
     method: "POST",
-    body: JSON.stringify({ asset_id: assetId, asset_type: assetType, scenario, ...reviewed }),
+    body: JSON.stringify({
+      asset_id: assetId,
+      asset_type: assetType,
+      scenario,
+      extent_miles: extentMiles,
+      ...reviewed,
+    }),
     signal,
   });
 }

@@ -5,19 +5,26 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import duckdb
 import numpy as np
 import rasterio
 from rasterio.transform import from_origin
 from shapely.geometry import LineString, Point, box
 
+from portal.runtime.transport import HTTPException
+from portal.app.core.duckdb_extensions import load_spatial_extension
+
 from .failure_consequence import (
+    _analyze,
     _asset_wide_zoi,
     _defect,
     _display_clip_extent,
+    _display_extent_miles,
     _fill_missing_grid,
     _feature_influence,
     _influence_footprint,
     _profile_values_at,
+    _query_impacts,
     _structure_cover_profile,
     _structure_invert_scenario,
     _terrain_cutaway,
@@ -51,29 +58,25 @@ class FailureConsequenceRulesTest(unittest.TestCase):
         values = [10.0, None, 12.0, 14.0]
         self.assertEqual(_fill_missing_grid(values, 2, 2), [10.0, 12.0, 12.0, 14.0])
 
-    def test_display_clip_extent_is_twice_the_asset_wide_zoi(self) -> None:
-        asset = LineString([(0, 0), (300, 0)])
-        zoi = asset.buffer(25)
-        extent, basis = _display_clip_extent(asset, zoi)
-        self.assertEqual(basis, "zoi")
-        self.assertTrue(extent.covers(asset))
-        self.assertTrue(extent.covers(zoi))
-        self.assertAlmostEqual(extent.bounds[0], -200.0)
-        self.assertAlmostEqual(extent.bounds[1], -50.0)
-        self.assertAlmostEqual(extent.bounds[2], 500.0)
-        self.assertAlmostEqual(extent.bounds[3], 50.0)
+    def test_display_clip_extent_is_a_selected_square_centered_on_the_scenario(self) -> None:
+        extent, basis = _display_clip_extent(Point(100, 200), 0.5)
+        self.assertEqual(basis, "map_extent")
+        self.assertAlmostEqual(extent.bounds[0], -1_220.0)
+        self.assertAlmostEqual(extent.bounds[1], -1_120.0)
+        self.assertAlmostEqual(extent.bounds[2], 1_420.0)
+        self.assertAlmostEqual(extent.bounds[3], 1_520.0)
+        self.assertAlmostEqual(extent.bounds[2] - extent.bounds[0], 2_640.0)
+        self.assertAlmostEqual(extent.bounds[3] - extent.bounds[1], 2_640.0)
 
-    def test_display_clip_extent_uses_zoi_when_it_is_larger(self) -> None:
-        asset = LineString([(0, 0), (10, 0)])
-        zoi = Point(5, 0).buffer(25)
-        extent, basis = _display_clip_extent(asset, zoi)
-        self.assertEqual(basis, "zoi")
-        self.assertTrue(extent.covers(asset))
-        self.assertTrue(extent.covers(zoi))
-        self.assertAlmostEqual(extent.bounds[0], -45.0)
-        self.assertAlmostEqual(extent.bounds[1], -50.0)
-        self.assertAlmostEqual(extent.bounds[2], 55.0)
-        self.assertAlmostEqual(extent.bounds[3], 50.0)
+    def test_display_extent_defaults_to_two_tenths_of_a_mile_and_accepts_tenth_mile_steps(self) -> None:
+        self.assertEqual(_display_extent_miles(None), 0.2)
+        self.assertEqual(_display_extent_miles(0.1), 0.1)
+        self.assertEqual(_display_extent_miles("1.0"), 1.0)
+
+    def test_display_extent_rejects_values_outside_the_supported_steps(self) -> None:
+        for value in (0, 1.1, 0.55, "wide", True):
+            with self.subTest(value=value), self.assertRaises(HTTPException):
+                _display_extent_miles(value)
 
     def test_profile_values_are_interpolated_at_the_exact_station(self) -> None:
         profile = {
@@ -137,6 +140,169 @@ class FailureConsequenceRulesTest(unittest.TestCase):
         self.assertFalse(result["is_influenced"])
         self.assertEqual(result["relationship"], "context")
         self.assertIsNone(result["influenced_geometry_2264"])
+
+    def test_consequence_features_are_selected_and_clipped_by_map_extent_not_zoi(self) -> None:
+        connection = duckdb.connect()
+        try:
+            load_spatial_extension(connection)
+            connection.execute("CREATE TABLE context_features (OBJECTID INTEGER, geometry GEOMETRY)")
+            connection.execute(
+                "INSERT INTO context_features VALUES "
+                "(1, ST_GeomFromText('POLYGON ((80 80, 120 80, 120 120, 80 120, 80 80))'))"
+            )
+            features = _query_impacts(
+                connection,
+                "",
+                "context_features",
+                "Context feature",
+                "context",
+                box(0, 0, 100, 100),
+                Point(10, 10).buffer(5),
+                Point(10, 10).buffer(3),
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]["relationship"], "context")
+        self.assertFalse(features[0]["is_influenced"])
+        self.assertEqual(features[0]["geometry_2264"].bounds, (80.0, 80.0, 100.0, 100.0))
+        # The extent cut three quarters of this polygon away, so the drawn outline is
+        # not the feature's own boundary and the inspector has to say so.
+        self.assertTrue(features[0]["extends_beyond_extent"])
+
+    def test_layer_missing_from_the_mirror_is_skipped_with_a_warning(self) -> None:
+        connection = duckdb.connect()
+        warnings: list[str] = []
+        try:
+            load_spatial_extension(connection)
+            features = _query_impacts(
+                connection,
+                "",
+                "PARCELJOIN_PY",
+                "Parcel",
+                "parcel",
+                box(0, 0, 100, 100),
+                None,
+                None,
+                warnings=warnings,
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(features, [])
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("PARCELJOIN_PY", warnings[0])
+
+    def test_layer_names_resolve_regardless_of_the_mirror_casing(self) -> None:
+        connection = duckdb.connect()
+        warnings: list[str] = []
+        try:
+            load_spatial_extension(connection)
+            # The SDE mirror carries the source's own casing, e.g. "ParcelJoin_py".
+            connection.execute('CREATE TABLE "ParcelJoin_py" ("OBJECTID" INTEGER, "Shape" GEOMETRY)')
+            connection.execute(
+                'INSERT INTO "ParcelJoin_py" VALUES '
+                "(7, ST_GeomFromText('POLYGON ((10 10, 40 10, 40 40, 10 40, 10 10))'))"
+            )
+            features = _query_impacts(
+                connection,
+                "",
+                "PARCELJOIN_PY",
+                "Parcel",
+                "parcel",
+                box(0, 0, 100, 100),
+                Point(20, 20).buffer(5),
+                Point(20, 20).buffer(3),
+                warnings=warnings,
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(len(features), 1)
+        self.assertEqual(features[0]["id"], "parcel:PARCELJOIN_PY:7")
+        self.assertTrue(features[0]["is_influenced"])
+        self.assertFalse(warnings)
+
+    def test_feature_inside_the_extent_is_not_reported_as_cut(self) -> None:
+        connection = duckdb.connect()
+        try:
+            load_spatial_extension(connection)
+            connection.execute("CREATE TABLE context_features (OBJECTID INTEGER, geometry GEOMETRY)")
+            connection.execute(
+                "INSERT INTO context_features VALUES "
+                "(1, ST_GeomFromText('POLYGON ((20 20, 40 20, 40 40, 20 40, 20 20))')), "
+                "(2, ST_GeomFromText('LINESTRING (10 10, 90 90)'))"
+            )
+            features = _query_impacts(
+                connection,
+                "",
+                "context_features",
+                "Context feature",
+                "context",
+                box(0, 0, 100, 100),
+                None,
+                None,
+            )
+        finally:
+            connection.close()
+
+        self.assertEqual(len(features), 2)
+        self.assertFalse(any(feature["extends_beyond_extent"] for feature in features))
+
+    def test_dedicated_building_layer_is_loaded_into_consequence_context(self) -> None:
+        with TemporaryDirectory() as temporary:
+            building_database = Path(temporary) / "buildings.duckdb"
+            connection = duckdb.connect(str(building_database))
+            try:
+                load_spatial_extension(connection)
+                connection.execute(
+                    'CREATE TABLE "Buildings_py" ("OBJECTID" INTEGER, "Layer" VARCHAR, "Shape" GEOMETRY)'
+                )
+                connection.execute(
+                    "INSERT INTO \"Buildings_py\" VALUES "
+                    "(1968, 'RESIDENTIAL', ST_GeomFromText('POLYGON ((40 40, 60 40, 60 60, 40 60, 40 40))'))"
+                )
+                # Parcels and conservation easements are published by this weekly spatial
+                # mirror only; the daily SQL Server mirror does not clone them.
+                connection.execute('CREATE TABLE "ParcelJoin_py" ("OBJECTID" INTEGER, "Shape" GEOMETRY)')
+                connection.execute(
+                    'INSERT INTO "ParcelJoin_py" VALUES '
+                    "(88, ST_GeomFromText('POLYGON ((30 30, 70 30, 70 70, 30 70, 30 30))'))"
+                )
+                connection.execute(
+                    'CREATE TABLE "StormWaterConservationEasements_py" ("OBJECTID" INTEGER, "Shape" GEOMETRY)'
+                )
+                connection.execute(
+                    'INSERT INTO "StormWaterConservationEasements_py" VALUES '
+                    "(12, ST_GeomFromText('POLYGON ((45 45, 55 45, 55 55, 45 55, 45 45))'))"
+                )
+            finally:
+                connection.close()
+
+            warnings: list[str] = []
+            defect = {"id": "test", "geometry_2264": Point(50, 50), "zoi_radius_feet": 15.0}
+            with patch(
+                "portal.app.resources.maps.stm_risk_map.failure_consequence.configured_failure_consequence_sources",
+                return_value={"buildings": {"database": str(building_database)}},
+            ):
+                analysis = _analyze(
+                    defect,
+                    "pipe",
+                    LineString([(0, 50), (100, 50)]),
+                    None,
+                    0.1,
+                    warnings,
+                )
+
+        buildings = [item for item in analysis["impacted_features"] if item["category"] == "building"]
+        self.assertEqual(len(buildings), 1)
+        self.assertEqual(buildings[0]["id"], "building:Buildings_py:1968")
+        self.assertEqual(buildings[0]["geometry_2264"].bounds, (40.0, 40.0, 60.0, 60.0))
+        categories = {item["category"] for item in analysis["impacted_features"]}
+        self.assertIn("parcel", categories)
+        self.assertIn("conservation_easement", categories)
+        self.assertFalse(warnings)
 
     def test_overlapping_polygon_influences_are_unioned_once(self) -> None:
         footprint = _influence_footprint(
@@ -211,8 +377,8 @@ class FailureConsequenceRulesTest(unittest.TestCase):
             assert cutaway is not None
             self.assertEqual(cutaway["dem_file"], "mecklenburg_dem.tif")
             self.assertEqual(len(cutaway["elevations"]), 72 * 72)
-            self.assertEqual(cutaway["width_feet"], 360.0)
-            self.assertEqual(cutaway["height_feet"], 80.0)
+            self.assertEqual(cutaway["width_feet"], 1_056.0)
+            self.assertEqual(cutaway["height_feet"], 1_056.0)
             self.assertTrue(cutaway["asset_geometry_2264"].length > 0)
             self.assertFalse(warnings)
 
