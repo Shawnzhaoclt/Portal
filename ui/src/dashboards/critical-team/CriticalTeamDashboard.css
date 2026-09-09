@@ -886,7 +886,11 @@ summary {
 .workbook-shell thead {
   position: sticky;
   top: 0;
-  z-index: 1;
+  /* A sticky thead is a stacking context, so the z-index its cells carry only orders
+     them against each other - the whole header group ranks by this value. Frozen first
+     columns give their body cells z-index 1, so at 1 the header tied with them and lost
+     on DOM order: the frozen columns scrolled over the header instead of under it. */
+  z-index: 4;
   background: #dbe9ee;
 }
 
