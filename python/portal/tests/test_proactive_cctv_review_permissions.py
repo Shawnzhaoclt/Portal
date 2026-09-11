@@ -199,12 +199,15 @@ class ProactiveCctvReportValidationTests(unittest.TestCase):
         pipe = self.reviewed_pipe()
         group = pipe["distance_groups"][0]
         group["observations"][1]["defect_callout"] = ""
+        group["observations"][1]["mlo_id"] = "133877"
 
         with self.assertRaises(HTTPException) as context:
             cctv._validate_pipe_reviews([pipe])
 
         self.assertEqual(context.exception.status_code, 422)
-        self.assertIn("requires a defect callout", str(context.exception.detail))
+        message = context.exception.detail["message"]
+        self.assertIn("Pipe 1001, 24.1 ft, observation 133877", message)
+        self.assertIn("Enter a defect callout, or uncheck In Report.", message)
 
 
 

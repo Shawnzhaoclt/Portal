@@ -2559,8 +2559,12 @@
   font-size: 0.96rem;
   font-weight: 900;
   line-height: 1.35;
-  text-align: center;
-  pointer-events: none;
+  text-align: left;
+  white-space: pre-line;
+  overflow-wrap: anywhere;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  pointer-events: auto;
   animation: amteam-review-notice-in 140ms ease-out;
 }
 

@@ -3981,6 +3981,7 @@ export default function AMTeamInspectionViewer({
       return null
     }
 
+    const missingCalloutMessages: string[] = []
     const invalidReportGroups = groupedObservations.filter((group) => {
       const scopedGroupKey = pipeScopedKey(selectedPipeId, group.key)
       const selection = observationDefectSelections[scopedGroupKey] ?? emptyObservationDefectSelection()
@@ -3992,10 +3993,17 @@ export default function AMTeamInspectionViewer({
           return inReportSelections[pipeScopedKey(selectedPipeId, cardKey)] ? [cardKey] : []
         }),
       ])
-      const includedCalloutsAreComplete = Array.from(includedKeys).every((cardKey) => (
-        (observationDefectCallouts[pipeScopedKey(selectedPipeId, cardKey)] ?? []).some((callout) => callout.trim())
+      const missingKeys = Array.from(includedKeys).filter((cardKey) => (
+        !(observationDefectCallouts[pipeScopedKey(selectedPipeId, cardKey)] ?? []).some((callout) => callout.trim())
       ))
-      return !includedCalloutsAreComplete
+      missingKeys.forEach((cardKey) => {
+        const observation = group.observations.find((row, index) => observationCardKey(row, index) === cardKey)
+        const instruction = cardKey === selection.majorKey
+          ? 'Enter a defect callout for the Major defect.'
+          : 'Enter a defect callout, or uncheck In Report.'
+        missingCalloutMessages.push(`Pipe ${selectedPipeId}, ${group.label}, observation ${displayValue(observation?.mlo_id)}: ${instruction}`)
+      })
+      return missingKeys.length > 0
     })
 
     if (invalidReportGroups.length > 0) {
@@ -4005,9 +4013,7 @@ export default function AMTeamInspectionViewer({
         ...Object.fromEntries(invalidReportGroups.map((group) => [pipeScopedKey(selectedPipeId, group.key), false])),
       }))
       showReviewNotice(
-        `Complete the reviewer-entered callouts for ${invalidReportGroups.length.toLocaleString()} defect ${
-          invalidReportGroups.length === 1 ? 'location' : 'locations'
-        } before ${blockedActionLabel}.`,
+        `Please correct the following before ${blockedActionLabel}:\n${missingCalloutMessages.map((message) => `- ${message}`).join('\n')}`,
         'error',
       )
       return null

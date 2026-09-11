@@ -168,7 +168,7 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
     for pipe_number, pipe in enumerate(pipes, start=1):
         ml_id = str(_pipe_value(pipe, "ml_id") or "").strip()
         mli_id = str(_pipe_value(pipe, "mli_id") or "").strip()
-        pipe_label = ml_id or f"pipe {pipe_number}"
+        pipe_label = f"Pipe {ml_id}" if ml_id else f"Pipe {pipe_number}"
         if not ml_id or not mli_id:
             failures.append(f"{pipe_label}: pipe ID and inspection ID are required")
         clogging_percent = _pipe_value(pipe, "clogging_percent")
@@ -180,7 +180,11 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
         groups = _pipe_value(pipe, "distance_groups") or []
         for group_number, group in enumerate(groups, start=1):
             group_value = group if isinstance(group, dict) else group.model_dump()
-            group_label = str(group_value.get("distance_key") or f"group {group_number}")
+            distance = group_value.get("distance_feet")
+            group_label = (
+                f"{distance:.1f} ft" if isinstance(distance, (int, float))
+                else str(group_value.get("distance_key") or f"location {group_number}").replace("distance:", "Distance ", 1)
+            )
             observations = group_value.get("observations") or []
             observation_values = [
                 observation if isinstance(observation, dict) else observation.model_dump()
@@ -214,10 +218,19 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
                 if confirmed_no_high_score:
                     failures.append(f"{pipe_label}, {group_label}: a scored defect cannot also be confirmed as having no score of 3 or higher")
                 for observation in included_observations:
+                    observation_id = str(observation.get("mlo_id") or "").strip()
+                    if not observation_id:
+                        observation_id = str(observation.get("source_observation_key") or "").split("|", 1)[0]
+                    observation_label = f"{pipe_label}, {group_label}, observation {observation_id}"
                     if observation.get("defect_role") not in {"major", "other"}:
-                        failures.append(f"{pipe_label}, {group_label}: every included observation must be Major or Other")
+                        failures.append(f"{observation_label}: choose Major Defect or Other Defect, or uncheck In Report.")
                     if not str(observation.get("defect_callout") or "").strip():
-                        failures.append(f"{pipe_label}, {group_label}: every included observation requires a defect callout")
+                        instruction = (
+                            "Enter a defect callout for the Major defect."
+                            if observation.get("defect_role") == "major"
+                            else "Enter a defect callout, or uncheck In Report."
+                        )
+                        failures.append(f"{observation_label}: {instruction}")
                 major_keys = {
                     str(observation.get("source_observation_key") or "").strip()
                     for observation in observation_values
@@ -231,11 +244,17 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
                 if not confirmed_no_high_score:
                     failures.append(f"{pipe_label}, {group_label}: confirm that no defect has an AM score of 3 or higher")
     if failures:
+        visible_failures = failures[:25]
+        message = "Please correct the following before saving or submitting:\n" + "\n".join(
+            f"- {failure}" for failure in visible_failures
+        )
+        if len(failures) > len(visible_failures):
+            message += f"\nAnd {len(failures) - len(visible_failures)} more issues. Correct these first, then try again."
         raise HTTPException(
             status_code=422,
             detail={
-                "message": "Complete all required pipe review checks before saving or submitting the report.",
-                "failures": failures[:25],
+                "message": message,
+                "failures": visible_failures,
             },
         )
 
