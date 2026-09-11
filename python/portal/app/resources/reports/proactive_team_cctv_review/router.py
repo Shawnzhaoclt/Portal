@@ -191,6 +191,19 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
                 failures.append(f"{pipe_label}, {group_label}: observation keys must be present and unique")
             major_count = sum(observation.get("defect_role") == "major" for observation in observation_values)
             other_count = sum(observation.get("defect_role") == "other" for observation in observation_values)
+            included_observations = [
+                observation
+                for observation in observation_values
+                if bool(
+                    observation.get("in_report")
+                    if observation.get("in_report") is not None
+                    else observation.get("defect_role") in {"major", "other"}
+                )
+            ]
+            included_keys = {
+                str(observation.get("source_observation_key") or "").strip()
+                for observation in included_observations
+            }
             score = group_value.get("am_score")
             confirmed_no_high_score = bool(group_value.get("no_am_score_ge_3_confirmed"))
             if score is not None:
@@ -200,6 +213,18 @@ def _validate_pipe_reviews(pipes: list[ReportPipeSaveRequest] | list[dict[str, A
                     failures.append(f"{pipe_label}, {group_label}: select exactly one major defect for an AM score of 3 or higher")
                 if confirmed_no_high_score:
                     failures.append(f"{pipe_label}, {group_label}: a scored defect cannot also be confirmed as having no score of 3 or higher")
+                for observation in included_observations:
+                    if observation.get("defect_role") not in {"major", "other"}:
+                        failures.append(f"{pipe_label}, {group_label}: every included observation must be Major or Other")
+                    if not str(observation.get("defect_callout") or "").strip():
+                        failures.append(f"{pipe_label}, {group_label}: every included observation requires a defect callout")
+                major_keys = {
+                    str(observation.get("source_observation_key") or "").strip()
+                    for observation in observation_values
+                    if observation.get("defect_role") == "major"
+                }
+                if not major_keys.issubset(included_keys):
+                    failures.append(f"{pipe_label}, {group_label}: the major defect must be included in the report")
             else:
                 if major_count or other_count:
                     failures.append(f"{pipe_label}, {group_label}: defect roles require a major defect and AM score")

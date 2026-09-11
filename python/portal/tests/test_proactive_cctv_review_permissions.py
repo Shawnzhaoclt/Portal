@@ -160,5 +160,53 @@ class ProactiveCctvPermissionTests(unittest.TestCase):
         self.assertEqual(context.exception.status_code, 403)
 
 
+class ProactiveCctvReportValidationTests(unittest.TestCase):
+    @staticmethod
+    def reviewed_pipe() -> dict[str, object]:
+        return {
+            "ml_id": "1001",
+            "mli_id": "2001",
+            "clogging_percent": 0,
+            "clogging_frame_seconds": None,
+            "distance_groups": [
+                {
+                    "distance_key": "distance:24.1",
+                    "distance_feet": 24.1,
+                    "am_score": 4,
+                    "no_am_score_ge_3_confirmed": False,
+                    "observations": [
+                        {
+                            "source_observation_key": "major-observation",
+                            "defect_role": "major",
+                            "in_report": True,
+                            "defect_callout": "Surface Damage Aggregate Visible (Extensive)",
+                        },
+                        {
+                            "source_observation_key": "other-observation",
+                            "defect_role": "other",
+                            "in_report": True,
+                            "defect_callout": "Crack Longitudinal",
+                        },
+                    ],
+                }
+            ],
+        }
+
+    def test_accepts_included_observations_without_snapshots(self) -> None:
+        cctv._validate_pipe_reviews([self.reviewed_pipe()])
+
+    def test_rejects_included_observation_without_reviewer_callout(self) -> None:
+        pipe = self.reviewed_pipe()
+        group = pipe["distance_groups"][0]
+        group["observations"][1]["defect_callout"] = ""
+
+        with self.assertRaises(HTTPException) as context:
+            cctv._validate_pipe_reviews([pipe])
+
+        self.assertEqual(context.exception.status_code, 422)
+        self.assertIn("requires a defect callout", str(context.exception.detail))
+
+
+
 if __name__ == "__main__":
     unittest.main()

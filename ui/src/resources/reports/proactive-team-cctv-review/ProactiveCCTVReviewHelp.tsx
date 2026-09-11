@@ -44,7 +44,7 @@ const workflowSteps = [
   },
   {
     title: 'Review',
-    text: 'Move through each pipe, review distance groups, choose defect roles, confirm clean groups, and select snapshots.',
+    text: 'Move through each pipe, review distance groups, choose one Major defect and any Other defects, and optionally select a snapshot for each included observation.',
   },
   {
     title: 'Generate',
@@ -196,15 +196,17 @@ export default function ProactiveCCTVReviewHelp() {
         <div id="review" className="cctv-help-anchor" />
         <p>
           The review workspace shows the inspection video and the observation table side by side. Observations are
-          grouped by distance, and each row represents one graded observation.
+          grouped to the nearest 0.1 foot. Each row is one observation, but the report creates only one defect entry
+          for each distance group.
         </p>
         <HelpFigure image={reviewWorkspaceImage} caption="CCTV review workspace with video, pipe navigation, and observation table." wide />
         <div className="cctv-help-two-column">
           <div>
             <h3>Distance groups</h3>
             <ul className="cctv-help-list">
-              <li>Enter an AM score when a group has a defect scored 3 or higher.</li>
-              <li>Choose or type a defect comment for scored groups.</li>
+              <li>Select exactly one Major defect when a location has an AM score of 3 or higher.</li>
+              <li>The AM score is shared by every included observation at that location.</li>
+              <li>Enter reviewer callouts for the Major and every included Other defect.</li>
               <li>Click Confirm None when no observation in the group has AM score 3 or higher.</li>
             </ul>
           </div>
@@ -212,9 +214,10 @@ export default function ProactiveCCTVReviewHelp() {
             <h3>Observation rows</h3>
             <ul className="cctv-help-list">
               <li>Click the MLO ID to view observation details.</li>
-              <li>Select Major Defect for the main defect and Other Defect for supporting defects.</li>
+              <li>Select Major Defect for the main report code and Other Defect for supporting codes.</li>
+              <li>Use In Report to include or exclude Other defects and their selected snapshots. The Major snapshot appears first when selected.</li>
               <li>Use the Extensive checkbox only for selected major or other defects.</li>
-              <li>Click the snapshot link to choose the report image.</li>
+              <li>Snapshots start unselected. Select a snapshot to include it, or use Clear snapshot selection to remove it.</li>
             </ul>
           </div>
         </div>
@@ -230,13 +233,14 @@ export default function ProactiveCCTVReviewHelp() {
         <div id="score" className="cctv-help-anchor" />
         <p>
           Every distance group needs either a scored major defect workflow or a confirmation that there is no AM score
-          greater than or equal to 3.
+          greater than or equal to 3. Report Code and Additional Code(s) come only from the reviewer-entered callouts;
+          the original CCTV code is retained for reference but is not substituted into the report.
         </p>
         <div className="cctv-help-figure-grid">
           <HelpFigure image={confirmNoneImage} caption="Confirm that a distance group has no AM score greater than or equal to 3." />
           <HelpFigure image={amScoreCommentImage} caption="Enter AM score and select or type a defect comment." />
           <HelpFigure image={defectRoleSelectionImage} caption="Choose Major Defect or Other Defect for selected observations." />
-          <HelpFigure image={snapshotSelectionImage} caption="Select the snapshot image that should appear in the report." wide />
+          <HelpFigure image={snapshotSelectionImage} caption="Select optional snapshots for included observations. The Major defect snapshot appears first." wide />
         </div>
           </HelpSection>
 
@@ -261,8 +265,8 @@ export default function ProactiveCCTVReviewHelp() {
         <ol className="cctv-help-steps">
           <li>Review or confirm every distance group for every pipe.</li>
           <li>Click Generate Report and enter an optional memo.</li>
-          <li>Wait for the generation progress indicator to finish.</li>
-          <li>Click Download to retrieve the generated report file.</li>
+          <li>Wait for the generation progress indicator, then verify each location in the report preview.</li>
+          <li>Click Download Report in the preview to save and open the generated file.</li>
         </ol>
         <div className="cctv-help-figure-grid">
           <HelpFigure image={nextValidationImage} caption="Validation message shown before moving to the next pipe." />

@@ -2116,8 +2116,10 @@
 
 .amteam-defect-observation-extensive-cell,
 .amteam-defect-observation-in-report-cell {
-  align-content: center;
-  justify-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 
 .amteam-defect-observation-extensive-cell label,
@@ -4363,6 +4365,157 @@
   width: 42%;
   background: var(--amteam-blue);
   animation: amteam-report-progress 1.15s ease-in-out infinite;
+}
+
+.amteam-report-preview-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 2150;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(12, 26, 40, 0.58);
+  backdrop-filter: blur(2px);
+}
+
+.amteam-report-preview-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(900px, calc(100vw - 48px));
+  height: min(860px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--amteam-border-strong);
+  background: #eef3f7;
+  box-shadow: 0 24px 64px rgba(10, 31, 49, 0.36);
+  color: var(--amteam-text);
+}
+
+.amteam-report-preview-dialog > header {
+  display: flex;
+  min-height: 66px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 12px 18px;
+  border-bottom: 1px solid var(--amteam-border);
+  background: #fff;
+}
+
+.amteam-report-preview-dialog > header div {
+  display: grid;
+  gap: 3px;
+}
+
+.amteam-report-preview-dialog > header span {
+  color: var(--amteam-blue);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.amteam-report-preview-dialog > header strong {
+  font-size: 1rem;
+}
+
+.amteam-report-preview-dialog > header button {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--amteam-border);
+  background: #fff;
+  color: var(--amteam-text);
+}
+
+.amteam-report-preview-scroll {
+  overflow: auto;
+  padding: 24px;
+}
+
+.amteam-report-preview-paper {
+  box-sizing: border-box;
+  width: min(8.5in, 100%);
+  min-height: 11in;
+  margin: 0 auto;
+  padding: 0.7in 0.75in;
+  background: #fff;
+  box-shadow: 0 5px 20px rgba(27, 54, 78, 0.17);
+  color: #172331;
+  font-family: Arial, sans-serif;
+}
+
+.amteam-report-preview-paper p {
+  min-height: 1em;
+  margin: 0 0 5px;
+  font-size: 11pt;
+  line-height: 1.25;
+}
+
+.amteam-report-preview-paper p.bold,
+.amteam-report-preview-paper p.heading {
+  font-weight: 700;
+}
+
+.amteam-report-preview-paper p.underline {
+  text-decoration: underline;
+}
+
+.amteam-report-preview-paper p.center {
+  text-align: center;
+}
+
+.amteam-report-preview-paper img {
+  display: block;
+  width: auto;
+  max-width: 5.9in;
+  max-height: 3.75in;
+  margin: 8px 0 10px;
+  object-fit: contain;
+}
+
+.amteam-report-preview-dialog > footer {
+  display: flex;
+  min-height: 70px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--amteam-border);
+  background: #fff;
+}
+
+.amteam-report-preview-dialog > footer > span {
+  color: var(--amteam-muted);
+  font-size: 0.8rem;
+}
+
+.amteam-report-preview-dialog > footer > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+@media (max-width: 700px) {
+  .amteam-report-preview-backdrop {
+    padding: 8px;
+  }
+
+  .amteam-report-preview-dialog {
+    width: calc(100vw - 16px);
+    height: calc(100vh - 16px);
+  }
+
+  .amteam-report-preview-dialog > footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .amteam-report-preview-dialog > footer > div {
+    justify-content: flex-end;
+  }
 }
 
 .amteam-document > .amteam-status-message {

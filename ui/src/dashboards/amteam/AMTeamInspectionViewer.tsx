@@ -231,6 +231,7 @@ const PIPE_DEFECT_CALLOUT_DICTIONARY_KEY = 'pipe_defect_callout'
 const CLOGGING_DEFECT_CALLOUT_DICTIONARY_KEY = 'clogging_defect_callout'
 const CLOGGING_PERCENT_STEP = 5
 const DEFAULT_MAJOR_DEFECT_AM_SCORE = '3'
+const DISTANCE_GROUP_PRECISION_FEET = 0.1
 const VIDEO_DEFECT_MIN_WIDTH = 320
 const VIDEO_DEFECT_TABLE_DEFAULT_WIDTH = 650
 const VIDEO_DEFECT_TABLE_MIN_WIDTH = 520
@@ -686,20 +687,15 @@ function fileNameFromMediaUrl(url: string) {
 }
 
 function selectedSnapshotFileName(
-  observation: AmTeamObservation,
+  _observation: AmTeamObservation,
   scopedCardKey: string,
   snapshotSelections: Record<string, string>,
-  mediaMode: MediaSourceMode,
-  mediaRoot: string,
+  _mediaMode: MediaSourceMode,
+  _mediaRoot: string,
 ) {
   const selectedUrl = snapshotSelections[scopedCardKey]
   if (isFrameSelection(selectedUrl)) return selectedUrl
-  const imageUrls = observationImageUrls(observation)
-  const defaultUrl = imageUrls[0]
-    ? mediaViewUrl(imageUrls[0], mediaMode, mediaRoot)
-    : ''
-  const effectiveUrl = selectedUrl || defaultUrl
-  return effectiveUrl ? fileNameFromMediaUrl(effectiveUrl) : null
+  return selectedUrl ? fileNameFromMediaUrl(selectedUrl) : null
 }
 
 /** The Media ID of the snapshot the reviewer picked, resolved through the
@@ -781,17 +777,6 @@ function numericValue(value: AmTeamCellValue | undefined) {
   return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY
 }
 
-/**
- * Orders two cell values numerically. `numericValue` maps anything unparseable to
- * Infinity, so subtracting would hand `sort` a NaN whenever both sides are unparseable.
- */
-function compareNumericValues(left: AmTeamCellValue | undefined, right: AmTeamCellValue | undefined) {
-  const leftNumber = numericValue(left)
-  const rightNumber = numericValue(right)
-  if (leftNumber === rightNumber) return 0
-  return leftNumber < rightNumber ? -1 : 1
-}
-
 function observationSeekSeconds(observation: AmTeamObservation, video: AmTeamMediaAsset | null | undefined) {
   if (!video) return null
   const seconds = finiteNumberValue(observation.digital_time)
@@ -808,8 +793,13 @@ function observationDistanceGroups(observations: AmTeamObservation[]) {
 
   for (const observation of observations) {
     const rawLabel = displayValue(observation.distance)
-    const label = formatDistanceFeet(observation.distance)
-    const sortValue = numericValue(observation.distance)
+    const sourceDistance = numericValue(observation.distance)
+    // ITPipes can emit distances with insignificant floating-point differences. Reviewers
+    // see tenths of a foot, so use the same precision to keep one physical station together.
+    const sortValue = Number.isFinite(sourceDistance)
+      ? Math.round(sourceDistance / DISTANCE_GROUP_PRECISION_FEET) * DISTANCE_GROUP_PRECISION_FEET
+      : sourceDistance
+    const label = formatDistanceFeet(Number.isFinite(sortValue) ? Number(sortValue.toFixed(1)) : observation.distance)
     const key = Number.isFinite(sortValue) ? `distance:${sortValue}` : `distance:${rawLabel.trim().toLowerCase()}`
     const existingGroup = groups.get(key)
 
@@ -1146,6 +1136,37 @@ async function fetchVideoFrameReportImageFromCandidates(videoUrls: string[], tim
     if (image) return image
   }
   return null
+}
+
+async function fetchObservationReportImage(
+  observation: AmTeamObservation,
+  scopedCardKey: string,
+  snapshotSelections: Record<string, string>,
+  cachedPipe: PipeObservationCacheEntry | undefined,
+  mediaMode: MediaSourceMode,
+) {
+  const selectedSnapshotUrl = snapshotSelections[scopedCardKey]
+  if (!selectedSnapshotUrl) return null
+  if (isFrameSelection(selectedSnapshotUrl)) {
+    const frameVideo = cachedPipe?.media.videos[0]
+    const frameVideoUrls = frameVideo
+      ? mediaAssetViewUrls(frameVideo, mediaMode, cachedPipe?.media.media_root ?? '')
+      : []
+    return fetchVideoFrameReportImageFromCandidates(
+      frameVideoUrls,
+      frameSelectionSeconds(selectedSnapshotUrl),
+    )
+  }
+
+  const defectImageUrls = observationImageUrls(observation)
+  const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
+  const selectedApiImageUrl = defectImageUrls.find((imageUrl) => (
+    fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
+  ))
+  const defectImageCandidates = selectedApiImageUrl
+    ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
+    : uniqueMediaUrls([selectedSnapshotUrl])
+  return fetchReportImageFromCandidates(defectImageCandidates)
 }
 
 function crc32(bytes: Uint8Array) {
@@ -1518,7 +1539,7 @@ function pipeGradeThreePlusCount(
   }, 0)
 }
 
-/** How many defects this pipe publishes - what the report is built from. */
+/** How many physical locations this pipe publishes - one report block per location. */
 function pipePublishedDefectCount(
   pipeId: string,
   groupedObservations: ObservationDistanceGroup[],
@@ -1527,16 +1548,8 @@ function pipePublishedDefectCount(
 ) {
   return groupedObservations.reduce((count, group) => {
     const groupSelection = observationDefectSelections[pipeScopedKey(pipeId, group.key)]
-    return count + distanceGroupIncludedCount(pipeId, group, inReportSelections, groupSelection)
+    return count + (distanceGroupIncludedCount(pipeId, group, inReportSelections, groupSelection) > 0 ? 1 : 0)
   }, 0)
-}
-
-/** What a published defect prints when the reviewer entered no callout of its own. */
-function observationFallbackCallout(observation: AmTeamObservation) {
-  const code = displayValue(observation.code)
-  const grade = displayValue(observation.grade)
-  if (code === '-') return displayValue(observation.observation_text)
-  return grade === '-' ? code : `${code} (Grade ${grade})`
 }
 
 function defectCalloutReportTexts(callouts: string[], isExtensive: boolean) {
@@ -1683,66 +1696,75 @@ async function buildReviewReportFile({
       continue
     }
 
-    // Every published defect is its own block, ordered by distance and then by MLO id,
-    // so two defects recorded at the same distance both reach the report instead of one
-    // of them being folded into the other's "additional codes".
-    const publishedDefects = groupedPipeObservations.flatMap((distanceGroup) => {
+    // Crystal's workflow treats a station as one defect location. The selected Major
+    // supplies Code and its selected snapshot is shown first. Included Other observations
+    // supply Additional Codes and any explicitly selected snapshots.
+    for (const distanceGroup of groupedPipeObservations) {
       const scopedGroupKey = pipeScopedKey(pipeId, distanceGroup.key)
       const selection = observationDefectSelections[scopedGroupKey] ?? emptyObservationDefectSelection()
-      return distanceGroup.observations
-        .map((observation, index) => ({ observation, cardKey: observationCardKey(observation, index), selection }))
-        .filter(({ cardKey }) => (
-          selection.majorKey === cardKey
-          || Boolean(inReportSelections[pipeScopedKey(pipeId, cardKey)])
-        ))
-    })
-    publishedDefects.sort((left, right) => (
-      compareNumericValues(left.observation.distance, right.observation.distance)
-      || compareNumericValues(left.observation.mlo_id, right.observation.mlo_id)
-    ))
+      const observationEntries = distanceGroup.observations.map((observation, index) => ({
+        observation,
+        cardKey: observationCardKey(observation, index),
+      }))
+      const includedEntries = observationEntries.filter(({ cardKey }) => (
+        selection.majorKey === cardKey
+        || Boolean(inReportSelections[pipeScopedKey(pipeId, cardKey)])
+      ))
+      if (includedEntries.length === 0) continue
 
-    for (const { observation, cardKey, selection } of publishedDefects) {
-      defectNumber += 1
-      const scopedCardKey = pipeScopedKey(pipeId, cardKey)
-      const selectedSnapshotUrl = snapshotSelections[scopedCardKey]
-      let defectImage: ReportImage | null = null
-      if (isFrameSelection(selectedSnapshotUrl)) {
-        const frameVideo = cachedPipe?.media.videos[0]
-        const frameVideoUrls = frameVideo
-          ? mediaAssetViewUrls(frameVideo, mediaMode, cachedPipe?.media.media_root ?? '')
-          : []
-        defectImage = await fetchVideoFrameReportImageFromCandidates(
-          frameVideoUrls,
-          frameSelectionSeconds(selectedSnapshotUrl),
-        )
-      } else {
-        const defectImageUrls = observationImageUrls(observation)
-        const selectedSnapshotName = selectedSnapshotUrl ? fileNameFromMediaUrl(selectedSnapshotUrl).toLowerCase() : ''
-        const selectedApiImageUrl = defectImageUrls.find((imageUrl) => (
-          fileNameFromMediaUrl(imageUrl).toLowerCase() === selectedSnapshotName
-        )) ?? defectImageUrls[0]
-        const defectImageCandidates = selectedApiImageUrl
-          ? mediaViewUrls(selectedApiImageUrl, mediaMode, cachedPipe?.media.media_root ?? '')
-          : uniqueMediaUrls([selectedSnapshotUrl])
-        defectImage = await fetchReportImageFromCandidates(defectImageCandidates)
+      const majorEntry = observationEntries.find(({ cardKey }) => cardKey === selection.majorKey)
+      if (!majorEntry) {
+        throw new Error(`Select one Major defect at ${distanceGroup.label} for Asset ID ${reportAssetId(inspection)}.`)
       }
-      // Every callout of this defect is printed; only the first used to survive.
-      const isExtensiveDefect = Boolean(extensiveDefectSelections[scopedCardKey])
-      const enteredCodes = defectCalloutReportTexts(
-        observationDefectCallouts[scopedCardKey] ?? [],
-        isExtensiveDefect,
+      const majorScopedCardKey = pipeScopedKey(pipeId, majorEntry.cardKey)
+      const majorCodes = defectCalloutReportTexts(
+        observationDefectCallouts[majorScopedCardKey] ?? [],
+        Boolean(extensiveDefectSelections[majorScopedCardKey]),
       )
-      const defectCodes = enteredCodes.length
-        ? enteredCodes
-        : defectCalloutReportTexts([observationFallbackCallout(observation)], isExtensiveDefect)
+      if (majorCodes.length === 0) {
+        throw new Error(`Enter a Major defect callout at ${distanceGroup.label} for Asset ID ${reportAssetId(inspection)}.`)
+      }
 
+      const additionalCodes: string[] = []
+      const seenAdditionalCodes = new Set<string>()
+      for (const entry of includedEntries) {
+        if (entry.cardKey === majorEntry.cardKey) continue
+        const scopedCardKey = pipeScopedKey(pipeId, entry.cardKey)
+        const codes = defectCalloutReportTexts(
+          observationDefectCallouts[scopedCardKey] ?? [],
+          Boolean(extensiveDefectSelections[scopedCardKey]),
+        )
+        if (codes.length === 0) {
+          throw new Error(`Enter a callout for every included Other defect at ${distanceGroup.label} for Asset ID ${reportAssetId(inspection)}.`)
+        }
+        for (const code of codes) {
+          const normalizedCode = code.trim().toLowerCase()
+          if (!normalizedCode || normalizedCode === majorCodes[0].trim().toLowerCase() || seenAdditionalCodes.has(normalizedCode)) continue
+          seenAdditionalCodes.add(normalizedCode)
+          additionalCodes.push(code)
+        }
+      }
+
+      defectNumber += 1
       addParagraph('')
       addParagraph(`Defect ${defectNumber}:`, { bold: true, fontSize: 12, outlineLevel: 3 })
-      if (defectImage) elements.push({ type: 'image', image: defectImage })
-      addParagraph(`Code: ${defectCodes.join('; ')}`)
-      addParagraph(`Distance: ${displayValue(observation.distance)}`)
-      // The AM score belongs to the distance group, so defects that share a group share it.
+      // Only explicitly selected snapshots enter the report, with the Major first.
+      const imageEntries = [majorEntry, ...includedEntries.filter((entry) => entry.cardKey !== majorEntry.cardKey)]
+      for (const entry of imageEntries) {
+        const scopedCardKey = pipeScopedKey(pipeId, entry.cardKey)
+        if (!snapshotSelections[scopedCardKey]) continue
+        const defectImage = await fetchObservationReportImage(
+          entry.observation, scopedCardKey, snapshotSelections, cachedPipe, mediaMode,
+        )
+        if (!defectImage) {
+          throw new Error(`The selected snapshot for observation ${displayValue(entry.observation.mlo_id)} at ${distanceGroup.label} is unavailable. Select another snapshot or clear its selection.`)
+        }
+        elements.push({ type: 'image', image: defectImage })
+      }
+      addParagraph(`Code: ${majorCodes[0]}`)
+      addParagraph(`Distance: ${distanceGroup.label}`)
       addParagraph(`AM Score: ${selection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE}`)
+      addParagraph(`Additional Code(s): ${additionalCodes.length ? additionalCodes.join('; ') : 'None'}`)
     }
 
     addParagraph('')
@@ -1855,18 +1877,56 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
     pipeReviewInputs[pipeId] = savedPipeReviewInput(savedPipe, observationResponse.media)
 
     const observationsByCardKey = observationsByRenderedCardKey(observationResponse.rows)
+    const renderedObservationByMloId = new Map<string, { cardKey: string; groupKey: string; observation: AmTeamObservation }>()
+    for (const currentDistanceGroup of observationDistanceGroups(observationResponse.rows)) {
+      currentDistanceGroup.observations.forEach((observation, index) => {
+        const mloId = recordId(observation.mlo_id)
+        if (mloId) {
+          renderedObservationByMloId.set(mloId, {
+            cardKey: observationCardKey(observation, index),
+            groupKey: currentDistanceGroup.key,
+            observation,
+          })
+        }
+      })
+    }
 
     for (const savedDistanceGroup of savedPipe.distance_groups) {
-      const groupSelection = emptyObservationDefectSelection()
-      groupSelection.amScore = savedDistanceGroup.am_score === null ? '' : String(savedDistanceGroup.am_score)
-      groupSelection.noHighScoreConfirmed = savedDistanceGroup.no_am_score_ge_3_confirmed
+      const matchedRenderedEntry = savedDistanceGroup.observations
+        .map((savedObservation) => renderedObservationByMloId.get(recordId(savedObservation.mlo_id)))
+        .find(Boolean)
+      const savedDistance = finiteNumberValue(savedDistanceGroup.distance_feet)
+      const normalizedDistance = savedDistance === null
+        ? null
+        : Number((Math.round(savedDistance / DISTANCE_GROUP_PRECISION_FEET) * DISTANCE_GROUP_PRECISION_FEET).toFixed(1))
+      const currentGroupKey = matchedRenderedEntry?.groupKey
+        ?? (normalizedDistance === null ? savedDistanceGroup.distance_key : `distance:${normalizedDistance}`)
+      const scopedCurrentGroupKey = pipeScopedKey(pipeId, currentGroupKey)
+      const groupSelection = observationDefectSelections[scopedCurrentGroupKey]
+        ?? emptyObservationDefectSelection()
+      if (savedDistanceGroup.am_score !== null) {
+        groupSelection.amScore = String(Math.max(Number(groupSelection.amScore || 0), savedDistanceGroup.am_score))
+        groupSelection.noHighScoreConfirmed = false
+      } else if (!groupSelection.majorKey) {
+        groupSelection.noHighScoreConfirmed ||= savedDistanceGroup.no_am_score_ge_3_confirmed
+      }
 
       for (const savedObservation of savedDistanceGroup.observations) {
-        const scopedCardKey = pipeScopedKey(pipeId, savedObservation.source_observation_key)
+        const renderedEntry = renderedObservationByMloId.get(recordId(savedObservation.mlo_id))
+        const currentCardKey = observationsByCardKey.has(savedObservation.source_observation_key)
+          ? savedObservation.source_observation_key
+          : renderedEntry?.cardKey ?? savedObservation.source_observation_key
+        const scopedCardKey = pipeScopedKey(pipeId, currentCardKey)
         if (savedObservation.defect_role === 'major') {
-          groupSelection.majorKey = savedObservation.source_observation_key
+          if (!groupSelection.majorKey) {
+            groupSelection.majorKey = currentCardKey
+          } else if (groupSelection.majorKey !== currentCardKey && !groupSelection.otherKeys.includes(currentCardKey)) {
+            // Old reports could contain separate nearby stations that now normalize to
+            // one tenth of a foot. Keep one Major and retain the others as included Others.
+            groupSelection.otherKeys.push(currentCardKey)
+          }
         } else if (savedObservation.defect_role === 'other') {
-          groupSelection.otherKeys.push(savedObservation.source_observation_key)
+          if (!groupSelection.otherKeys.includes(currentCardKey)) groupSelection.otherKeys.push(currentCardKey)
         }
 
         // Reports saved before the flag existed carry the decision in the role alone.
@@ -1884,7 +1944,7 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
             : parseDefectCallouts(savedCallout)
         }
 
-        const savedObservationRow = observationsByCardKey.get(savedObservation.source_observation_key)
+        const savedObservationRow = observationsByCardKey.get(currentCardKey) ?? renderedEntry?.observation
         const mediaIdIndex = savedObservation.selected_picture_media_id
           ? (savedObservationRow?.image_media_ids ?? []).findIndex(
               (mediaId) => mediaId === savedObservation.selected_picture_media_id,
@@ -1904,7 +1964,7 @@ async function loadSavedCctvReviewState(report: CctvReviewReport): Promise<Saved
         }
       }
 
-      observationDefectSelections[pipeScopedKey(pipeId, savedDistanceGroup.distance_key)] = groupSelection
+      observationDefectSelections[scopedCurrentGroupKey] = groupSelection
     }
   }
 
@@ -1992,6 +2052,88 @@ function ReportProgressOverlay({ message }: { message: string }) {
         </div>
       </div>
     </div>
+  )
+}
+
+function ReviewReportPreviewDialog({
+  report,
+  busy,
+  onClose,
+  onDownload,
+}: {
+  report: ReviewReportFile | null
+  busy: boolean
+  onClose: () => void
+  onDownload: () => void
+}) {
+  const imageUrls = useMemo(() => report?.elements.map((element) => {
+    if (element.type !== 'image') return null
+    const bytes = element.image.data.slice().buffer as ArrayBuffer
+    return URL.createObjectURL(new Blob([bytes], { type: 'image/jpeg' }))
+  }) ?? [], [report])
+
+  useEffect(() => () => imageUrls.forEach((url) => {
+    if (url) URL.revokeObjectURL(url)
+  }), [imageUrls])
+
+  if (!report) return null
+
+  return createPortal(
+    <div className="amteam-report-preview-backdrop" role="presentation" onClick={busy ? undefined : onClose}>
+      <section
+        className="amteam-report-preview-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="amteam-report-preview-title"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span>Report preview</span>
+            <strong id="amteam-report-preview-title">{report.title}</strong>
+          </div>
+          <button type="button" aria-label="Close report preview" disabled={busy} onClick={onClose}>
+            <X size={18} aria-hidden="true" />
+          </button>
+        </header>
+        <div className="amteam-report-preview-scroll">
+          <article className="amteam-report-preview-paper">
+            {report.elements.map((element, index) => {
+              if (element.type === 'image') {
+                const imageUrl = imageUrls[index]
+                return imageUrl ? <img key={`image-${index}`} src={imageUrl} alt="Selected defect or clogging frame" /> : null
+              }
+              const className = [
+                element.heading ? 'heading' : '',
+                element.bold ? 'bold' : '',
+                element.underline ? 'underline' : '',
+                element.alignment === 'center' ? 'center' : '',
+              ].filter(Boolean).join(' ')
+              return (
+                <p
+                  className={className}
+                  key={`paragraph-${index}`}
+                  style={element.fontSize ? { fontSize: `${element.fontSize}pt` } : undefined}
+                >
+                  {element.text || '\u00a0'}
+                </p>
+              )
+            })}
+          </article>
+        </div>
+        <footer>
+          <span>Verify the selected image and callouts for each location before downloading.</span>
+          <div>
+            <Button type="button" variant="outline" disabled={busy} onClick={onClose}>Back to review</Button>
+            <Button type="button" disabled={busy} onClick={onDownload}>
+              <Download size={16} aria-hidden="true" />
+              Download report
+            </Button>
+          </div>
+        </footer>
+      </section>
+    </div>,
+    document.body,
   )
 }
 
@@ -2217,7 +2359,7 @@ function SnapshotImageBox({
   const selectedSource = currentSelectedUrl
     ? visibleSources.find(({ candidates }) => candidates.includes(currentSelectedUrl))
     : undefined
-  const selectedImageUrl = selectedSource?.viewUrl ?? visibleUrls[0]
+  const selectedImageUrl = selectedSource?.viewUrl
   const selectedDisplayName = selectedImageUrl ? snapshotDisplayName(selectedImageUrl) : ''
   const selectedSnapshotIndex = selectedImageUrl ? visibleUrls.indexOf(selectedImageUrl) + 1 : 0
   const snapshotCountLabel = `${selectedSnapshotIndex}/${visibleUrls.length}`
@@ -2265,6 +2407,16 @@ function SnapshotImageBox({
         </button>
       </header>
       <div className="amteam-snapshot-picker-body">
+        {currentSelectedUrl && !readOnly ? (
+          <button
+            type="button"
+            className="amteam-snapshot-frame-option"
+            onClick={() => updateSelectedUrl('')}
+          >
+            <X size={14} aria-hidden="true" />
+            Clear snapshot selection
+          </button>
+        ) : null}
         {currentFrame && !readOnly ? (
           <button
             type="button"
@@ -3146,6 +3298,7 @@ export default function AMTeamInspectionViewer({
   // Set only while a saved report is open; null puts the viewer back on date filtering.
   const [savedPipeOrder, setSavedPipeOrder] = useState<string[] | null>(null)
   const [generatedReviewReport, setGeneratedReviewReport] = useState<ReviewReportFile | null>(null)
+  const [isReportPreviewOpen, setReportPreviewOpen] = useState(false)
   const [reportProgressMessage, setReportProgressMessage] = useState('')
   const [reportRecordRevision, setReportRecordRevision] = useState<string | null>(savedReport?.record_revision ?? null)
   const [collapsedDistanceGroups, setCollapsedDistanceGroups] = useState<Record<string, boolean>>({})
@@ -3193,6 +3346,7 @@ export default function AMTeamInspectionViewer({
 
   function clearGeneratedReviewReport() {
     setGeneratedReviewReport(null)
+    setReportPreviewOpen(false)
   }
 
   function markWorkspaceDirty() {
@@ -3329,30 +3483,21 @@ export default function AMTeamInspectionViewer({
         if (currentGroupSelection.majorKey === cardKey) return currentSelections
 
         const previousMajorKey = currentGroupSelection.majorKey
-        setExtensiveDefectSelections((currentExtensiveSelections) => {
-          if (!previousMajorKey) return currentExtensiveSelections
-          const nextExtensiveSelections = { ...currentExtensiveSelections }
-          delete nextExtensiveSelections[pipeScopedKey(pipeId, previousMajorKey)]
-          return nextExtensiveSelections
+        // Changing the Major keeps the previous Major as an included Other defect.
+        // This preserves the reviewer's callout and avoids silently dropping a defect.
+        setInReportSelections((currentInReport) => {
+          const nextInReport = { ...currentInReport, [scopedCardKey]: true }
+          if (previousMajorKey) nextInReport[pipeScopedKey(pipeId, previousMajorKey)] = true
+          return nextInReport
         })
-        setObservationDefectCallouts((currentCallouts) => {
-          if (currentCallouts[scopedCardKey]?.length) return currentCallouts
-          const seeded = pipeDefectCalloutOptions[0]
-          return {
-            ...currentCallouts,
-            [scopedCardKey]: seeded ? [seeded] : [],
-          }
-        })
-
-        // Rule: a major defect is always in the report. The reverse does not hold, so
-        // the checkbox stays free for every other observation.
-        setInReportSelections((currentInReport) => ({ ...currentInReport, [scopedCardKey]: true }))
+        const nextOtherKeys = currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey)
+        if (previousMajorKey && !nextOtherKeys.includes(previousMajorKey)) nextOtherKeys.push(previousMajorKey)
 
         return {
           ...currentSelections,
           [groupKey]: {
             majorKey: cardKey,
-            otherKeys: currentGroupSelection.otherKeys.filter((otherKey) => otherKey !== cardKey),
+            otherKeys: nextOtherKeys,
             amScore: currentGroupSelection.amScore || DEFAULT_MAJOR_DEFECT_AM_SCORE,
             noHighScoreConfirmed: false,
           },
@@ -3363,14 +3508,9 @@ export default function AMTeamInspectionViewer({
         if (!currentGroupSelection.majorKey || currentGroupSelection.majorKey === cardKey) return currentSelections
         if (currentGroupSelection.otherKeys.includes(cardKey)) return currentSelections
 
-        setObservationDefectCallouts((currentCallouts) => {
-          if (currentCallouts[scopedCardKey]?.length) return currentCallouts
-          const seeded = pipeDefectCalloutOptions[0]
-          return {
-            ...currentCallouts,
-            [scopedCardKey]: seeded ? [seeded] : [],
-          }
-        })
+        // Other defects are included by default; the reviewer can explicitly clear
+        // In Report while retaining the Other classification.
+        setInReportSelections((currentInReport) => ({ ...currentInReport, [scopedCardKey]: true }))
 
         return {
           ...currentSelections,
@@ -3383,6 +3523,12 @@ export default function AMTeamInspectionViewer({
       }
 
       if (currentGroupSelection.majorKey === cardKey) {
+        const clearedKeys = [cardKey, ...currentGroupSelection.otherKeys]
+        setInReportSelections((currentInReport) => {
+          const nextInReport = { ...currentInReport }
+          clearedKeys.forEach((key) => delete nextInReport[pipeScopedKey(pipeId, key)])
+          return nextInReport
+        })
         setExtensiveDefectSelections((currentExtensiveSelections) => {
           const nextExtensiveSelections = { ...currentExtensiveSelections }
           delete nextExtensiveSelections[scopedCardKey]
@@ -3402,6 +3548,11 @@ export default function AMTeamInspectionViewer({
       }
 
       if (currentGroupSelection.otherKeys.includes(cardKey)) {
+        setInReportSelections((currentInReport) => {
+          const nextInReport = { ...currentInReport }
+          delete nextInReport[scopedCardKey]
+          return nextInReport
+        })
         setExtensiveDefectSelections((currentExtensiveSelections) => {
           if (!currentExtensiveSelections[scopedCardKey]) return currentExtensiveSelections
           const nextExtensiveSelections = { ...currentExtensiveSelections }
@@ -3680,23 +3831,36 @@ export default function AMTeamInspectionViewer({
     })
   }
 
-  // A major defect is always published, so its checkbox is fixed rather than toggled.
-  function toggleObservationInReport(cardKey: string) {
+  // A major defect is always published. Checking an unclassified observation makes it
+  // an Other defect so the saved role and report inclusion can never disagree.
+  function toggleObservationInReport(groupKey: string, cardKey: string) {
     if (readOnly) return
+    const currentGroupSelection = observationDefectSelections[groupKey] ?? emptyObservationDefectSelection()
+    const isMajor = currentGroupSelection.majorKey === cardKey
+    if (isMajor) return
+    const pipeId = pipeIdFromScopedKey(groupKey)
+    const scopedCardKey = pipeScopedKey(pipeId, cardKey)
+    const nextIncluded = !inReportSelections[scopedCardKey]
+    if (nextIncluded && !currentGroupSelection.majorKey) {
+      showReviewNotice('Select a Major defect for this location before including Other defects.', 'error')
+      return
+    }
     markWorkspaceDirty()
     clearGeneratedReviewReport()
-    setInReportSelections((currentSelections) => {
-      const nextIncluded = !currentSelections[cardKey]
-      // A published defect prints a Code, so it is seeded the same way a scored one is
-      // rather than reaching the report with nothing to print.
-      if (nextIncluded) {
-        setObservationDefectCallouts((currentCallouts) => {
-          if (currentCallouts[cardKey]?.length) return currentCallouts
-          const seeded = pipeDefectCalloutOptions[0]
-          return { ...currentCallouts, [cardKey]: seeded ? [seeded] : [] }
-        })
+    setInReportSelections((currentSelections) => ({ ...currentSelections, [scopedCardKey]: nextIncluded }))
+    setObservationDefectSelections((currentSelections) => {
+      const selection = currentSelections[groupKey] ?? emptyObservationDefectSelection()
+      const nextOtherKeys = nextIncluded && !selection.otherKeys.includes(cardKey)
+        ? [...selection.otherKeys, cardKey]
+        : selection.otherKeys
+      return {
+        ...currentSelections,
+        [groupKey]: {
+          ...selection,
+          otherKeys: nextOtherKeys,
+          noHighScoreConfirmed: false,
+        },
       }
-      return { ...currentSelections, [cardKey]: nextIncluded }
     })
   }
 
@@ -3811,6 +3975,38 @@ export default function AMTeamInspectionViewer({
       showReviewNotice(
         `Include a defect in the report, or confirm none, for ${missingConfirmationGroups.length.toLocaleString()} distance ${
           missingConfirmationGroups.length === 1 ? 'group' : 'groups'
+        } before ${blockedActionLabel}.`,
+        'error',
+      )
+      return null
+    }
+
+    const invalidReportGroups = groupedObservations.filter((group) => {
+      const scopedGroupKey = pipeScopedKey(selectedPipeId, group.key)
+      const selection = observationDefectSelections[scopedGroupKey] ?? emptyObservationDefectSelection()
+      if (!selection.majorKey) return false
+      const includedKeys = new Set([
+        selection.majorKey,
+        ...group.observations.flatMap((observation, index) => {
+          const cardKey = observationCardKey(observation, index)
+          return inReportSelections[pipeScopedKey(selectedPipeId, cardKey)] ? [cardKey] : []
+        }),
+      ])
+      const includedCalloutsAreComplete = Array.from(includedKeys).every((cardKey) => (
+        (observationDefectCallouts[pipeScopedKey(selectedPipeId, cardKey)] ?? []).some((callout) => callout.trim())
+      ))
+      return !includedCalloutsAreComplete
+    })
+
+    if (invalidReportGroups.length > 0) {
+      setDistanceGroupValidationFailures(Object.fromEntries(invalidReportGroups.map((group) => [pipeScopedKey(selectedPipeId, group.key), true])))
+      setCollapsedDistanceGroups((currentGroups) => ({
+        ...currentGroups,
+        ...Object.fromEntries(invalidReportGroups.map((group) => [pipeScopedKey(selectedPipeId, group.key), false])),
+      }))
+      showReviewNotice(
+        `Complete the reviewer-entered callouts for ${invalidReportGroups.length.toLocaleString()} defect ${
+          invalidReportGroups.length === 1 ? 'location' : 'locations'
         } before ${blockedActionLabel}.`,
         'error',
       )
@@ -3976,8 +4172,7 @@ export default function AMTeamInspectionViewer({
         mediaMode: selectedMediaMode,
       })
       setGeneratedReviewReport(report)
-      setReportProgressMessage('Starting report download.')
-      await saveReviewReportFile(report)
+      setReportPreviewOpen(true)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       showReviewNotice(error instanceof Error ? error.message : 'Unable to generate report.', 'error')
@@ -4013,7 +4208,23 @@ export default function AMTeamInspectionViewer({
         setGeneratedReviewReport(reportFile)
       }
       if (!reportFile) return
-      await saveReviewReportFile(reportFile)
+      setReportPreviewOpen(true)
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return
+      showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.', 'error')
+    } finally {
+      reportSaveInProgressRef.current = false
+      setReportProgressMessage('')
+    }
+  }
+
+  async function downloadPreviewedReviewReport() {
+    if (!generatedReviewReport || reportSaveInProgressRef.current) return
+    reportSaveInProgressRef.current = true
+    setReportProgressMessage('Starting report download.')
+    try {
+      await saveReviewReportFile(generatedReviewReport)
+      setReportPreviewOpen(false)
     } catch (error) {
       if (error instanceof DOMException && error.name === 'AbortError') return
       showReviewNotice(error instanceof Error ? error.message : 'Unable to download export.', 'error')
@@ -4941,7 +5152,7 @@ export default function AMTeamInspectionViewer({
                                       type="checkbox"
                                       checked={isInReport}
                                       disabled={readOnly || isMajorDefect}
-                                      onChange={() => toggleObservationInReport(scopedCardKey)}
+                                      onChange={() => toggleObservationInReport(scopedGroupKey, cardKey)}
                                     />
                                   </label>
                                 </div>
@@ -4989,6 +5200,12 @@ export default function AMTeamInspectionViewer({
         </div>
       ) : null}
       {reportProgressMessage ? <ReportProgressOverlay message={reportProgressMessage} /> : null}
+      <ReviewReportPreviewDialog
+        report={isReportPreviewOpen ? generatedReviewReport : null}
+        busy={Boolean(reportProgressMessage)}
+        onClose={() => setReportPreviewOpen(false)}
+        onDownload={() => { void downloadPreviewedReviewReport() }}
+      />
       <PipeConsequence3D
         open={isConsequence3dOpen && Boolean(selectedInspection)}
         assetId={selectedInspection ? recordId(selectedInspection.ml_name) : ''}

@@ -143,6 +143,7 @@ const REPORT_COLUMNS: Array<{ field: ReportField; label: string; type?: 'status'
   { field: 'created_by_name', label: 'Created By' },
   { field: 'created_at', label: 'Created At', type: 'date' },
   { field: 'updated_by_name', label: 'Updated By' },
+  { field: 'updated_at', label: 'Last Edited', type: 'date' },
   { field: 'submitted_by_name', label: 'Submitted By' },
   { field: 'reviewed_by_name', label: 'Reviewed By' },
 ]
@@ -156,7 +157,7 @@ const DEFAULT_REPORT_COLUMN_WIDTHS: Record<ReportTableColumnKey, number> = {
   created_by_name: 100,
   created_at: 100,
   updated_by_name: 100,
-  updated_at: 100,
+  updated_at: 190,
   submitted_by_name: 100,
   submitted_at: 100,
   reviewed_by_name: 100,
@@ -646,6 +647,13 @@ function ProactiveTeamCCTVReviewContent() {
     )
     return [...visible].sort((left, right) => {
       const direction = sort.direction === 'asc' ? 1 : -1
+      if (sort.field.endsWith('_at')) {
+        const leftTime = Date.parse(String(left[sort.field] ?? ''))
+        const rightTime = Date.parse(String(right[sort.field] ?? ''))
+        if (!Number.isFinite(leftTime)) return Number.isFinite(rightTime) ? 1 : 0
+        if (!Number.isFinite(rightTime)) return -1
+        return (leftTime - rightTime) * direction
+      }
       return compareText(cellText(left, sort.field), cellText(right, sort.field)) * direction
     })
   }, [filters, reports, sort])
@@ -1064,7 +1072,7 @@ function ProactiveTeamCCTVReviewContent() {
               {pagedReports.map((report) => (
                 <tr key={report.id}>
                   {REPORT_COLUMNS.map((column) => (
-                    <td key={column.field}>{cellText(report, column.field)}</td>
+                    <td key={column.field} title={column.type === 'date' ? cellText(report, column.field) : undefined}>{cellText(report, column.field)}</td>
                   ))}
                   <td className="cctv-report-operations-col">{renderActions(report)}</td>
                 </tr>
